@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { MenuItem } from './entities/menu-item.entity.js';
 import { MenuCategory } from './entities/menu-category.entity.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
+import { CreateItemDto, UpdateItemDto } from './dto/create-item.dto.js';
 
 @Injectable()
 export class MenuService {
@@ -95,6 +96,45 @@ export class MenuService {
       throw new NotFoundException(`Menu item '${id}' not found`);
     }
     item.price = price;
+    return this.menuItemRepo.save(item);
+  }
+
+  async createItem(dto: CreateItemDto) {
+    const slug = dto.restaurantSlug || 'pangat';
+    const restaurant = await this.restaurantRepo.findOne({ where: { slug } });
+    if (!restaurant) {
+      throw new NotFoundException(`Restaurant '${slug}' not found`);
+    }
+
+    const item = this.menuItemRepo.create({
+      name: dto.name,
+      description: dto.description || '',
+      price: dto.price,
+      categoryId: dto.categoryId,
+      restaurantId: restaurant.id,
+      isVeg: dto.isVeg ?? true,
+      imageUrl: dto.imageUrl || '🍽️',
+      isAvailable: true,
+      isPopular: false,
+    });
+
+    return this.menuItemRepo.save(item);
+  }
+
+  async updateItem(id: string, dto: UpdateItemDto) {
+    const item = await this.menuItemRepo.findOne({ where: { id } });
+    if (!item) {
+      throw new NotFoundException(`Menu item '${id}' not found`);
+    }
+
+    if (dto.name !== undefined) item.name = dto.name;
+    if (dto.description !== undefined) item.description = dto.description;
+    if (dto.price !== undefined) item.price = dto.price;
+    if (dto.categoryId !== undefined) item.categoryId = dto.categoryId;
+    if (dto.isVeg !== undefined) item.isVeg = dto.isVeg;
+    if (dto.imageUrl !== undefined) item.imageUrl = dto.imageUrl;
+    if (dto.isAvailable !== undefined) item.isAvailable = dto.isAvailable;
+
     return this.menuItemRepo.save(item);
   }
 }

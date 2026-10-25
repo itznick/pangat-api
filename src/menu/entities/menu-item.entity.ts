@@ -15,6 +15,7 @@ import {
 import { Restaurant } from '../../restaurants/entities/restaurant.entity.js';
 import { MenuCategory } from './menu-category.entity.js';
 import { Modifier } from './modifier.entity.js';
+import { decimalTransformer } from '../../common/transformers/decimal.transformer.js';
 
 @Entity('menu_items')
 export class MenuItem {
@@ -42,7 +43,7 @@ export class MenuItem {
   description: string | null;
 
   /** Base price in INR (stored as integer paise would be ideal, but keeping ₹ float for parity with frontend) */
-  @Column({ type: 'decimal', precision: 10, scale: 2 })
+  @Column({ type: 'decimal', precision: 10, scale: 2, transformer: decimalTransformer })
   price: number;
 
   @Column({ name: 'is_veg', default: true })

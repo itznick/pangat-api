@@ -13,6 +13,7 @@ import {
 import { Table } from '../../tables/entities/table.entity.js';
 import { MenuItem } from '../../menu/entities/menu-item.entity.js';
 import { Order } from '../../orders/entities/order.entity.js';
+import { decimalTransformer } from '../../common/transformers/decimal.transformer.js';
 
 @Entity('restaurants')
 export class Restaurant {
@@ -38,7 +39,7 @@ export class Restaurant {
   hsnSac: string;
 
   /** GST % applied at checkout — typically 5 for F&B */
-  @Column({ name: 'gst_percentage', type: 'decimal', precision: 5, scale: 2, default: 5 })
+  @Column({ name: 'gst_percentage', type: 'decimal', precision: 5, scale: 2, default: 5, transformer: decimalTransformer })
   gstPercentage: number;
 
   @Column({ name: 'is_veg_only', default: false })

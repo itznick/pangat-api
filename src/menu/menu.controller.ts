@@ -1,7 +1,8 @@
-import { Controller, Get, Patch, Param, Body, Query } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Param, Body, Query } from '@nestjs/common';
 import { MenuService } from './menu.service.js';
 import { UpdateAvailabilityDto } from './dto/update-availability.dto.js';
 import { UpdatePriceDto } from './dto/update-price.dto.js';
+import { CreateItemDto, UpdateItemDto } from './dto/create-item.dto.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
 
 @Controller('menu')
@@ -39,5 +40,20 @@ export class MenuController {
   ) {
     const updated = await this.menuService.updatePrice(id, dto.price);
     return withMessage(updated, `Item price updated to ₹${dto.price}`);
+  }
+
+  @Post('items')
+  async createItem(@Body() dto: CreateItemDto) {
+    const item = await this.menuService.createItem(dto);
+    return withMessage(item, 'Menu dish created successfully');
+  }
+
+  @Patch('items/:id')
+  async updateItem(
+    @Param('id') id: string,
+    @Body() dto: UpdateItemDto,
+  ) {
+    const updated = await this.menuService.updateItem(id, dto);
+    return withMessage(updated, 'Menu item updated successfully');
   }
 }

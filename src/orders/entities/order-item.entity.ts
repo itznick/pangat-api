@@ -12,6 +12,7 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 import { Order } from './order.entity.js';
+import { decimalTransformer } from '../../common/transformers/decimal.transformer.js';
 
 export interface SelectedModifierSnapshot {
   name: string;
@@ -39,7 +40,7 @@ export class OrderItem {
   name: string;
 
   /** Base price snapshot */
-  @Column({ type: 'decimal', precision: 10, scale: 2 })
+  @Column({ type: 'decimal', precision: 10, scale: 2, transformer: decimalTransformer })
   price: number;
 
   @Column({ type: 'int', default: 1 })

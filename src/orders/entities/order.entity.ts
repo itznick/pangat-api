@@ -19,6 +19,7 @@ import {
 } from '../../common/enums/index.js';
 import { Restaurant } from '../../restaurants/entities/restaurant.entity.js';
 import { OrderItem } from './order-item.entity.js';
+import { decimalTransformer } from '../../common/transformers/decimal.transformer.js';
 
 @Entity('orders')
 export class Order {
@@ -64,13 +65,13 @@ export class Order {
   @Column({ name: 'customer_phone', type: 'varchar', length: 15, nullable: true })
   customerPhone: string | null;
 
-  @Column({ name: 'subtotal', type: 'decimal', precision: 10, scale: 2 })
+  @Column({ name: 'subtotal', type: 'decimal', precision: 10, scale: 2, transformer: decimalTransformer })
   subtotal: number;
 
-  @Column({ name: 'gst_amount', type: 'decimal', precision: 10, scale: 2 })
+  @Column({ name: 'gst_amount', type: 'decimal', precision: 10, scale: 2, transformer: decimalTransformer })
   gstAmount: number;
 
-  @Column({ name: 'total_amount', type: 'decimal', precision: 10, scale: 2 })
+  @Column({ name: 'total_amount', type: 'decimal', precision: 10, scale: 2, transformer: decimalTransformer })
   totalAmount: number;
 
   /** Customer idempotency key stored to deduplicate on replay */

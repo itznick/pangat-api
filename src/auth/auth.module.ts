@@ -4,13 +4,25 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { Staff } from './entities/staff.entity.js';
+import { Organization } from '../organizations/entities/organization.entity.js';
+import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
+import { Table } from '../tables/entities/table.entity.js';
+import { MenuCategory } from '../menu/entities/menu-category.entity.js';
+import { MenuItem } from '../menu/entities/menu-item.entity.js';
 import { AuthService } from './auth.service.js';
-import { AuthController } from './auth.controller.js';
+import { AuthController, OnboardingController } from './auth.controller.js';
 import { JwtStrategy } from './jwt.strategy.js';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Staff]),
+    TypeOrmModule.forFeature([
+      Staff,
+      Organization,
+      Restaurant,
+      Table,
+      MenuCategory,
+      MenuItem,
+    ]),
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -23,7 +35,7 @@ import { JwtStrategy } from './jwt.strategy.js';
       }),
     }),
   ],
-  controllers: [AuthController],
+  controllers: [AuthController, OnboardingController],
   providers: [AuthService, JwtStrategy],
   exports: [AuthService, JwtStrategy, PassportModule],
 })

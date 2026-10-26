@@ -32,3 +32,18 @@ export enum ModifierType {
   SINGLE   = 'SINGLE',
   MULTIPLE = 'MULTIPLE',
 }
+
+export enum StaffRole {
+  PLATFORM_SUPER_ADMIN = 'PLATFORM_SUPER_ADMIN',
+  SUPER_OWNER          = 'SUPER_OWNER',
+  STORE_MANAGER        = 'STORE_MANAGER',
+  CHEF                 = 'CHEF',
+  STEWARD              = 'STEWARD',
+}
+
+export enum LeadStatus {
+  NEW        = 'NEW',
+  CONTACTED  = 'CONTACTED',
+  SCHEDULED  = 'SCHEDULED',
+  ONBOARDED  = 'ONBOARDED',
+}

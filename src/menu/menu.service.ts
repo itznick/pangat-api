@@ -1,10 +1,13 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MenuItem } from './entities/menu-item.entity.js';
 import { MenuCategory } from './entities/menu-category.entity.js';
+import { Modifier } from './entities/modifier.entity.js';
+import { ModifierType } from '../common/enums/index.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
 import { CreateItemDto, UpdateItemDto } from './dto/create-item.dto.js';
+import { CreateCategoryDto } from './dto/create-category.dto.js';
 
 @Injectable()
 export class MenuService {
@@ -13,6 +16,8 @@ export class MenuService {
     private readonly menuItemRepo: Repository<MenuItem>,
     @InjectRepository(MenuCategory)
     private readonly categoryRepo: Repository<MenuCategory>,
+    @InjectRepository(Modifier)
+    private readonly modifierRepo: Repository<Modifier>,
     @InjectRepository(Restaurant)
     private readonly restaurantRepo: Repository<Restaurant>,
   ) {}
@@ -99,11 +104,45 @@ export class MenuService {
     return this.menuItemRepo.save(item);
   }
 
-  async createItem(dto: CreateItemDto) {
-    const slug = dto.restaurantSlug || 'pangat';
-    const restaurant = await this.restaurantRepo.findOne({ where: { slug } });
+  async createCategory(dto: CreateCategoryDto) {
+    let restaurant: Restaurant | null = null;
+    if (dto.restaurantId) {
+      restaurant = await this.restaurantRepo.findOne({ where: { id: dto.restaurantId } });
+    } else if (dto.restaurantSlug) {
+      restaurant = await this.restaurantRepo.findOne({ where: { slug: dto.restaurantSlug } });
+    }
+
     if (!restaurant) {
-      throw new NotFoundException(`Restaurant '${slug}' not found`);
+      throw new NotFoundException('Restaurant not found for category');
+    }
+
+    const category = this.categoryRepo.create({
+      name: dto.name.trim(),
+      restaurantId: restaurant.id,
+      sortOrder: dto.sortOrder ?? 0,
+    });
+
+    return this.categoryRepo.save(category);
+  }
+
+  async removeCategory(id: string) {
+    const category = await this.categoryRepo.findOne({ where: { id } });
+    if (!category) {
+      throw new NotFoundException(`Category '${id}' not found`);
+    }
+    await this.categoryRepo.remove(category);
+  }
+
+  async createItem(dto: CreateItemDto) {
+    let restaurant: Restaurant | null = null;
+    if (dto.restaurantId) {
+      restaurant = await this.restaurantRepo.findOne({ where: { id: dto.restaurantId } });
+    } else if (dto.restaurantSlug) {
+      restaurant = await this.restaurantRepo.findOne({ where: { slug: dto.restaurantSlug } });
+    }
+
+    if (!restaurant) {
+      throw new NotFoundException('Restaurant not found for menu item');
     }
 
     const item = this.menuItemRepo.create({
@@ -118,7 +157,25 @@ export class MenuService {
       isPopular: false,
     });
 
-    return this.menuItemRepo.save(item);
+    const savedItem = await this.menuItemRepo.save(item);
+
+    if (Array.isArray(dto.modifiers) && dto.modifiers.length > 0) {
+      const modifierEntities = dto.modifiers.map((m) =>
+        this.modifierRepo.create({
+          menuItemId: savedItem.id,
+          name: m.name,
+          type: m.type || ModifierType.SINGLE,
+          isRequired: Boolean(m.isRequired),
+          options: m.options || [],
+        }),
+      );
+      await this.modifierRepo.save(modifierEntities);
+    }
+
+    return this.menuItemRepo.findOne({
+      where: { id: savedItem.id },
+      relations: { modifiers: true },
+    });
   }
 
   async updateItem(id: string, dto: UpdateItemDto) {
@@ -135,6 +192,28 @@ export class MenuService {
     if (dto.imageUrl !== undefined) item.imageUrl = dto.imageUrl;
     if (dto.isAvailable !== undefined) item.isAvailable = dto.isAvailable;
 
-    return this.menuItemRepo.save(item);
+    await this.menuItemRepo.save(item);
+
+    if (Array.isArray(dto.modifiers)) {
+      // Replace existing modifiers
+      await this.modifierRepo.delete({ menuItemId: id });
+      if (dto.modifiers.length > 0) {
+        const modifierEntities = dto.modifiers.map((m) =>
+          this.modifierRepo.create({
+            menuItemId: id,
+            name: m.name,
+            type: m.type || ModifierType.SINGLE,
+            isRequired: Boolean(m.isRequired),
+            options: m.options || [],
+          }),
+        );
+        await this.modifierRepo.save(modifierEntities);
+      }
+    }
+
+    return this.menuItemRepo.findOne({
+      where: { id },
+      relations: { modifiers: true },
+    });
   }
 }

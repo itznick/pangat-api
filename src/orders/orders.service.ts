@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, Not } from 'typeorm';
 import { Order } from './entities/order.entity.js';
 import { OrderItem } from './entities/order-item.entity.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
@@ -24,8 +24,9 @@ export class OrdersService {
   ) {}
 
   async create(dto: CreateOrderDto, idempotencyKey: string): Promise<Order> {
+    const cleanSlug = dto.restaurantSlug.trim().toLowerCase();
     const restaurant = await this.restaurantRepo.findOne({
-      where: { slug: dto.restaurantSlug },
+      where: [{ slug: cleanSlug }, { slug: dto.restaurantSlug.trim() }],
     });
 
     if (!restaurant) {
@@ -36,13 +37,56 @@ export class OrdersService {
       throw new BadRequestException('Order must contain at least one item');
     }
 
-    // Find table
-    const table = await this.tableRepo.findOne({
+    // Robust table lookup supporting 'T01', '01', '1', etc.
+    const rawTable = dto.tableNumber.trim().toUpperCase();
+    const numOnly = rawTable.replace(/\D/g, '');
+    const padded = numOnly ? `T${numOnly.padStart(2, '0')}` : rawTable;
+
+    let table = await this.tableRepo.findOne({
       where: {
         restaurantId: restaurant.id,
-        tableNumber: dto.tableNumber,
+        tableNumber: rawTable,
       },
     });
+
+    if (!table && padded !== rawTable) {
+      table = await this.tableRepo.findOne({
+        where: {
+          restaurantId: restaurant.id,
+          tableNumber: padded,
+        },
+      });
+    }
+
+    if (!table && numOnly) {
+      table = await this.tableRepo.findOne({
+        where: {
+          restaurantId: restaurant.id,
+          tableNumber: numOnly,
+        },
+      });
+    }
+
+    if (!table) {
+      const allTables = await this.tableRepo.find({ where: { restaurantId: restaurant.id } });
+      table = allTables.find((t) => {
+        const sA = t.tableNumber.trim().toUpperCase();
+        const sB = rawTable;
+        if (sA === sB) return true;
+        const nA = sA.replace(/\D/g, '');
+        const nB = sB.replace(/\D/g, '');
+        if (nA && nB && Number(nA) === Number(nB)) {
+          const pA = sA.replace(/\d/g, '');
+          const pB = sB.replace(/\d/g, '');
+          const normA = (!pA || pA === 'T') ? 'T' : pA;
+          const normB = (!pB || pB === 'T') ? 'T' : pB;
+          return normA === normB;
+        }
+        return false;
+      }) || null;
+    }
+
+    const finalTableNumber = table ? table.tableNumber : rawTable;
 
     // Compute bill values
     let subtotal = 0;
@@ -79,7 +123,7 @@ export class OrdersService {
     const order = this.orderRepo.create({
       id: orderId,
       restaurantId: restaurant.id,
-      tableNumber: dto.tableNumber,
+      tableNumber: finalTableNumber,
       orderStatus: OrderStatus.RECEIVED,
       paymentStatus,
       paymentMethod: dto.paymentMethod || PaymentMethod.UPI_INSTANT,
@@ -93,15 +137,17 @@ export class OrdersService {
 
     const savedOrder = await this.orderRepo.save(order);
 
-    // Update table status to PREPPING if currently VACANT or OCCUPIED
-    if (table && table.status !== TableStatus.PREPPING) {
+    // Update table status to PREPPING if found
+    if (table) {
       table.status = TableStatus.PREPPING;
       await this.tableRepo.save(table);
+      this.eventsGateway.emitTableStatus(restaurant.slug, table);
     }
 
-    // Emit live KOT event to KDS
+    // Emit live KOT event to KDS & Admin rooms
     this.eventsGateway.emitNewOrder(restaurant.slug, {
       ...savedOrder,
+      tableNumber: finalTableNumber,
       restaurant: { slug: restaurant.slug, name: restaurant.name },
     });
 
@@ -109,15 +155,16 @@ export class OrdersService {
   }
 
   async findAll(restaurantSlug?: string): Promise<Order[]> {
+    if (!restaurantSlug) {
+      return [];
+    }
+
     const query = this.orderRepo
       .createQueryBuilder('order')
       .leftJoinAndSelect('order.items', 'items')
       .leftJoinAndSelect('order.restaurant', 'restaurant')
+      .where('restaurant.slug = :restaurantSlug', { restaurantSlug })
       .orderBy('order.createdAt', 'DESC');
-
-    if (restaurantSlug) {
-      query.where('restaurant.slug = :restaurantSlug', { restaurantSlug });
-    }
 
     return query.getMany();
   }
@@ -137,36 +184,96 @@ export class OrdersService {
 
   async updateStatus(id: string, status: OrderStatus): Promise<Order> {
     const order = await this.findOne(id);
-    order.orderStatus = status;
+    let restaurantSlug: string | undefined = order.restaurant?.slug;
+    if (!restaurantSlug && order.restaurantId) {
+      const rest = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });
+      restaurantSlug = rest?.slug;
+    }
 
+    order.orderStatus = status;
     const saved = await this.orderRepo.save(order);
 
-    // If order is completed, check if table can be marked SERVED
-    if (status === OrderStatus.COMPLETED) {
-      const table = await this.tableRepo.findOne({
-        where: {
-          restaurantId: order.restaurantId,
-          tableNumber: order.tableNumber,
-        },
-      });
-      if (table && table.status === TableStatus.PREPPING) {
-        table.status = TableStatus.SERVED;
-        await this.tableRepo.save(table);
+    // Synchronize table status according to the full live orders state
+    const table = await this.tableRepo.findOne({
+      where: {
+        restaurantId: order.restaurantId,
+        tableNumber: order.tableNumber,
+      },
+    });
+
+    if (table) {
+      if (status === OrderStatus.COMPLETED) {
+        // Check if there are other uncompleted orders for this table
+        const remainingOpen = await this.orderRepo.findOne({
+          where: {
+            restaurantId: order.restaurantId,
+            tableNumber: order.tableNumber,
+            orderStatus: Not(OrderStatus.COMPLETED),
+          },
+        });
+        if (!remainingOpen) {
+          table.status = TableStatus.VACANT;
+        } else if (remainingOpen.orderStatus === OrderStatus.READY) {
+          table.status = remainingOpen.paymentStatus === PaymentStatus.PAID ? TableStatus.SERVED : TableStatus.OCCUPIED;
+        } else {
+          table.status = TableStatus.PREPPING;
+        }
+      } else if (status === OrderStatus.READY) {
+        table.status = order.paymentStatus === PaymentStatus.PAID ? TableStatus.SERVED : TableStatus.OCCUPIED;
+      } else if (status === OrderStatus.PREPARING || status === OrderStatus.RECEIVED) {
+        table.status = TableStatus.PREPPING;
+      }
+      await this.tableRepo.save(table);
+      if (restaurantSlug) {
+        this.eventsGateway.emitTableStatus(restaurantSlug, table);
       }
     }
 
-    // Notify diner live tracking screen & KDS
-    this.eventsGateway.emitOrderStatus(id, status, saved);
+    // Notify diner live tracking screen, KDS & Admin rooms
+    this.eventsGateway.emitOrderStatus(id, status, { ...saved, restaurant: { slug: restaurantSlug } }, restaurantSlug);
 
     return saved;
   }
 
   async markPaid(id: string): Promise<Order> {
     const order = await this.findOne(id);
-    order.paymentStatus = PaymentStatus.PAID;
+    let restaurantSlug: string | undefined = order.restaurant?.slug;
+    if (!restaurantSlug && order.restaurantId) {
+      const rest = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });
+      restaurantSlug = rest?.slug;
+    }
 
+    order.paymentStatus = PaymentStatus.PAID;
     const saved = await this.orderRepo.save(order);
-    this.eventsGateway.emitOrderPaid(id, saved);
+
+    // If order is paid and ready or completed, update table accordingly
+    const table = await this.tableRepo.findOne({
+      where: {
+        restaurantId: order.restaurantId,
+        tableNumber: order.tableNumber,
+      },
+    });
+
+    if (table) {
+      if (order.orderStatus === OrderStatus.COMPLETED) {
+        const remainingOpen = await this.orderRepo.findOne({
+          where: {
+            restaurantId: order.restaurantId,
+            tableNumber: order.tableNumber,
+            orderStatus: Not(OrderStatus.COMPLETED),
+          },
+        });
+        table.status = remainingOpen ? TableStatus.SERVED : TableStatus.VACANT;
+      } else if (order.orderStatus === OrderStatus.READY) {
+        table.status = TableStatus.SERVED;
+      }
+      await this.tableRepo.save(table);
+      if (restaurantSlug) {
+        this.eventsGateway.emitTableStatus(restaurantSlug, table);
+      }
+    }
+
+    this.eventsGateway.emitOrderPaid(id, { ...saved, restaurant: { slug: restaurantSlug } }, restaurantSlug);
 
     return saved;
   }

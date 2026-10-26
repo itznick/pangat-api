@@ -26,6 +26,13 @@ export class CreateItemDto {
   @IsOptional()
   @IsString()
   restaurantSlug?: string;
+
+  @IsOptional()
+  @IsString()
+  restaurantId?: string;
+
+  @IsOptional()
+  modifiers?: any[];
 }
 
 export class UpdateItemDto {
@@ -57,4 +64,7 @@ export class UpdateItemDto {
   @IsOptional()
   @IsBoolean()
   isAvailable?: boolean;
+
+  @IsOptional()
+  modifiers?: any[];
 }

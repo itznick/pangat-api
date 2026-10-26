@@ -1,6 +1,15 @@
-import { Controller, Get, Patch, Param, Body, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Param,
+  Body,
+  UseGuards,
+} from '@nestjs/common';
 import { RestaurantsService } from './restaurants.service.js';
 import { UpdateSettingsDto } from './dto/update-settings.dto.js';
+import { CreateStaffDto } from './dto/create-staff.dto.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
 
@@ -22,5 +31,15 @@ export class RestaurantsController {
   ) {
     const updated = await this.restaurantsService.updateSettings(slug, dto);
     return withMessage(updated, 'Restaurant settings updated successfully');
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post(':id/staff')
+  async createStaff(
+    @Param('id') id: string,
+    @Body() dto: CreateStaffDto,
+  ) {
+    const staff = await this.restaurantsService.createStaff(id, dto);
+    return withMessage(staff, 'Staff member added to outlet successfully');
   }
 }

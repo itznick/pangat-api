@@ -10,6 +10,8 @@ export interface JwtPayload {
   sub: string;
   email: string;
   role: string;
+  isPlatformAdmin?: boolean;
+  organizationId: string | null;
   restaurantId: string | null;
 }
 
@@ -37,6 +39,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       name: staff.name,
       email: staff.email,
       role: staff.role,
+      isPlatformAdmin: Boolean(staff.isPlatformAdmin || staff.role === 'PLATFORM_SUPER_ADMIN'),
+      organizationId: staff.organizationId,
       restaurantId: staff.restaurantId,
     };
   }

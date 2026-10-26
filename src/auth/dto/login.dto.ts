@@ -1,11 +1,21 @@
-import { IsEmail, IsNotEmpty, IsString, MinLength } from 'class-validator';
+import { IsEmail, IsOptional, IsString, MinLength } from 'class-validator';
 
 export class LoginDto {
   @IsEmail({}, { message: 'Please provide a valid email address' })
-  email: string;
+  @IsOptional()
+  email?: string;
 
   @IsString()
-  @IsNotEmpty()
-  @MinLength(6, { message: 'Password must be at least 6 characters' })
-  password: string;
+  @IsOptional()
+  @MinLength(4, { message: 'Password must be at least 4 characters' })
+  password?: string;
+
+  /** Optional 4-digit PIN for rapid station/chef logins */
+  @IsString()
+  @IsOptional()
+  pinCode?: string;
+
+  @IsString()
+  @IsOptional()
+  restaurantSlug?: string;
 }

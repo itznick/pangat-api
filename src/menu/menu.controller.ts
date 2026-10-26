@@ -1,8 +1,9 @@
-import { Controller, Get, Post, Patch, Param, Body, Query } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Param, Body, Query } from '@nestjs/common';
 import { MenuService } from './menu.service.js';
 import { UpdateAvailabilityDto } from './dto/update-availability.dto.js';
 import { UpdatePriceDto } from './dto/update-price.dto.js';
 import { CreateItemDto, UpdateItemDto } from './dto/create-item.dto.js';
+import { CreateCategoryDto } from './dto/create-category.dto.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
 
 @Controller('menu')
@@ -29,7 +30,7 @@ export class MenuController {
     const updated = await this.menuService.updateAvailability(id, dto.isAvailable);
     return withMessage(
       updated,
-      `Item marked as ${dto.isAvailable ? 'available' : 'sold out (86)'}`,
+      `Item marked as ${dto.isAvailable ? 'available' : 'sold out (out of stock)'}`,
     );
   }
 
@@ -55,5 +56,17 @@ export class MenuController {
   ) {
     const updated = await this.menuService.updateItem(id, dto);
     return withMessage(updated, 'Menu item updated successfully');
+  }
+
+  @Post('categories')
+  async createCategory(@Body() dto: CreateCategoryDto) {
+    const created = await this.menuService.createCategory(dto);
+    return withMessage(created, `Category '${created.name}' created successfully`);
+  }
+
+  @Delete('categories/:id')
+  async removeCategory(@Param('id') id: string) {
+    await this.menuService.removeCategory(id);
+    return withMessage({ id }, 'Category deleted successfully');
   }
 }

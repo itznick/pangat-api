@@ -1,20 +1,22 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // src/auth/entities/staff.entity.ts
-// Admin / owner login credentials
+// Multi-tenant staff & RBAC user entity
 // ─────────────────────────────────────────────────────────────────────────────
 
 import {
   Column,
   CreateDateColumn,
   Entity,
+  JoinColumn,
+  ManyToOne,
   PrimaryGeneratedColumn,
+  UpdateDateColumn,
 } from 'typeorm';
+import { StaffRole } from '../../common/enums/index.js';
+import { Organization } from '../../organizations/entities/organization.entity.js';
+import { Restaurant } from '../../restaurants/entities/restaurant.entity.js';
 
-export enum StaffRole {
-  OWNER   = 'OWNER',
-  MANAGER = 'MANAGER',
-  CHEF    = 'CHEF',
-}
+export { StaffRole };
 
 @Entity('staff')
 export class Staff {
@@ -30,12 +32,42 @@ export class Staff {
   @Column({ name: 'password_hash', length: 255 })
   passwordHash: string;
 
-  @Column({ type: 'enum', enum: StaffRole, default: StaffRole.OWNER })
+  @Column({
+    type: 'varchar',
+    length: 30,
+    default: StaffRole.SUPER_OWNER,
+  })
   role: StaffRole;
 
-  @Column({ name: 'restaurant_id', type: 'varchar', length: 50, nullable: true })
+  @Column({ name: 'is_platform_admin', type: 'boolean', default: false })
+  isPlatformAdmin: boolean;
+
+  /** Multi-tenant Organization context */
+  @Column({ name: 'organization_id', type: 'uuid', nullable: true })
+  organizationId: string | null;
+
+  @ManyToOne(() => Organization, (org) => org.staff, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'organization_id' })
+  organization: Organization;
+
+  /** Assigned outlet (null for Super Owners who manage all outlets) */
+  @Column({ name: 'restaurant_id', type: 'uuid', nullable: true })
   restaurantId: string | null;
+
+  @ManyToOne(() => Restaurant, { onDelete: 'SET NULL', nullable: true })
+  @JoinColumn({ name: 'restaurant_id' })
+  restaurant: Restaurant;
+
+  /** Optional 4-digit PIN for rapid tablet / station logins (e.g. kitchen chef) */
+  @Column({ name: 'pin_code', type: 'varchar', length: 10, nullable: true })
+  pinCode: string | null;
+
+  @Column({ name: 'phone', type: 'varchar', length: 30, nullable: true })
+  phone: string | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
+
+  @UpdateDateColumn({ name: 'updated_at' })
+  updatedAt: Date;
 }

@@ -6,12 +6,14 @@ import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AuthModule } from './auth/auth.module.js';
+import { OrganizationsModule } from './organizations/organizations.module.js';
 import { RestaurantsModule } from './restaurants/restaurants.module.js';
 import { TablesModule } from './tables/tables.module.js';
 import { MenuModule } from './menu/menu.module.js';
 import { OrdersModule } from './orders/orders.module.js';
 import { EventsModule } from './events/events.module.js';
-import { SeedModule } from './database/seed.module.js';
+import { LeadsModule } from './leads/leads.module.js';
+import { AdminModule } from './admin/admin.module.js';
 
 @Module({
   imports: [
@@ -67,12 +69,14 @@ import { SeedModule } from './database/seed.module.js';
 
     // Application domain modules
     AuthModule,
+    OrganizationsModule,
     RestaurantsModule,
     TablesModule,
     MenuModule,
     OrdersModule,
     EventsModule,
-    SeedModule,
+    LeadsModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [

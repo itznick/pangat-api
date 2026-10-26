@@ -6,6 +6,8 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  JoinColumn,
+  ManyToOne,
   OneToMany,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
@@ -13,6 +15,7 @@ import {
 import { Table } from '../../tables/entities/table.entity.js';
 import { MenuItem } from '../../menu/entities/menu-item.entity.js';
 import { Order } from '../../orders/entities/order.entity.js';
+import { Organization } from '../../organizations/entities/organization.entity.js';
 import { decimalTransformer } from '../../common/transformers/decimal.transformer.js';
 
 @Entity('restaurants')
@@ -20,11 +23,34 @@ export class Restaurant {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  /** Multi-tenant Organization parent foreign key */
+  @Column({ name: 'organization_id', type: 'uuid', nullable: true })
+  organizationId: string | null;
+
+  @ManyToOne(() => Organization, (org) => org.restaurants, { onDelete: 'SET NULL', nullable: true })
+  @JoinColumn({ name: 'organization_id' })
+  organization: Organization;
+
   @Column({ length: 120 })
   name: string;
 
   @Column({ length: 80, unique: true })
   slug: string;
+
+  /** Physical branch locality, e.g. "Hinjawadi Phase 1" */
+  @Column({ name: 'branch_area', type: 'varchar', length: 140, nullable: true })
+  branchArea: string | null;
+
+  /** Contact phone for the outlet */
+  @Column({ name: 'phone', type: 'varchar', length: 30, nullable: true })
+  phone: string | null;
+
+  /** Contact email for the outlet */
+  @Column({ name: 'email', type: 'varchar', length: 180, nullable: true })
+  email: string | null;
+
+  @Column({ name: 'is_active', default: true })
+  isActive: boolean;
 
   /** UPI Virtual Payment Address */
   @Column({ name: 'upi_vpa', length: 80 })

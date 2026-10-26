@@ -17,6 +17,7 @@ export class SelectedModifierDto {
   @IsNotEmpty()
   name: string;
 
+  @Type(() => Number)
   @IsNumber()
   @Min(0)
   price: number;
@@ -31,10 +32,12 @@ export class CreateOrderItemDto {
   @IsNotEmpty()
   name: string;
 
+  @Type(() => Number)
   @IsNumber()
   @Min(0)
   price: number;
 
+  @Type(() => Number)
   @IsInt()
   @Min(1)
   quantity: number;

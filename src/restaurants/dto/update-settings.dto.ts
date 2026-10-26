@@ -11,6 +11,14 @@ export class UpdateSettingsDto {
 
   @IsOptional()
   @IsString()
+  phone?: string;
+
+  @IsOptional()
+  @IsString()
+  email?: string;
+
+  @IsOptional()
+  @IsString()
   gstin?: string;
 
   @IsOptional()

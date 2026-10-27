@@ -49,41 +49,6 @@ export class RestaurantsService {
       .take(50)
       .getMany();
 
-    const initialReviews = [
-      {
-        id: 'fb-seed-1',
-        tableNumber: '04',
-        rating: 5,
-        tags: ['Piping Hot', 'Fast Service'],
-        comment: 'Piping hot misal and poha served in under 4 minutes! UPI QR payment was completely seamless.',
-        createdAt: new Date(Date.now() - 25 * 60 * 1000).toISOString(),
-      },
-      {
-        id: 'fb-seed-2',
-        tableNumber: '02',
-        rating: 5,
-        tags: ['Authentic Taste', 'Great Ambience'],
-        comment: 'Authentic Maharashtrian taste. Loved the warm chai and clean table setup.',
-        createdAt: new Date(Date.now() - 75 * 60 * 1000).toISOString(),
-      },
-      {
-        id: 'fb-seed-3',
-        tableNumber: '08',
-        rating: 4,
-        tags: ['Fast Service', 'Polite Staff'],
-        comment: 'Quick and hygienic. Order tracking on mobile worked accurately.',
-        createdAt: new Date(Date.now() - 180 * 60 * 1000).toISOString(),
-      },
-      {
-        id: 'fb-seed-4',
-        tableNumber: '01',
-        rating: 5,
-        tags: ['Piping Hot', 'Authentic Taste'],
-        comment: 'Sabudana vada was crunchy and delicious.',
-        createdAt: new Date(Date.now() - 320 * 60 * 1000).toISOString(),
-      },
-    ];
-
     const actualReviews = ordersWithFeedback
       .filter((o) => o.feedback && o.feedback.rating)
       .map((o) => ({
@@ -96,19 +61,11 @@ export class RestaurantsService {
         createdAt: o.feedback?.submittedAt || o.createdAt,
       }));
 
-    const allReviews = [...actualReviews, ...initialReviews];
-
     const ratingBreakdown: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-    const tagCounts: Record<string, number> = {
-      'Piping Hot': 14,
-      'Fast Service': 22,
-      'Authentic Taste': 18,
-      'Great Ambience': 9,
-      'Polite Staff': 11,
-    };
+    const tagCounts: Record<string, number> = {};
 
     let totalRatingSum = 0;
-    for (const r of allReviews) {
+    for (const r of actualReviews) {
       const star = Math.min(5, Math.max(1, Math.round(r.rating)));
       ratingBreakdown[star] = (ratingBreakdown[star] || 0) + 1;
       totalRatingSum += r.rating;
@@ -120,8 +77,8 @@ export class RestaurantsService {
       }
     }
 
-    const totalCount = allReviews.length;
-    const averageRating = totalCount > 0 ? Number((totalRatingSum / totalCount).toFixed(1)) : 4.8;
+    const totalCount = actualReviews.length;
+    const averageRating = totalCount > 0 ? Number((totalRatingSum / totalCount).toFixed(1)) : 0;
 
     return {
       restaurantSlug: restaurant.slug,
@@ -130,7 +87,7 @@ export class RestaurantsService {
       totalCount,
       ratingBreakdown,
       tagCounts,
-      recentReviews: allReviews.slice(0, 25),
+      recentReviews: actualReviews.slice(0, 50),
     };
   }
 

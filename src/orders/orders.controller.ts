@@ -30,8 +30,23 @@ export class OrdersController {
   }
 
   @Get()
-  async findAll(@Query('restaurantSlug') restaurantSlug?: string) {
-    const orders = await this.ordersService.findAll(restaurantSlug);
+  async findAll(
+    @Query('restaurantSlug') restaurantSlug?: string,
+    @Query('status') status?: string,
+    @Query('paymentStatus') paymentStatus?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const orders = await this.ordersService.findAll(restaurantSlug, {
+      status,
+      paymentStatus,
+      startDate,
+      endDate,
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+    });
     return withMessage(orders, 'Orders retrieved successfully');
   }
 
@@ -39,6 +54,15 @@ export class OrdersController {
   async findOne(@Param('id') id: string) {
     const order = await this.ordersService.findOne(id);
     return withMessage(order, 'Order retrieved successfully');
+  }
+
+  @Post(':id/feedback')
+  async submitFeedback(
+    @Param('id') id: string,
+    @Body() dto: { rating: number; tags?: string[]; comment?: string },
+  ) {
+    const updated = await this.ordersService.submitFeedback(id, dto);
+    return withMessage(updated, 'Customer feedback recorded successfully');
   }
 
   @Patch(':id/status')

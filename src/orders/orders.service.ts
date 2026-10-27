@@ -154,17 +154,75 @@ export class OrdersService {
     return savedOrder;
   }
 
-  async findAll(restaurantSlug?: string): Promise<Order[]> {
+  async findAll(
+    restaurantSlug?: string,
+    filters?: {
+      status?: string;
+      paymentStatus?: string;
+      startDate?: string;
+      endDate?: string;
+      page?: number;
+      limit?: number;
+    },
+  ): Promise<Order[]> {
     if (!restaurantSlug) {
       return [];
     }
 
+    const cleanSlug = restaurantSlug.trim().toLowerCase();
     const query = this.orderRepo
       .createQueryBuilder('order')
       .leftJoinAndSelect('order.items', 'items')
       .leftJoinAndSelect('order.restaurant', 'restaurant')
-      .where('restaurant.slug = :restaurantSlug', { restaurantSlug })
-      .orderBy('order.createdAt', 'DESC');
+      .where('LOWER(restaurant.slug) = :restaurantSlug', { restaurantSlug: cleanSlug });
+
+    if (filters?.status) {
+      const s = filters.status.toUpperCase();
+      if (s === 'ARCHIVED') {
+        query.andWhere('order.orderStatus = :completedStatus', {
+          completedStatus: OrderStatus.COMPLETED,
+        });
+      } else if (s === 'ACTIVE') {
+        query.andWhere('order.orderStatus != :completedStatus', {
+          completedStatus: OrderStatus.COMPLETED,
+        });
+      } else if (Object.values(OrderStatus).includes(s as OrderStatus)) {
+        query.andWhere('order.orderStatus = :orderStatus', { orderStatus: s });
+      }
+    }
+
+    if (filters?.paymentStatus) {
+      const ps = filters.paymentStatus.toUpperCase();
+      if (Object.values(PaymentStatus).includes(ps as PaymentStatus)) {
+        query.andWhere('order.paymentStatus = :paymentStatus', { paymentStatus: ps });
+      }
+    }
+
+    if (filters?.startDate) {
+      const start = new Date(filters.startDate);
+      if (!isNaN(start.getTime())) {
+        query.andWhere('order.createdAt >= :startDate', { startDate: start });
+      }
+    }
+
+    if (filters?.endDate) {
+      const end = new Date(filters.endDate);
+      if (!isNaN(end.getTime())) {
+        if (typeof filters.endDate === 'string' && !filters.endDate.includes('T')) {
+          end.setHours(23, 59, 59, 999);
+        }
+        query.andWhere('order.createdAt <= :endDate', { endDate: end });
+      }
+    }
+
+    query.orderBy('order.createdAt', 'DESC');
+
+    if (filters?.limit && Number(filters.limit) > 0) {
+      const limit = Number(filters.limit);
+      const page = Math.max(1, Number(filters.page) || 1);
+      query.take(limit);
+      query.skip((page - 1) * limit);
+    }
 
     return query.getMany();
   }
@@ -180,6 +238,20 @@ export class OrdersService {
     }
 
     return order;
+  }
+
+  async submitFeedback(
+    id: string,
+    dto: { rating: number; tags?: string[]; comment?: string },
+  ): Promise<Order> {
+    const order = await this.findOne(id);
+    order.feedback = {
+      rating: Number(dto.rating) || 5,
+      tags: Array.isArray(dto.tags) ? dto.tags : [],
+      comment: dto.comment?.trim() || undefined,
+      submittedAt: new Date().toISOString(),
+    };
+    return this.orderRepo.save(order);
   }
 
   async updateStatus(id: string, status: OrderStatus): Promise<Order> {
@@ -244,6 +316,7 @@ export class OrdersService {
     }
 
     order.paymentStatus = PaymentStatus.PAID;
+    order.settledAt = new Date();
     const saved = await this.orderRepo.save(order);
 
     // If order is paid and ready or completed, update table accordingly

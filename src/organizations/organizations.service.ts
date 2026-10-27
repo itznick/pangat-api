@@ -7,7 +7,7 @@ import { Repository, DataSource } from 'typeorm';
 import { Organization } from './entities/organization.entity.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
 import { Table } from '../tables/entities/table.entity.js';
-import { TableStatus } from '../common/enums/index.js';
+import { TableStatus, StaffRole } from '../common/enums/index.js';
 import { CreateOutletDto } from './dto/create-outlet.dto.js';
 
 @Injectable()
@@ -21,14 +21,19 @@ export class OrganizationsService {
   ) {}
 
   async listOutlets(user: any, requestedOrgId?: string): Promise<Restaurant[]> {
-    let orgId = user.organizationId;
-
-    if (user.isPlatformAdmin || user.role === 'PLATFORM_SUPER_ADMIN') {
-      orgId = requestedOrgId || user.organizationId || null;
-      if (!orgId) {
-        return [];
+    if (user.role === 'PLATFORM_SUPER_ADMIN' || user.role === StaffRole.PLATFORM_SUPER_ADMIN) {
+      if (requestedOrgId) {
+        return this.restaurantRepo.find({
+          where: { organizationId: requestedOrgId },
+          order: { createdAt: 'ASC' },
+        });
       }
+      return this.restaurantRepo.find({
+        order: { createdAt: 'ASC' },
+      });
     }
+
+    let orgId = user.organizationId;
 
     if (!orgId && user.restaurantId) {
       const rest = await this.restaurantRepo.findOne({

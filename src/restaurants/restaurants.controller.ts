@@ -23,6 +23,21 @@ export class RestaurantsController {
     return withMessage(restaurant, 'Restaurant details retrieved successfully');
   }
 
+  @Get(':slug/feedback')
+  async getFeedback(@Param('slug') slug: string) {
+    const feedback = await this.restaurantsService.getFeedback(slug);
+    return withMessage(feedback, 'Customer ratings and feedback retrieved successfully');
+  }
+
+  @Post(':slug/feedback')
+  async submitFeedback(
+    @Param('slug') slug: string,
+    @Body() dto: { orderId?: string; tableNumber?: string; rating: number; tags?: string[]; comment?: string },
+  ) {
+    const result = await this.restaurantsService.submitFeedback(slug, dto);
+    return withMessage(result, 'Customer review recorded successfully');
+  }
+
   @UseGuards(JwtAuthGuard)
   @Patch(':slug/settings')
   async updateSettings(

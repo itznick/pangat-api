@@ -130,12 +130,19 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   emitOrderPaid(orderId: string, order: any, restaurantSlug?: string) {
     const room = `order:${orderId}`;
-    this.server.to(room).emit('order:paid', { orderId, order });
+    const settledAt = order?.settledAt ? (order.settledAt instanceof Date ? order.settledAt.toISOString() : String(order.settledAt)) : new Date().toISOString();
+    const payload = {
+      orderId,
+      paymentStatus: 'PAID',
+      settledAt,
+      order,
+    };
+    this.server.to(room).emit('order:paid', payload);
     const rawSlug = restaurantSlug || order?.restaurant?.slug;
     if (rawSlug) {
       const cleanSlug = rawSlug.trim().toLowerCase();
-      this.server.to(`kds:${cleanSlug}`).emit('order:paid', { orderId, order });
-      this.server.to(`admin:${cleanSlug}`).emit('order:paid', { orderId, order });
+      this.server.to(`kds:${cleanSlug}`).emit('order:paid', payload);
+      this.server.to(`admin:${cleanSlug}`).emit('order:paid', payload);
     }
     this.logger.log(`Emitted order:paid for order #${orderId}`);
   }

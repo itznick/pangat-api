@@ -30,6 +30,13 @@ export class AuthController {
     return withMessage(result, 'Authentication successful');
   }
 
+  @Post('kds-pin-login')
+  @HttpCode(HttpStatus.OK)
+  async kdsPinLogin(@Body() dto: { pinCode: string; outletSlug?: string; station?: string }) {
+    const result = await this.authService.kdsPinLogin(dto);
+    return withMessage(result, 'Kitchen station authenticated successfully');
+  }
+
   @Post('onboard')
   @HttpCode(HttpStatus.CREATED)
   async onboard(@Body() onboardDto: OnboardDto) {

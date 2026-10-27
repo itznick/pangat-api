@@ -78,6 +78,19 @@ export class Order {
   @Column({ name: 'idempotency_key', length: 100, unique: true })
   idempotencyKey: string;
 
+  /** Timestamp when payment was settled at counter or online */
+  @Column({ name: 'settled_at', type: 'timestamp', nullable: true })
+  settledAt: Date | null;
+
+  /** Diner feedback & rating stored as json */
+  @Column({ type: 'jsonb', nullable: true })
+  feedback: {
+    rating: number;
+    tags: string[];
+    comment?: string;
+    submittedAt?: Date | string;
+  } | null;
+
   @OneToMany(() => OrderItem, (item) => item.order, {
     cascade: true,
     eager: true,

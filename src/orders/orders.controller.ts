@@ -14,11 +14,17 @@ import { CreateOrderDto } from './dto/create-order.dto.js';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto.js';
 import { IdempotencyGuard } from '../common/guards/idempotency.guard.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
+import { RolesGuard } from '../common/guards/roles.guard.js';
+import { TenantGuard } from '../common/guards/tenant.guard.js';
+import { Roles } from '../common/decorators/roles.decorator.js';
+import { StaffRole } from '../common/enums/index.js';
 
 @Controller('orders')
 export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
 
+  /** Public diner order placement */
   @Post()
   @UseGuards(IdempotencyGuard)
   async create(
@@ -29,7 +35,9 @@ export class OrdersController {
     return withMessage(order, 'Order placed successfully and fired to kitchen');
   }
 
+  /** Staff live orders listing with filters & pagination */
   @Get()
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   async findAll(
     @Query('restaurantSlug') restaurantSlug?: string,
     @Query('status') status?: string,
@@ -50,12 +58,14 @@ export class OrdersController {
     return withMessage(orders, 'Orders retrieved successfully');
   }
 
+  /** Single order lookup (open for diner live tracking and staff) */
   @Get(':id')
   async findOne(@Param('id') id: string) {
     const order = await this.ordersService.findOne(id);
     return withMessage(order, 'Order retrieved successfully');
   }
 
+  /** Diner feedback submission */
   @Post(':id/feedback')
   async submitFeedback(
     @Param('id') id: string,
@@ -65,7 +75,10 @@ export class OrdersController {
     return withMessage(updated, 'Customer feedback recorded successfully');
   }
 
+  /** KDS & Live status advance: Allowed for Chefs, Managers, Owners */
   @Patch(':id/status')
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER, StaffRole.CHEF)
   async updateStatus(
     @Param('id') id: string,
     @Body() dto: UpdateOrderStatusDto,
@@ -74,7 +87,10 @@ export class OrdersController {
     return withMessage(updated, `Order status advanced to ${dto.status}`);
   }
 
+  /** Settle counter payment: Allowed for Cashiers, Stewards, Managers, Owners */
   @Patch(':id/mark-paid')
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER, StaffRole.STEWARD)
   async markPaid(@Param('id') id: string) {
     const updated = await this.ordersService.markPaid(id);
     return withMessage(updated, 'Order marked as paid');

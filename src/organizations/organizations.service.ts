@@ -65,19 +65,10 @@ export class OrganizationsService {
     }
 
     if (!orgId) {
-      // Find or create default organization
-      let org = await this.orgRepo.findOne({
-        order: { createdAt: 'ASC' },
-      });
-      if (!org) {
-        org = await this.orgRepo.save(
-          this.orgRepo.create({
-            name: `${dto.name} Group`,
-            ownerId: user.id,
-          }),
-        );
-      }
-      orgId = org.id;
+      // Reject missing or unassociated organization instead of co-mingling into the first DB organization
+      throw new BadRequestException(
+        'Valid organization context is required to create a new restaurant outlet. Please contact platform administration.',
+      );
     }
 
     // Check slug collision

@@ -220,43 +220,10 @@ export class AuthService {
     }
 
     if (!staff) {
-      if (!outlet) {
-        // Find any outlet if available
-        outlet = await this.dataSource.getRepository(Restaurant).findOne({
-          order: { createdAt: 'ASC' },
-        });
-      }
-      if (!outlet) {
-        throw new UnauthorizedException('No kitchen outlet found. Please check station or outlet slug.');
-      }
-      // Station chef session
-      const chefId = `chef-${Date.now()}`;
-      const payload = {
-        sub: chefId,
-        email: `chef@${outlet.slug}.local`,
-        role: StaffRole.CHEF,
-        isPlatformAdmin: false,
-        organizationId: outlet.organizationId,
-        restaurantId: outlet.id,
-      };
-
-      return {
-        accessToken: this.jwtService.sign(payload),
-        user: {
-          id: chefId,
-          name: dto.station ? `Chef (${dto.station})` : 'Kitchen Display Station',
-          email: `chef@${outlet.slug}.local`,
-          role: StaffRole.CHEF,
-          isPlatformAdmin: false,
-          organizationId: outlet.organizationId,
-          restaurantId: outlet.id,
-          restaurantSlug: outlet.slug,
-          organizationName: 'Kitchen Operations',
-        },
-        organization: null,
-        outlets: [outlet],
-        outlet,
-      };
+      // Reject unregistered PIN codes safely instead of generating synthetic non-UUID sessions
+      throw new UnauthorizedException(
+        'Invalid station PIN code. Please ensure your kitchen staff account or station PIN is registered.',
+      );
     }
 
     if (!outlet && staff.restaurantId) {
@@ -563,5 +530,68 @@ export class AuthService {
     } finally {
       await queryRunner.release();
     }
+  }
+
+  /**
+   * Secure Password Reset: Generates a single-use expiring token.
+   * Does NOT leak whether the email account exists in the system.
+   */
+  async requestPasswordReset(email: string): Promise<{ success: boolean; message: string }> {
+    const cleanEmail = (email || '').trim().toLowerCase();
+    const staff = await this.staffRepo.findOne({ where: { email: cleanEmail } });
+
+    if (staff) {
+      const cryptoToken = `${Math.random().toString(36).substring(2, 15)}_${Date.now()}`;
+      staff.resetTokenHash = await bcrypt.hash(cryptoToken, 10);
+      // Valid for 1 hour
+      staff.resetTokenExpiresAt = new Date(Date.now() + 60 * 60 * 1000);
+      await this.staffRepo.save(staff);
+
+      // In production, integrate email service (AWS SES / SendGrid) to send reset link with `cryptoToken`
+    }
+
+    // Always return neutral message to prevent account enumeration
+    return {
+      success: true,
+      message: 'If an account exists with this email, a password reset link has been dispatched.',
+    };
+  }
+
+  /**
+   * Finalize password reset using single-use expiring token
+   */
+  async resetPassword(token: string, newPassword: string): Promise<{ success: boolean; message: string }> {
+    const staffList = await this.staffRepo.find({
+      where: {},
+    });
+
+    const validStaff = staffList.find(
+      (s) =>
+        s.resetTokenHash &&
+        s.resetTokenExpiresAt &&
+        new Date(s.resetTokenExpiresAt).getTime() > Date.now(),
+    );
+
+    let matchedStaff: Staff | null = null;
+    if (validStaff && validStaff.resetTokenHash) {
+      const isMatch = await bcrypt.compare(token, validStaff.resetTokenHash);
+      if (isMatch) {
+        matchedStaff = validStaff;
+      }
+    }
+
+    if (!matchedStaff) {
+      throw new BadRequestException('Invalid or expired password reset token');
+    }
+
+    matchedStaff.passwordHash = await bcrypt.hash(newPassword, 10);
+    matchedStaff.resetTokenHash = null;
+    matchedStaff.resetTokenExpiresAt = null;
+    await this.staffRepo.save(matchedStaff);
+
+    return {
+      success: true,
+      message: 'Password has been updated successfully. You can now sign in.',
+    };
   }
 }

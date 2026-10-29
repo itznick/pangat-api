@@ -117,8 +117,9 @@ export class OrdersService {
 
     const orderId = `ORD-${Math.floor(1000 + Math.random() * 9000)}`;
 
-    const isCounter = dto.paymentMethod === PaymentMethod.PAY_AT_COUNTER;
-    const paymentStatus = isCounter ? PaymentStatus.PENDING : PaymentStatus.PAID;
+    // Security & Data Integrity: Never auto-mark orders as PAID without verified gateway confirmation.
+    // Both PAY_AT_COUNTER and UPI_INSTANT initialize as PENDING until confirmed by cashier or payment webhook.
+    const paymentStatus = PaymentStatus.PENDING;
 
     const order = this.orderRepo.create({
       id: orderId,
@@ -126,7 +127,7 @@ export class OrdersService {
       tableNumber: finalTableNumber,
       orderStatus: OrderStatus.RECEIVED,
       paymentStatus,
-      paymentMethod: dto.paymentMethod || PaymentMethod.UPI_INSTANT,
+      paymentMethod: dto.paymentMethod || PaymentMethod.PAY_AT_COUNTER,
       customerPhone: dto.customerPhone || null,
       subtotal,
       gstAmount,
@@ -263,6 +264,14 @@ export class OrdersService {
     }
 
     order.orderStatus = status;
+    const now = new Date();
+    if (status === OrderStatus.PREPARING && !order.preparingAt) {
+      order.preparingAt = now;
+    } else if (status === OrderStatus.READY && !order.readyAt) {
+      order.readyAt = now;
+    } else if (status === OrderStatus.COMPLETED && !order.completedAt) {
+      order.completedAt = now;
+    }
     const saved = await this.orderRepo.save(order);
 
     // Synchronize table status according to the full live orders state

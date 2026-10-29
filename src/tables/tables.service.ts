@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Table } from './entities/table.entity.js';
@@ -47,8 +47,11 @@ export class TablesService {
     return table;
   }
 
-  async updateStatus(id: string, status: TableStatus): Promise<Table> {
+  async updateStatus(id: string, status: TableStatus, authorizedRestaurantId?: string): Promise<Table> {
     const table = await this.findOne(id);
+    if (authorizedRestaurantId && table.restaurantId !== authorizedRestaurantId) {
+      throw new ForbiddenException('Access denied: Table does not belong to authorized restaurant');
+    }
     table.status = status;
     return this.tableRepo.save(table);
   }
@@ -82,8 +85,11 @@ export class TablesService {
     return this.tableRepo.save(table);
   }
 
-  async remove(id: string): Promise<void> {
+  async remove(id: string, authorizedRestaurantId?: string): Promise<void> {
     const table = await this.findOne(id);
+    if (authorizedRestaurantId && table.restaurantId !== authorizedRestaurantId) {
+      throw new ForbiddenException('Access denied: Table does not belong to authorized restaurant');
+    }
     await this.tableRepo.remove(table);
   }
 }

@@ -7,6 +7,7 @@ import {
   Param,
   Body,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import { TablesService } from './tables.service.js';
@@ -52,8 +53,9 @@ export class TablesController {
   async updateStatus(
     @Param('id') id: string,
     @Body() dto: UpdateTableStatusDto,
+    @Req() req: any,
   ) {
-    const updated = await this.tablesService.updateStatus(id, dto.status);
+    const updated = await this.tablesService.updateStatus(id, dto.status, req?.user?.restaurantId);
     return withMessage(updated, `Table status updated to ${dto.status}`);
   }
 
@@ -70,8 +72,8 @@ export class TablesController {
   @Delete(':id')
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
-  async removeTable(@Param('id') id: string) {
-    await this.tablesService.remove(id);
+  async removeTable(@Param('id') id: string, @Req() req: any) {
+    await this.tablesService.remove(id, req?.user?.restaurantId);
     return withMessage({ id }, 'Table removed from floor successfully');
   }
 }

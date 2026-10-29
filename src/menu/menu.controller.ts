@@ -7,6 +7,7 @@ import {
   Param,
   Body,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import { MenuService } from './menu.service.js';
@@ -46,8 +47,9 @@ export class MenuController {
   async updateAvailability(
     @Param('id') id: string,
     @Body() dto: UpdateAvailabilityDto,
+    @Req() req: any,
   ) {
-    const updated = await this.menuService.updateAvailability(id, dto.isAvailable);
+    const updated = await this.menuService.updateAvailability(id, dto.isAvailable, req?.user?.restaurantId);
     return withMessage(
       updated,
       `Item marked as ${dto.isAvailable ? 'available' : 'sold out (out of stock)'}`,
@@ -61,8 +63,9 @@ export class MenuController {
   async updatePrice(
     @Param('id') id: string,
     @Body() dto: UpdatePriceDto,
+    @Req() req: any,
   ) {
-    const updated = await this.menuService.updatePrice(id, dto.price);
+    const updated = await this.menuService.updatePrice(id, dto.price, req?.user?.restaurantId);
     return withMessage(updated, `Item price updated to ₹${dto.price}`);
   }
 
@@ -82,8 +85,9 @@ export class MenuController {
   async updateItem(
     @Param('id') id: string,
     @Body() dto: UpdateItemDto,
+    @Req() req: any,
   ) {
-    const updated = await this.menuService.updateItem(id, dto);
+    const updated = await this.menuService.updateItem(id, dto, req?.user?.restaurantId);
     return withMessage(updated, 'Menu item updated successfully');
   }
 
@@ -100,8 +104,8 @@ export class MenuController {
   @Delete('categories/:id')
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
-  async removeCategory(@Param('id') id: string) {
-    await this.menuService.removeCategory(id);
+  async removeCategory(@Param('id') id: string, @Req() req: any) {
+    await this.menuService.removeCategory(id, req?.user?.restaurantId);
     return withMessage({ id }, 'Category deleted successfully');
   }
 }

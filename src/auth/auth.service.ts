@@ -2,6 +2,7 @@ import {
   Injectable,
   UnauthorizedException,
   BadRequestException,
+  Logger,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -23,6 +24,8 @@ import { EmailDeliveryService } from '../common/services/email-delivery.service.
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     @InjectRepository(Staff)
     private readonly staffRepo: Repository<Staff>,
@@ -32,7 +35,29 @@ export class AuthService {
     private readonly configService: ConfigService,
   ) {}
 
-  async setupPlatformAdmin(dto: SetupSuperAdminDto) {
+  async setupPlatformAdmin(
+    dto: SetupSuperAdminDto,
+    caller?: { role?: string; isPlatformAdmin?: boolean },
+    bootstrapSecret?: string,
+  ) {
+    const configuredSecret = this.configService.get<string>('PLATFORM_BOOTSTRAP_SECRET');
+    const isTrustedBootstrap = Boolean(
+      configuredSecret &&
+        configuredSecret.trim().length >= 16 &&
+        bootstrapSecret &&
+        bootstrapSecret.trim() === configuredSecret.trim(),
+    );
+
+    const isAuthorizedAdmin = Boolean(
+      caller && (caller.role === StaffRole.PLATFORM_SUPER_ADMIN || caller.isPlatformAdmin === true),
+    );
+
+    if (!isTrustedBootstrap && !isAuthorizedAdmin) {
+      throw new UnauthorizedException(
+        'Unauthorized: Platform admin provisioning requires authorized administrative credentials or trusted bootstrap secret',
+      );
+    }
+
     const { name, email, password, phone } = dto;
     const cleanEmail = email.trim().toLowerCase();
 
@@ -105,18 +130,8 @@ export class AuthService {
     let organization: Organization | null = null;
     let outlets: Restaurant[] = [];
 
-    const cleanEmail = (staff.email || '').trim().toLowerCase();
-    if (cleanEmail === 'nikhil@pangat.in' || cleanEmail.endsWith('@pangat.in')) {
-      if (staff.role !== StaffRole.PLATFORM_SUPER_ADMIN) {
-        staff.role = StaffRole.PLATFORM_SUPER_ADMIN;
-        staff.isPlatformAdmin = true;
-        await this.staffRepo.update(staff.id, {
-          role: StaffRole.PLATFORM_SUPER_ADMIN,
-          isPlatformAdmin: true,
-        });
-      }
-    }
-
+    // Security: Do NOT automatically promote users based on email domain or hardcoded emails.
+    // Privileges must be granted exclusively through explicit, authorized provisioning.
     const isPlatformAdmin = Boolean(
       staff.role === StaffRole.PLATFORM_SUPER_ADMIN || staff.isPlatformAdmin,
     );
@@ -303,13 +318,14 @@ export class AuthService {
       });
       const savedOrg = await queryRunner.manager.save(Organization, org);
 
-      // 4. Create Super Owner Staff
+      // 4. Create Super Owner Staff (Public onboarding creates only restaurant SUPER_OWNER, never platform admins)
       const passwordHash = await bcrypt.hash(dto.password, 10);
       const superOwner = queryRunner.manager.create(Staff, {
         name: dto.ownerFullName,
         email: dto.email,
         passwordHash,
         role: StaffRole.SUPER_OWNER,
+        isPlatformAdmin: false,
         organizationId: savedOrg.id,
         restaurantId: null, // Super owners manage all outlets
       });
@@ -542,7 +558,7 @@ export class AuthService {
    * Dispatches via configured transactional email provider if available.
    * Returns a neutral response to prevent account enumeration.
    */
-  async requestPasswordReset(email: string): Promise<{ success: boolean; message: string; deliveryProvider?: string }> {
+  async requestPasswordReset(email: string): Promise<{ success: boolean; message: string; deliveryProvider?: string; delivered?: boolean }> {
     const cleanEmail = (email || '').trim().toLowerCase();
     const staff = await this.staffRepo.findOne({ where: { email: cleanEmail } });
 
@@ -584,17 +600,22 @@ export class AuthService {
         textContent: `Namaskar ${staff.name},\n\nPlease use the following link to reset your Pangat password:\n${resetUrl}\n\nThis single-use link expires in 60 minutes.`,
       });
       deliveryProvider = delivery.provider;
+      const isDelivered = Boolean(delivery.delivered);
+
+      // Safe operational alerts without leaking tokens, reset links, recipient addresses, or secrets
+      if (!isDelivered && deliveryProvider !== 'none') {
+        this.logger.warn(`Password reset email delivery failed (Provider: ${deliveryProvider})`);
+      } else if (isDelivered) {
+        this.logger.log(`Password reset email accepted by provider (${deliveryProvider})`);
+      }
     }
 
     // Accurate and neutral public response preventing account enumeration
-    const deliveryNote = deliveryProvider !== 'none'
-      ? 'A password reset link will be sent if an active account is associated with this email.'
-      : 'Password reset request received. (Notice: Transactional email provider is not yet configured on this server).';
-
     return {
       success: true,
-      message: deliveryNote,
+      message: 'If the email exists, a password reset link has been dispatched.',
       deliveryProvider,
+      delivered: deliveryProvider !== 'none',
     };
   }
 

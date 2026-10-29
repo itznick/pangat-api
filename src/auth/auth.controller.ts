@@ -1,4 +1,12 @@
-import { Controller, Post, Body, HttpCode, HttpStatus } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  Headers,
+  Req,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
 import { AuthService } from './auth.service.js';
 import { LoginDto } from './dto/login.dto.js';
 import { OnboardDto } from './dto/onboard.dto.js';
@@ -12,15 +20,23 @@ export class AuthController {
 
   @Post('setup-super-admin')
   @HttpCode(HttpStatus.CREATED)
-  async setupSuperAdmin(@Body() dto: SetupSuperAdminDto) {
-    const result = await this.authService.setupPlatformAdmin(dto);
+  async setupSuperAdmin(
+    @Body() dto: SetupSuperAdminDto,
+    @Headers('x-bootstrap-secret') bootstrapSecret?: string,
+    @Req() req?: any,
+  ) {
+    const result = await this.authService.setupPlatformAdmin(dto, req?.user, bootstrapSecret);
     return withMessage(result, 'Platform super admin provisioned successfully');
   }
 
   @Post('setup-platform-admin')
   @HttpCode(HttpStatus.CREATED)
-  async setupPlatformAdmin(@Body() dto: SetupSuperAdminDto) {
-    const result = await this.authService.setupPlatformAdmin(dto);
+  async setupPlatformAdmin(
+    @Body() dto: SetupSuperAdminDto,
+    @Headers('x-bootstrap-secret') bootstrapSecret?: string,
+    @Req() req?: any,
+  ) {
+    const result = await this.authService.setupPlatformAdmin(dto, req?.user, bootstrapSecret);
     return withMessage(result, 'Platform super admin provisioned successfully');
   }
 

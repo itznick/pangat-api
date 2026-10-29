@@ -18,6 +18,7 @@ ALTER TABLE "staff"
 
 -- 2. Upgrade orders table
 ALTER TABLE "orders" 
+  ADD COLUMN IF NOT EXISTS "tracking_token" VARCHAR(64) NULL,
   ADD COLUMN IF NOT EXISTS "preparing_at" TIMESTAMPTZ NULL,
   ADD COLUMN IF NOT EXISTS "ready_at" TIMESTAMPTZ NULL,
   ADD COLUMN IF NOT EXISTS "completed_at" TIMESTAMPTZ NULL;
@@ -34,5 +35,9 @@ CREATE INDEX IF NOT EXISTS "idx_staff_reset_token"
 
 CREATE INDEX IF NOT EXISTS "idx_orders_status_created" 
   ON "orders" ("restaurant_id", "order_status", "created_at" DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "idx_orders_tracking_token"
+  ON "orders" ("tracking_token")
+  WHERE "tracking_token" IS NOT NULL;
 
 COMMIT;

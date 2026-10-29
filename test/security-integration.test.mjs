@@ -1,10 +1,14 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import * as crypto from 'node:crypto'
+import bcrypt from 'bcrypt'
 import { EmailDeliveryService } from '../dist/common/services/email-delivery.service.js'
+import { TenantGuard } from '../dist/common/guards/tenant.guard.js'
+import { OrdersService } from '../dist/orders/orders.service.js'
+import { AuthService } from '../dist/auth/auth.service.js'
+import { StaffRole } from '../dist/common/enums/index.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Real HTTP & Integration Security Test Suite: TenantGuard, RBAC & Reset Flows
+// Real HTTP & Integration Security Test Suite: Phase 1 Remediation
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('1. Real Email Delivery & Failure Reporting', () => {
@@ -63,7 +67,6 @@ describe('1. Real Email Delivery & Failure Reporting', () => {
   it('handles provider acceptance without message ID without fabricating synthetic fallbacks', async () => {
     const originalFetch = globalThis.fetch
     try {
-      // Provider accepts with 200/202, but does not provide an x-message-id header
       globalThis.fetch = async () =>
         new Response(null, {
           status: 200,
@@ -85,7 +88,6 @@ describe('1. Real Email Delivery & Failure Reporting', () => {
 
       assert.equal(result.delivered, true)
       assert.equal(result.provider, 'sendgrid')
-      // MUST NOT fabricate a fake sg_ fallback ID
       assert.equal(result.messageId, undefined)
     } finally {
       globalThis.fetch = originalFetch
@@ -153,84 +155,81 @@ describe('1. Real Email Delivery & Failure Reporting', () => {
   })
 })
 
-describe('2. Comprehensive TenantGuard Route & Parameter Audit Across 2 Tenants', () => {
-  function evaluateTenantAccess(user, requestContext, dbLookup) {
-    if (!user) {
-      return { allowed: false, status: 401, error: 'Authentication required' }
+describe('2. P0: Platform Admin Provisioning & Privilege Isolation', () => {
+  it('rejects unauthenticated requests to setup-super-admin without bootstrap secret', async () => {
+    const mockConfig = { get: (k) => (k === 'PLATFORM_BOOTSTRAP_SECRET' ? 'super_secret_bootstrap_token_32chars' : undefined) }
+    const authService = new AuthService(
+      {},
+      {},
+      {},
+      {},
+      mockConfig,
+    )
+
+    await assert.rejects(
+      () => authService.setupPlatformAdmin({ name: 'Hacker', email: 'hacker@example.com', password: 'Pass' }, undefined, undefined),
+      (err) => err.status === 401 && /Unauthorized/.test(err.message),
+    )
+  })
+
+  it('rejects setup-super-admin requests with invalid bootstrap secret', async () => {
+    const mockConfig = { get: (k) => (k === 'PLATFORM_BOOTSTRAP_SECRET' ? 'super_secret_bootstrap_token_32chars' : undefined) }
+    const authService = new AuthService(
+      {},
+      {},
+      {},
+      {},
+      mockConfig,
+    )
+
+    await assert.rejects(
+      () => authService.setupPlatformAdmin({ name: 'Hacker', email: 'hacker@example.com', password: 'Pass' }, undefined, 'wrong_token'),
+      (err) => err.status === 401 && /Unauthorized/.test(err.message),
+    )
+  })
+
+  it('login does not automatically promote @pangat.in emails to PLATFORM_SUPER_ADMIN', async () => {
+    const staffEntity = {
+      id: 'staff-1',
+      email: 'alice@pangat.in',
+      passwordHash: '$2b$10$hashed',
+      role: StaffRole.CHEF,
+      isPlatformAdmin: false,
+    }
+    const mockStaffRepo = {
+      findOne: async () => staffEntity,
+      update: async () => { throw new Error('Should not update role') },
+    }
+    const mockJwt = { sign: () => 'token' }
+    const mockDataSource = {
+      getRepository: () => ({
+        findOne: async () => null,
+        find: async () => [],
+      }),
     }
 
-    if (user.isPlatformAdmin === true || user.role === 'PLATFORM_SUPER_ADMIN') {
-      return { allowed: true, status: 200 }
+    const originalBcryptCompare = bcrypt.compare
+    bcrypt.compare = async () => true
+
+    try {
+      const authService = new AuthService(
+        mockStaffRepo,
+        mockJwt,
+        mockDataSource,
+        {},
+        { get: () => undefined },
+      )
+
+      const result = await authService.login({ email: 'alice@pangat.in', password: 'correct' })
+      assert.equal(result.user.role, StaffRole.CHEF)
+      assert.equal(result.user.isPlatformAdmin, false)
+    } finally {
+      bcrypt.compare = originalBcryptCompare
     }
+  })
+})
 
-    let targetRestaurantId = requestContext.query?.restaurantId || requestContext.body?.restaurantId || null
-
-    const targetSlug = requestContext.query?.restaurantSlug || requestContext.body?.restaurantSlug || requestContext.params?.slug || requestContext.params?.restaurantSlug
-    if (!targetRestaurantId && targetSlug) {
-      const rest = dbLookup.restaurants.find((r) => r.slug === targetSlug.toLowerCase() || r.slug === targetSlug)
-      if (!rest) {
-        return { allowed: false, status: 404, error: `Target restaurant '${targetSlug}' not found` }
-      }
-      targetRestaurantId = rest.id
-    }
-
-    const explicitEntityId =
-      requestContext.params?.orderId ||
-      requestContext.params?.tableId ||
-      requestContext.params?.menuItemId ||
-      requestContext.params?.categoryId ||
-      requestContext.params?.id
-
-    if (!targetRestaurantId && explicitEntityId) {
-      const id = explicitEntityId
-      const order = dbLookup.orders.find((o) => o.id === id)
-      if (order) targetRestaurantId = order.restaurantId
-      else {
-        const table = dbLookup.tables.find((t) => t.id === id)
-        if (table) targetRestaurantId = table.restaurantId
-        else {
-          const item = dbLookup.menuItems.find((m) => m.id === id)
-          if (item) targetRestaurantId = item.restaurantId
-          else {
-            const cat = dbLookup.categories.find((c) => c.id === id)
-            if (cat) targetRestaurantId = cat.restaurantId
-            else {
-              const rest = dbLookup.restaurants.find((r) => r.id === id)
-              if (rest) targetRestaurantId = rest.id
-              else {
-                return { allowed: false, status: 404, error: `Resource with ID '${id}' not found` }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Fail closed if unresolvable
-    if (!targetRestaurantId) {
-      if (user.restaurantId) {
-        targetRestaurantId = user.restaurantId
-      } else {
-        return { allowed: false, status: 403, error: 'Access denied: Target restaurant context is required' }
-      }
-    }
-
-    // Staff assigned
-    if (user.restaurantId && user.restaurantId === targetRestaurantId) {
-      return { allowed: true, status: 200 }
-    }
-
-    // Owner in org
-    if (user.organizationId) {
-      const targetRest = dbLookup.restaurants.find((r) => r.id === targetRestaurantId)
-      if (targetRest && targetRest.organizationId === user.organizationId) {
-        return { allowed: true, status: 200 }
-      }
-    }
-
-    return { allowed: false, status: 403, error: 'Access denied: Cross-tenant access forbidden' }
-  }
-
+describe('3. P1: Tenant Isolation & Conflicting Resource / Tenant ID Defense', () => {
   const mockDb = {
     restaurants: [
       { id: 'rest-A1', slug: 'cafe-a1', organizationId: 'org-A' },
@@ -255,100 +254,281 @@ describe('2. Comprehensive TenantGuard Route & Parameter Audit Across 2 Tenants'
   }
 
   const staffA = { id: 'staff-A', role: 'STORE_MANAGER', organizationId: 'org-A', restaurantId: 'rest-A1' }
-  const staffB = { id: 'staff-B', role: 'STORE_MANAGER', organizationId: 'org-B', restaurantId: 'rest-B1' }
+  const _staffB = { id: 'staff-B', role: 'STORE_MANAGER', organizationId: 'org-B', restaurantId: 'rest-B1' }
 
-  it('Route 1: GET /orders (listing) - blocked across tenants', () => {
-    assert.equal(evaluateTenantAccess(staffA, { query: { restaurantSlug: 'cafe-a1' } }, mockDb).status, 200)
-    assert.equal(evaluateTenantAccess(staffA, { query: { restaurantSlug: 'bistro-b1' } }, mockDb).status, 403)
+  const mockDataSource = {
+    getRepository: (_entityClass) => ({
+      findOne: async (opts) => {
+        const id = opts?.where?.id || (Array.isArray(opts?.where) ? opts.where[0]?.id : undefined)
+        const slug = opts?.where?.slug || (Array.isArray(opts?.where) ? opts.where[0]?.slug : undefined)
+        if (id) {
+          return (
+            mockDb.orders.find((o) => o.id === id) ||
+            mockDb.tables.find((t) => t.id === id) ||
+            mockDb.menuItems.find((m) => m.id === id) ||
+            mockDb.categories.find((c) => c.id === id) ||
+            mockDb.restaurants.find((r) => r.id === id) ||
+            null
+          )
+        }
+        if (slug) {
+          return mockDb.restaurants.find((r) => r.slug === slug.toLowerCase() || r.slug === slug) || null
+        }
+        return null
+      },
+    }),
+  }
+
+  const guard = new TenantGuard(mockDataSource)
+
+  function createMockContext(user, params = {}, body = {}, query = {}) {
+    return {
+      switchToHttp: () => ({
+        getRequest: () => ({ user, params, body, query }),
+      }),
+    }
+  }
+
+  it('rejects cross-tenant table mutation when attacker targets victim resource with conflicting restaurantId', async () => {
+    // Attacker staffA attempts to patch victim table tbl-B1 while supplying attacker's rest-A1 in body
+    const context = createMockContext(staffA, { id: 'tbl-B1' }, { restaurantId: 'rest-A1', status: 'VACANT' })
+
+    await assert.rejects(
+      () => guard.canActivate(context),
+      (err) => err.status === 403 && /Tenant conflict/.test(err.message),
+    )
   })
 
-  it('Route 2: PATCH /orders/:id/status - blocked across tenants', () => {
-    assert.equal(evaluateTenantAccess(staffA, { params: { id: 'ord-A1' } }, mockDb).status, 200)
-    assert.equal(evaluateTenantAccess(staffA, { params: { id: 'ord-B1' } }, mockDb).status, 403)
+  it('rejects cross-tenant menu price update when attacker targets victim item with conflicting slug', async () => {
+    const context = createMockContext(staffA, { id: 'item-B1' }, {}, { restaurantSlug: 'cafe-a1' })
+
+    await assert.rejects(
+      () => guard.canActivate(context),
+      (err) => err.status === 403 && /Tenant conflict/.test(err.message),
+    )
   })
 
-  it('Route 3: PATCH /orders/:id/mark-paid - blocked across tenants', () => {
-    assert.equal(evaluateTenantAccess(staffB, { params: { id: 'ord-B1' } }, mockDb).status, 200)
-    assert.equal(evaluateTenantAccess(staffB, { params: { id: 'ord-A1' } }, mockDb).status, 403)
+  it('rejects cross-tenant resource access when attacker directly targets victim item without params', async () => {
+    const context = createMockContext(staffA, { id: 'item-B1' })
+
+    await assert.rejects(
+      () => guard.canActivate(context),
+      (err) => err.status === 403 && /Access denied/.test(err.message),
+    )
   })
 
-  it('Route 4: POST /tables - blocked when restaurantId belongs to another tenant', () => {
-    assert.equal(evaluateTenantAccess(staffA, { body: { restaurantId: 'rest-A1' } }, mockDb).status, 200)
-    assert.equal(evaluateTenantAccess(staffA, { body: { restaurantId: 'rest-B1' } }, mockDb).status, 403)
-  })
-
-  it('Route 5: PATCH /tables/:id/status - blocked across tenants', () => {
-    assert.equal(evaluateTenantAccess(staffA, { params: { id: 'tbl-A1' } }, mockDb).status, 200)
-    assert.equal(evaluateTenantAccess(staffA, { params: { id: 'tbl-B1' } }, mockDb).status, 403)
-  })
-
-  it('Route 6: DELETE /tables/:id - blocked across tenants', () => {
-    assert.equal(evaluateTenantAccess(staffA, { params: { id: 'tbl-B1' } }, mockDb).status, 403)
-  })
-
-  it('Route 7: POST /menu/items - blocked when adding item to another tenant', () => {
-    assert.equal(evaluateTenantAccess(staffA, { body: { restaurantId: 'rest-B1' } }, mockDb).status, 403)
-  })
-
-  it('Route 8: PATCH /menu/items/:id/price - blocked across tenants', () => {
-    assert.equal(evaluateTenantAccess(staffA, { params: { id: 'item-A1' } }, mockDb).status, 200)
-    assert.equal(evaluateTenantAccess(staffA, { params: { id: 'item-B1' } }, mockDb).status, 403)
-  })
-
-  it('Route 9: PATCH /menu/items/:id/availability - blocked across tenants', () => {
-    assert.equal(evaluateTenantAccess(staffA, { params: { id: 'item-B1' } }, mockDb).status, 403)
-  })
-
-  it('Route 10: DELETE /menu/categories/:id - blocked across tenants', () => {
-    assert.equal(evaluateTenantAccess(staffA, { params: { id: 'cat-A1' } }, mockDb).status, 200)
-    assert.equal(evaluateTenantAccess(staffA, { params: { id: 'cat-B1' } }, mockDb).status, 403)
+  it('allows authorized staff to access resources within their own restaurant', async () => {
+    const context = createMockContext(staffA, { id: 'tbl-A1' })
+    const allowed = await guard.canActivate(context)
+    assert.equal(allowed, true)
   })
 })
 
-describe('3. Cryptographic Password-Reset Token Security', () => {
-  it('generates high-entropy crypto tokens and deterministically matches the correct staff record', () => {
-    const staffDatabase = [
-      { id: 'staff-1', email: 'alice@pangat.in', tokenHash: null, expiresAt: null },
-      { id: 'staff-2', email: 'bob@pangat.in', tokenHash: null, expiresAt: null },
-    ]
-
-    function requestReset(email) {
-      const staff = staffDatabase.find((s) => s.email === email)
-      if (!staff) return { token: null }
-      const rawToken = crypto.randomBytes(32).toString('hex')
-      const hash = crypto.createHash('sha256').update(rawToken).digest('hex')
-      staff.tokenHash = hash
-      staff.expiresAt = Date.now() + 3600000 // 1 hour
-      return { token: rawToken }
+describe('4. P1: Order Pricing, Verification & Public Tracking Security', () => {
+  it('ignores client-supplied prices and calculates total strictly from DB', async () => {
+    const verifiedDish = {
+      id: 'dish-1',
+      name: 'Paneer Tikka',
+      price: 350.0,
+      restaurantId: 'rest-A1',
+      isAvailable: true,
+      modifiers: [],
     }
 
-    function verifyAndReset(token, _newPass) {
-      const tokenHash = crypto.createHash('sha256').update(token.trim()).digest('hex')
-      const matched = staffDatabase.find((s) => s.tokenHash === tokenHash && s.expiresAt && s.expiresAt > Date.now())
-      if (!matched) {
-        throw new Error('Invalid or expired password reset token')
-      }
-      // Invalidate immediately
-      matched.tokenHash = null
-      matched.expiresAt = null
-      return { success: true, updatedUserId: matched.id }
+    const mockMenuItemRepo = {
+      findOne: async () => verifiedDish,
+    }
+    const mockOrderRepo = {
+      create: (entity) => entity,
+      save: async (entity) => entity,
+    }
+    const mockOrderItemRepo = {
+      create: (entity) => entity,
+    }
+    const mockRestaurantRepo = {
+      findOne: async () => ({ id: 'rest-A1', name: 'Cafe A1', gstPercentage: 5, slug: 'cafe-a1' }),
+    }
+    const mockTableRepo = {
+      findOne: async () => ({ id: 'tbl-1', tableNumber: 'T01', status: 'VACANT' }),
+      save: async () => {},
+    }
+    const mockGateway = {
+      emitTableStatus: () => {},
+      emitNewOrder: () => {},
     }
 
-    // Alice and Bob requests
-    const { token: aliceToken } = requestReset('alice@pangat.in')
-    const { token: bobToken } = requestReset('bob@pangat.in')
-    assert.ok(aliceToken && bobToken)
-    assert.notEqual(aliceToken, bobToken)
+    const ordersService = new OrdersService(
+      mockOrderRepo,
+      mockOrderItemRepo,
+      mockRestaurantRepo,
+      mockTableRepo,
+      mockMenuItemRepo,
+      {},
+      mockGateway,
+    )
 
-    // Alice resets
-    const aliceRes = verifyAndReset(aliceToken, 'pass1')
-    assert.equal(aliceRes.updatedUserId, 'staff-1')
+    // Attacker attempts to buy ₹350 dish for ₹10
+    const manipulatedDto = {
+      restaurantSlug: 'cafe-a1',
+      tableNumber: 'T01',
+      items: [
+        {
+          menuItemId: 'dish-1',
+          name: 'Hacked Dish',
+          price: 10.0,
+          quantity: 2,
+        },
+      ],
+    }
 
-    // Alice token cannot be reused
-    assert.throws(() => verifyAndReset(aliceToken, 'pass2'), /Invalid or expired/)
+    const createdOrder = await ordersService.create(manipulatedDto, 'idempotency-key-1')
 
-    // Bob still works
-    const bobRes = verifyAndReset(bobToken, 'pass3')
-    assert.equal(bobRes.updatedUserId, 'staff-2')
+    // Verified subtotal must be 350 * 2 = 700, NOT 10 * 2 = 20
+    assert.equal(createdOrder.subtotal, 700)
+    assert.equal(createdOrder.gstAmount, 35)
+    assert.equal(createdOrder.totalAmount, 735)
+    assert.ok(createdOrder.trackingToken && createdOrder.trackingToken.length >= 32)
+  })
+
+  it('rejects order with cross-restaurant menu items', async () => {
+    const foreignDish = {
+      id: 'dish-foreign',
+      name: 'Biryani',
+      price: 400.0,
+      restaurantId: 'rest-B1', // Belongs to restaurant B
+      isAvailable: true,
+      modifiers: [],
+    }
+
+    const ordersService = new OrdersService(
+      {},
+      {},
+      { findOne: async () => ({ id: 'rest-A1', name: 'Cafe A1' }) },
+      { findOne: async () => ({ id: 'tbl-1', tableNumber: 'T01' }) },
+      { findOne: async () => foreignDish },
+      {},
+      {},
+    )
+
+    await assert.rejects(
+      () =>
+        ordersService.create(
+          {
+            restaurantSlug: 'cafe-a1',
+            tableNumber: 'T01',
+            items: [{ menuItemId: 'dish-foreign', quantity: 1 }],
+          },
+          'key-2',
+        ),
+      (err) => err.status === 400 && /does not belong to restaurant/.test(err.message),
+    )
+  })
+
+  it('rejects order with out-of-stock items', async () => {
+    const unavailableDish = {
+      id: 'dish-soldout',
+      name: 'Gulab Jamun',
+      price: 120.0,
+      restaurantId: 'rest-A1',
+      isAvailable: false, // Out of stock
+      modifiers: [],
+    }
+
+    const ordersService = new OrdersService(
+      {},
+      {},
+      { findOne: async () => ({ id: 'rest-A1', name: 'Cafe A1' }) },
+      { findOne: async () => ({ id: 'tbl-1', tableNumber: 'T01' }) },
+      { findOne: async () => unavailableDish },
+      {},
+      {},
+    )
+
+    await assert.rejects(
+      () =>
+        ordersService.create(
+          {
+            restaurantSlug: 'cafe-a1',
+            tableNumber: 'T01',
+            items: [{ menuItemId: 'dish-soldout', quantity: 1 }],
+          },
+          'key-3',
+        ),
+      (err) => err.status === 400 && /unavailable \(out of stock\)/.test(err.message),
+    )
+  })
+
+  it('blocks order enumeration attacks when queried by enumerable ID without tracking token', async () => {
+    const sampleOrder = {
+      id: 'ORD-1234',
+      trackingToken: '0123456789abcdef0123456789abcdef0123456789abcdef',
+      customerPhone: '+919876543210',
+      totalAmount: 500,
+    }
+
+    const ordersService = new OrdersService(
+      { findOne: async () => sampleOrder },
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+    )
+
+    // Unauthenticated caller attempting to scrape ORD-1234 without tracking token
+    await assert.rejects(
+      () => ordersService.findOrderForCaller('ORD-1234', undefined, undefined),
+      (err) => err.status === 404 && /Order not found/.test(err.message),
+    )
+
+    // Valid tracking token returns restricted diner projection without customer phone
+    const dinerView = await ordersService.findOrderForCaller(
+      sampleOrder.trackingToken,
+      undefined,
+      undefined,
+    )
+    assert.equal(dinerView.id, 'ORD-1234')
+    assert.equal(dinerView.customerPhone, undefined) // Stripped from diner view
+    assert.equal(dinerView.totalAmount, 500)
+  })
+})
+
+describe('5. P2: Password-Reset Neutral Response & Security', () => {
+  it('returns neutral public response and tracks internal delivered status without leaking email', async () => {
+    const mockStaff = {
+      id: 'staff-1',
+      name: 'Nikhil',
+      email: 'nikhil@pangat.in',
+      resetTokenHash: null,
+      resetTokenExpiresAt: null,
+    }
+
+    const mockStaffRepo = {
+      findOne: async () => mockStaff,
+      save: async () => mockStaff,
+    }
+    const mockEmailService = {
+      sendTransactionalEmail: async () => ({ delivered: true, provider: 'sendgrid' }),
+    }
+    const mockConfig = {
+      get: (k) => (k === 'FRONTEND_URL' ? 'https://layerform.in' : undefined),
+    }
+
+    const authService = new AuthService(
+      mockStaffRepo,
+      {},
+      {},
+      mockEmailService,
+      mockConfig,
+    )
+
+    const response = await authService.requestPasswordReset('nikhil@pangat.in')
+    assert.equal(response.success, true)
+    // Neutral public message preventing enumeration
+    assert.match(response.message, /If the email exists, a password reset link has been dispatched/)
+    // Accurate internal delivered status
+    assert.equal(response.delivered, true)
+    assert.equal(response.deliveryProvider, 'sendgrid')
   })
 })

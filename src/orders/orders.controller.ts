@@ -7,6 +7,7 @@ import {
   Body,
   Query,
   Headers,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import { OrdersService } from './orders.service.js';
@@ -58,10 +59,14 @@ export class OrdersController {
     return withMessage(orders, 'Orders retrieved successfully');
   }
 
-  /** Single order lookup (open for diner live tracking and staff) */
+  /** Single order lookup (open for diner live tracking with token and staff with JWT) */
   @Get(':id')
-  async findOne(@Param('id') id: string) {
-    const order = await this.ordersService.findOne(id);
+  async findOne(
+    @Param('id') id: string,
+    @Query('token') token?: string,
+    @Req() req?: any,
+  ) {
+    const order = await this.ordersService.findOrderForCaller(id, token, req?.user);
     return withMessage(order, 'Order retrieved successfully');
   }
 
@@ -82,8 +87,9 @@ export class OrdersController {
   async updateStatus(
     @Param('id') id: string,
     @Body() dto: UpdateOrderStatusDto,
+    @Req() req: any,
   ) {
-    const updated = await this.ordersService.updateStatus(id, dto.status);
+    const updated = await this.ordersService.updateStatus(id, dto.status, req?.user?.restaurantId);
     return withMessage(updated, `Order status advanced to ${dto.status}`);
   }
 
@@ -91,8 +97,8 @@ export class OrdersController {
   @Patch(':id/mark-paid')
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER, StaffRole.STEWARD)
-  async markPaid(@Param('id') id: string) {
-    const updated = await this.ordersService.markPaid(id);
+  async markPaid(@Param('id') id: string, @Req() req: any) {
+    const updated = await this.ordersService.markPaid(id, req?.user?.restaurantId);
     return withMessage(updated, 'Order marked as paid');
   }
 }

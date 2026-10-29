@@ -8,11 +8,13 @@
 BEGIN;
 
 -- 1. Drop indexes
+DROP INDEX IF EXISTS "idx_orders_tracking_token";
 DROP INDEX IF EXISTS "idx_orders_status_created";
 DROP INDEX IF EXISTS "idx_staff_reset_token";
 
 -- 2. Revert orders table
 ALTER TABLE "orders"
+  DROP COLUMN IF EXISTS "tracking_token",
   DROP COLUMN IF EXISTS "preparing_at",
   DROP COLUMN IF EXISTS "ready_at",
   DROP COLUMN IF EXISTS "completed_at";

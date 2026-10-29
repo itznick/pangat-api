@@ -27,6 +27,10 @@ export class Order {
   @PrimaryColumn({ length: 20 })
   id: string;
 
+  /** High-entropy diner tracking token for secure, non-enumerable public tracking */
+  @Column({ name: 'tracking_token', type: 'varchar', length: 64, nullable: true, unique: true })
+  trackingToken: string | null;
+
   @Column({ name: 'restaurant_id' })
   restaurantId: string;
 

@@ -11,6 +11,7 @@ import {
   OneToMany,
   PrimaryColumn,
   UpdateDateColumn,
+  VersionColumn,
 } from 'typeorm';
 import {
   OrderStatus,
@@ -95,6 +96,40 @@ export class Order {
 
   @Column({ name: 'completed_at', type: 'timestamp with time zone', nullable: true })
   completedAt: Date | null;
+
+  /** Cancellation tracking */
+  @Column({ name: 'cancellation_reason', type: 'text', nullable: true })
+  cancellationReason: string | null;
+
+  @Column({ name: 'cancelled_at', type: 'timestamp with time zone', nullable: true })
+  cancelledAt: Date | null;
+
+  @Column({ name: 'cancelled_by_staff_id', type: 'uuid', nullable: true })
+  cancelledByStaffId: string | null;
+
+  /** Refund management fields */
+  @Column({
+    name: 'refund_amount',
+    type: 'decimal',
+    precision: 10,
+    scale: 2,
+    default: 0.00,
+    transformer: decimalTransformer,
+  })
+  refundAmount: number;
+
+  @Column({ name: 'refund_reason', type: 'text', nullable: true })
+  refundReason: string | null;
+
+  @Column({ name: 'refunded_at', type: 'timestamp with time zone', nullable: true })
+  refundedAt: Date | null;
+
+  @Column({ name: 'refunded_by_staff_id', type: 'uuid', nullable: true })
+  refundedByStaffId: string | null;
+
+  /** Optimistic concurrency version lock */
+  @VersionColumn({ default: 1 })
+  version: number;
 
   /** Diner feedback & rating stored as json */
   @Column({ type: 'jsonb', nullable: true })

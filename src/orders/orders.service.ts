@@ -5,7 +5,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Not } from 'typeorm';
+import { Repository, DataSource } from 'typeorm';
 import * as crypto from 'crypto';
 import { Order } from './entities/order.entity.js';
 import { OrderItem, SelectedModifierSnapshot } from './entities/order-item.entity.js';
@@ -14,14 +14,20 @@ import { Table } from '../tables/entities/table.entity.js';
 import { MenuItem } from '../menu/entities/menu-item.entity.js';
 import { Modifier } from '../menu/entities/modifier.entity.js';
 import { CreateOrderDto } from './dto/create-order.dto.js';
+import { RegressOrderStatusDto } from './dto/regress-order-status.dto.js';
+import { CancelOrderDto } from './dto/cancel-order.dto.js';
+import { EditOrderItemsDto } from './dto/edit-order-items.dto.js';
+import { ProcessRefundDto } from './dto/process-refund.dto.js';
 import {
   OrderStatus,
   PaymentMethod,
   PaymentStatus,
   TableStatus,
   StaffRole,
+  AuditAction,
 } from '../common/enums/index.js';
 import { EventsGateway } from '../events/events.gateway.js';
+import { AuditService } from '../audit/audit.service.js';
 
 @Injectable()
 export class OrdersService {
@@ -39,6 +45,8 @@ export class OrdersService {
     @InjectRepository(Modifier)
     private readonly modifierRepo: Repository<Modifier>,
     private readonly eventsGateway: EventsGateway,
+    private readonly auditService: AuditService,
+    private readonly dataSource: DataSource,
   ) {}
 
   async create(dto: CreateOrderDto, idempotencyKey: string): Promise<Order> {
@@ -249,24 +257,31 @@ export class OrdersService {
     }
 
     const cleanSlug = restaurantSlug.trim().toLowerCase();
+    const restaurant = await this.restaurantRepo.findOne({
+      where: [{ slug: cleanSlug }, { slug: restaurantSlug.trim() }],
+    });
+
+    if (!restaurant) {
+      return [];
+    }
+
+    const page = Math.max(1, filters?.page || 1);
+    const limit = Math.min(100, Math.max(1, filters?.limit || 50));
+    const skip = (page - 1) * limit;
+
     const query = this.orderRepo
       .createQueryBuilder('order')
-      .leftJoinAndSelect('order.items', 'items')
-      .leftJoinAndSelect('order.restaurant', 'restaurant')
-      .where('LOWER(restaurant.slug) = :restaurantSlug', { restaurantSlug: cleanSlug });
+      .leftJoinAndSelect('order.items', 'item')
+      .where('order.restaurantId = :restaurantId', { restaurantId: restaurant.id });
 
     if (filters?.status) {
       const s = filters.status.toUpperCase();
       if (s === 'ARCHIVED') {
-        query.andWhere('order.orderStatus = :completedStatus', {
-          completedStatus: OrderStatus.COMPLETED,
-        });
-      } else if (s === 'ACTIVE') {
-        query.andWhere('order.orderStatus != :completedStatus', {
-          completedStatus: OrderStatus.COMPLETED,
+        query.andWhere('order.orderStatus IN (:...archivedStatuses)', {
+          archivedStatuses: [OrderStatus.COMPLETED, OrderStatus.CANCELLED],
         });
       } else if (Object.values(OrderStatus).includes(s as OrderStatus)) {
-        query.andWhere('order.orderStatus = :orderStatus', { orderStatus: s });
+        query.andWhere('order.orderStatus = :status', { status: s });
       }
     }
 
@@ -280,28 +295,18 @@ export class OrdersService {
     if (filters?.startDate) {
       const start = new Date(filters.startDate);
       if (!isNaN(start.getTime())) {
-        query.andWhere('order.createdAt >= :startDate', { startDate: start });
+        query.andWhere('order.createdAt >= :startDate', { startDate: start.toISOString() });
       }
     }
 
     if (filters?.endDate) {
       const end = new Date(filters.endDate);
       if (!isNaN(end.getTime())) {
-        if (typeof filters.endDate === 'string' && !filters.endDate.includes('T')) {
-          end.setHours(23, 59, 59, 999);
-        }
-        query.andWhere('order.createdAt <= :endDate', { endDate: end });
+        query.andWhere('order.createdAt <= :endDate', { endDate: end.toISOString() });
       }
     }
 
-    query.orderBy('order.createdAt', 'DESC');
-
-    if (filters?.limit && Number(filters.limit) > 0) {
-      const limit = Number(filters.limit);
-      const page = Math.max(1, Number(filters.page) || 1);
-      query.take(limit);
-      query.skip((page - 1) * limit);
-    }
+    query.orderBy('order.createdAt', 'DESC').skip(skip).take(limit);
 
     return query.getMany();
   }
@@ -319,13 +324,6 @@ export class OrdersService {
     return order;
   }
 
-  /**
-   * Secure Order Lookup for Caller:
-   * 1. Staff with JWT can view full order details for their restaurant.
-   * 2. Diners must supply the high-entropy tracking token (via path or query parameter).
-   * 3. Prevents enumeration: unauthenticated requests without the valid tracking token receive a non-disclosing 404.
-   * 4. Returns restricted, minimal diner-facing fields for public tracking.
-   */
   async findOrderForCaller(
     idOrToken: string,
     tokenParam?: string,
@@ -409,25 +407,65 @@ export class OrdersService {
   ): Promise<Order> {
     const order = await this.findOne(id);
     order.feedback = {
-      rating: Number(dto.rating) || 5,
+      rating: Math.min(5, Math.max(1, dto.rating)),
       tags: Array.isArray(dto.tags) ? dto.tags : [],
-      comment: dto.comment?.trim() || undefined,
+      comment: dto.comment ? String(dto.comment).slice(0, 500) : undefined,
       submittedAt: new Date().toISOString(),
     };
     return this.orderRepo.save(order);
   }
 
-  async updateStatus(id: string, status: OrderStatus, authorizedRestaurantId?: string): Promise<Order> {
+  async updateStatus(
+    id: string,
+    status: OrderStatus,
+    authorizedRestaurantId?: string,
+    staffUser?: any,
+  ): Promise<Order> {
     const order = await this.findOne(id);
     if (authorizedRestaurantId && order.restaurantId !== authorizedRestaurantId) {
       throw new ForbiddenException('Access denied: Order does not belong to authorized restaurant');
     }
-    let restaurantSlug: string | undefined = order.restaurant?.slug;
-    if (!restaurantSlug && order.restaurantId) {
-      const rest = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });
-      restaurantSlug = rest?.slug;
+
+    // Completed and Cancelled orders are terminal
+    if (order.orderStatus === OrderStatus.COMPLETED) {
+      throw new BadRequestException('Cannot update status of COMPLETED order. Completed orders are immutable.');
+    }
+    if (order.orderStatus === OrderStatus.CANCELLED) {
+      throw new BadRequestException('Cannot update status of CANCELLED order.');
+    }
+    if (status === OrderStatus.CANCELLED) {
+      throw new BadRequestException('Use the POST /orders/:id/cancel endpoint with a mandatory cancellation reason.');
     }
 
+    // Permitted forward progression
+    const validForward: Record<OrderStatus, OrderStatus> = {
+      [OrderStatus.RECEIVED]: OrderStatus.PREPARING,
+      [OrderStatus.PREPARING]: OrderStatus.READY,
+      [OrderStatus.READY]: OrderStatus.COMPLETED,
+      [OrderStatus.COMPLETED]: OrderStatus.COMPLETED,
+      [OrderStatus.CANCELLED]: OrderStatus.CANCELLED,
+    };
+
+    if (validForward[order.orderStatus] !== status) {
+      throw new BadRequestException(
+        `Invalid forward order status transition from ${order.orderStatus} to ${status}. For ticket regressions, use the regress-status endpoint with a reason.`,
+      );
+    }
+
+    // Role-based transition enforcement
+    if (staffUser?.role) {
+      if (status === OrderStatus.PREPARING || status === OrderStatus.READY) {
+        if (![StaffRole.CHEF, StaffRole.STORE_MANAGER, StaffRole.SUPER_OWNER, StaffRole.PLATFORM_SUPER_ADMIN].includes(staffUser.role)) {
+          throw new ForbiddenException(`Role ${staffUser.role} is not authorized to advance kitchen orders to ${status}`);
+        }
+      } else if (status === OrderStatus.COMPLETED) {
+        if (![StaffRole.STEWARD, StaffRole.STORE_MANAGER, StaffRole.SUPER_OWNER, StaffRole.PLATFORM_SUPER_ADMIN].includes(staffUser.role)) {
+          throw new ForbiddenException(`Role ${staffUser.role} is not authorized to mark orders as ${status}`);
+        }
+      }
+    }
+
+    const previousStatus = order.orderStatus;
     order.orderStatus = status;
     const now = new Date();
     if (status === OrderStatus.PREPARING && !order.preparingAt) {
@@ -437,46 +475,396 @@ export class OrdersService {
     } else if (status === OrderStatus.COMPLETED && !order.completedAt) {
       order.completedAt = now;
     }
+
     const saved = await this.orderRepo.save(order);
 
-    // Synchronize table status according to the full live orders state
-    const table = await this.tableRepo.findOne({
-      where: {
-        restaurantId: order.restaurantId,
-        tableNumber: order.tableNumber,
-      },
+    // Operational audit logging
+    await this.auditService.record({
+      restaurantId: order.restaurantId,
+      entityType: 'ORDER',
+      entityId: order.id,
+      action: AuditAction.ORDER_STATUS_CHANGED,
+      staffId: staffUser?.id || null,
+      staffName: staffUser?.name || null,
+      staffRole: staffUser?.role || null,
+      metadata: { previousStatus, newStatus: status },
     });
 
-    if (table) {
-      if (status === OrderStatus.COMPLETED) {
-        // Check if there are other uncompleted orders for this table
-        const remainingOpen = await this.orderRepo.findOne({
-          where: {
-            restaurantId: order.restaurantId,
-            tableNumber: order.tableNumber,
-            orderStatus: Not(OrderStatus.COMPLETED),
-          },
-        });
-        if (!remainingOpen) {
-          table.status = TableStatus.VACANT;
-        } else if (remainingOpen.orderStatus === OrderStatus.READY) {
-          table.status = remainingOpen.paymentStatus === PaymentStatus.PAID ? TableStatus.SERVED : TableStatus.OCCUPIED;
-        } else {
-          table.status = TableStatus.PREPPING;
-        }
-      } else if (status === OrderStatus.READY) {
-        table.status = order.paymentStatus === PaymentStatus.PAID ? TableStatus.SERVED : TableStatus.OCCUPIED;
-      } else if (status === OrderStatus.PREPARING || status === OrderStatus.RECEIVED) {
-        table.status = TableStatus.PREPPING;
-      }
-      await this.tableRepo.save(table);
-      if (restaurantSlug) {
-        this.eventsGateway.emitTableStatus(restaurantSlug, table);
+    // Synchronize table status
+    let restaurantSlug: string | undefined = order.restaurant?.slug;
+    if (!restaurantSlug && order.restaurantId) {
+      const rest = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });
+      restaurantSlug = rest?.slug;
+    }
+    await this.syncTableStatus(order, restaurantSlug);
+
+    // Notify rooms
+    this.eventsGateway.emitOrderStatus(id, status, { ...saved, restaurant: { slug: restaurantSlug } }, restaurantSlug);
+
+    return saved;
+  }
+
+  async regressStatus(
+    id: string,
+    dto: RegressOrderStatusDto,
+    authorizedRestaurantId?: string,
+    staffUser?: any,
+  ): Promise<Order> {
+    const order = await this.findOne(id);
+    if (authorizedRestaurantId && order.restaurantId !== authorizedRestaurantId) {
+      throw new ForbiddenException('Access denied: Order does not belong to authorized restaurant');
+    }
+
+    if (order.orderStatus === OrderStatus.COMPLETED) {
+      throw new BadRequestException('COMPLETED orders cannot be regressed.');
+    }
+    if (order.orderStatus === OrderStatus.CANCELLED) {
+      throw new BadRequestException('CANCELLED orders cannot be regressed.');
+    }
+
+    // Rule 4: Authorized chef regressions
+    const validRegressions: Record<OrderStatus, OrderStatus> = {
+      [OrderStatus.READY]: OrderStatus.PREPARING,
+      [OrderStatus.PREPARING]: OrderStatus.RECEIVED,
+      [OrderStatus.RECEIVED]: OrderStatus.RECEIVED,
+      [OrderStatus.COMPLETED]: OrderStatus.COMPLETED,
+      [OrderStatus.CANCELLED]: OrderStatus.CANCELLED,
+    };
+
+    if (validRegressions[order.orderStatus] !== dto.targetStatus) {
+      throw new BadRequestException(
+        `Invalid regression from ${order.orderStatus} to ${dto.targetStatus}. Only READY -> PREPARING and PREPARING -> RECEIVED are permitted.`,
+      );
+    }
+
+    const previousStatus = order.orderStatus;
+    order.orderStatus = dto.targetStatus;
+
+    const saved = await this.orderRepo.save(order);
+
+    // Operational audit log
+    await this.auditService.record({
+      restaurantId: order.restaurantId,
+      entityType: 'ORDER',
+      entityId: order.id,
+      action: AuditAction.ORDER_STAGE_REGRESSED,
+      staffId: staffUser?.id || null,
+      staffName: staffUser?.name || null,
+      staffRole: staffUser?.role || null,
+      reason: dto.reason.trim(),
+      metadata: { previousStatus, newStatus: dto.targetStatus },
+    });
+
+    let restaurantSlug: string | undefined = order.restaurant?.slug;
+    if (!restaurantSlug && order.restaurantId) {
+      const rest = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });
+      restaurantSlug = rest?.slug;
+    }
+    await this.syncTableStatus(order, restaurantSlug);
+
+    this.eventsGateway.emitOrderStatus(id, dto.targetStatus, { ...saved, restaurant: { slug: restaurantSlug } }, restaurantSlug);
+
+    return saved;
+  }
+
+  async cancelOrder(
+    id: string,
+    dto: CancelOrderDto,
+    authorizedRestaurantId?: string,
+    staffUser?: any,
+  ): Promise<Order> {
+    const order = await this.findOne(id);
+    if (authorizedRestaurantId && order.restaurantId !== authorizedRestaurantId) {
+      throw new ForbiddenException('Access denied: Order does not belong to authorized restaurant');
+    }
+
+    if (order.orderStatus === OrderStatus.COMPLETED) {
+      throw new BadRequestException('COMPLETED orders cannot be cancelled. Use the refund workflow for post-service corrections.');
+    }
+    if (order.orderStatus === OrderStatus.CANCELLED) {
+      throw new BadRequestException('Order is already cancelled.');
+    }
+
+    // Rule 4: Cancelling in PREPARING or READY requires manager/owner authorization
+    if (order.orderStatus === OrderStatus.PREPARING || order.orderStatus === OrderStatus.READY) {
+      if (staffUser?.role && ![StaffRole.STORE_MANAGER, StaffRole.SUPER_OWNER, StaffRole.PLATFORM_SUPER_ADMIN].includes(staffUser.role)) {
+        throw new ForbiddenException('Cancelling an order in PREPARING or READY stage requires manager or owner authorization.');
       }
     }
 
-    // Notify diner live tracking screen, KDS & Admin rooms
-    this.eventsGateway.emitOrderStatus(id, status, { ...saved, restaurant: { slug: restaurantSlug } }, restaurantSlug);
+    const previousStatus = order.orderStatus;
+    const previousPaymentStatus = order.paymentStatus;
+    const fullReason = dto.notes ? `${dto.reason.trim()} - ${dto.notes.trim()}` : dto.reason.trim();
+
+    order.orderStatus = OrderStatus.CANCELLED;
+    order.cancellationReason = fullReason;
+    order.cancelledAt = new Date();
+    order.cancelledByStaffId = staffUser?.id || null;
+
+    // Rule 2: Paid order cancellation creates a refund request (REFUND_PENDING)
+    if (order.paymentStatus === PaymentStatus.PAID) {
+      order.paymentStatus = PaymentStatus.REFUND_PENDING;
+    } else if (order.paymentStatus === PaymentStatus.PENDING) {
+      order.paymentStatus = PaymentStatus.FAILED;
+    }
+
+    const saved = await this.orderRepo.save(order);
+
+    // Audit record for cancellation
+    await this.auditService.record({
+      restaurantId: order.restaurantId,
+      entityType: 'ORDER',
+      entityId: order.id,
+      action: AuditAction.ORDER_CANCELLED,
+      staffId: staffUser?.id || null,
+      staffName: staffUser?.name || null,
+      staffRole: staffUser?.role || null,
+      reason: fullReason,
+      metadata: {
+        previousStatus,
+        newStatus: OrderStatus.CANCELLED,
+        previousPaymentStatus,
+        newPaymentStatus: saved.paymentStatus,
+      },
+    });
+
+    if (previousPaymentStatus === PaymentStatus.PAID) {
+      await this.auditService.record({
+        restaurantId: order.restaurantId,
+        entityType: 'ORDER',
+        entityId: order.id,
+        action: AuditAction.ORDER_REFUND_REQUESTED,
+        staffId: staffUser?.id || null,
+        staffName: staffUser?.name || null,
+        staffRole: staffUser?.role || null,
+        reason: `Auto refund request generated from order cancellation: ${fullReason}`,
+        metadata: {
+          refundableAmount: saved.totalAmount,
+        },
+      });
+    }
+
+    let restaurantSlug: string | undefined = order.restaurant?.slug;
+    if (!restaurantSlug && order.restaurantId) {
+      const rest = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });
+      restaurantSlug = rest?.slug;
+    }
+    await this.syncTableStatus(order, restaurantSlug);
+
+    this.eventsGateway.emitOrderStatus(id, OrderStatus.CANCELLED, { ...saved, restaurant: { slug: restaurantSlug } }, restaurantSlug);
+
+    return saved;
+  }
+
+  async editItems(
+    id: string,
+    dto: EditOrderItemsDto,
+    authorizedRestaurantId?: string,
+    staffUser?: any,
+  ): Promise<Order> {
+    const order = await this.findOne(id);
+    if (authorizedRestaurantId && order.restaurantId !== authorizedRestaurantId) {
+      throw new ForbiddenException('Access denied: Order does not belong to authorized restaurant');
+    }
+
+    // Rule 1: Option A (Conservative): Staff can only edit items while order is in RECEIVED stage
+    if (order.orderStatus === OrderStatus.PREPARING) {
+      throw new BadRequestException(
+        'Order items are locked once preparation has begun. Additional items must be placed as a separate linked add-on order.',
+      );
+    }
+    if (order.orderStatus !== OrderStatus.RECEIVED) {
+      throw new BadRequestException(`Order items cannot be edited while order is in ${order.orderStatus} status.`);
+    }
+
+    return this.dataSource.transaction(async (manager) => {
+      const itemMap = new Map<string, MenuItem>();
+      const modifierPriceMap = new Map<string, number>();
+
+      for (const itemDto of dto.items) {
+        if (!itemMap.has(itemDto.menuItemId)) {
+          const menuItem = await manager.findOne(MenuItem, {
+            where: { id: itemDto.menuItemId, restaurantId: order.restaurantId },
+          });
+          if (!menuItem) {
+            throw new BadRequestException(`Menu item "${itemDto.name}" (${itemDto.menuItemId}) does not exist in this restaurant`);
+          }
+          if (menuItem.isAvailable === false) {
+            throw new BadRequestException(`Menu item "${menuItem.name}" is currently out of stock`);
+          }
+          itemMap.set(itemDto.menuItemId, menuItem);
+        }
+
+        if (itemDto.selectedModifiers && itemDto.selectedModifiers.length > 0) {
+          for (const mod of itemDto.selectedModifiers) {
+            const modKey = `${itemDto.menuItemId}:${mod.name}`;
+            if (!modifierPriceMap.has(modKey)) {
+              const modifiers = await manager.find(Modifier, {
+                where: { menuItemId: itemDto.menuItemId },
+              });
+              for (const m of modifiers) {
+                if (Array.isArray(m.options)) {
+                  for (const opt of m.options) {
+                    modifierPriceMap.set(`${m.menuItemId}:${opt.name}`, Number(opt.price));
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      let subtotal = 0;
+      const newItems: OrderItem[] = [];
+
+      for (const itemDto of dto.items) {
+        const menuItem = itemMap.get(itemDto.menuItemId)!;
+        const verifiedModifiers: SelectedModifierSnapshot[] = [];
+        let itemModifiersPrice = 0;
+
+        if (itemDto.selectedModifiers && itemDto.selectedModifiers.length > 0) {
+          for (const mod of itemDto.selectedModifiers) {
+            const modKey = `${itemDto.menuItemId}:${mod.name}`;
+            const dbPrice = modifierPriceMap.get(modKey);
+            const modPrice = dbPrice !== undefined ? dbPrice : Number(mod.price || 0);
+            verifiedModifiers.push({ name: mod.name, price: modPrice });
+            itemModifiersPrice += modPrice;
+          }
+        }
+
+        const itemBasePrice = Number(menuItem.price);
+        const itemLineTotal = (itemBasePrice + itemModifiersPrice) * itemDto.quantity;
+        subtotal += itemLineTotal;
+
+        const orderItem = manager.create(OrderItem, {
+          orderId: order.id,
+          menuItemId: menuItem.id,
+          name: menuItem.name,
+          price: itemBasePrice,
+          quantity: itemDto.quantity,
+          selectedModifiers: verifiedModifiers,
+          notes: itemDto.notes || null,
+        });
+        newItems.push(orderItem);
+      }
+
+      const gstRate = 0.05;
+      const gstAmount = Math.round(subtotal * gstRate * 100) / 100;
+      const totalAmount = Math.round((subtotal + gstAmount) * 100) / 100;
+
+      const previousSubtotal = order.subtotal;
+      const previousTotal = order.totalAmount;
+      const previousItemsCount = order.items?.length || 0;
+
+      await manager.delete(OrderItem, { orderId: order.id });
+      await manager.save(OrderItem, newItems);
+
+      order.subtotal = subtotal;
+      order.gstAmount = gstAmount;
+      order.totalAmount = totalAmount;
+      order.items = newItems;
+
+      const updatedOrder = await manager.save(Order, order);
+
+      await this.auditService.record({
+        restaurantId: order.restaurantId,
+        entityType: 'ORDER',
+        entityId: order.id,
+        action: AuditAction.ORDER_ITEMS_EDITED,
+        staffId: staffUser?.id || null,
+        staffName: staffUser?.name || null,
+        staffRole: staffUser?.role || null,
+        reason: 'Items and quantities updated by staff during RECEIVED stage',
+        metadata: {
+          previousSubtotal,
+          newSubtotal: subtotal,
+          previousTotal,
+          newTotal: totalAmount,
+          previousItemsCount,
+          newItemsCount: newItems.length,
+        },
+      });
+
+      this.eventsGateway.emitOrderUpdated(order.id, updatedOrder, updatedOrder.restaurant?.slug);
+
+      return updatedOrder;
+    });
+  }
+
+  async processRefund(
+    id: string,
+    dto: ProcessRefundDto,
+    authorizedRestaurantId?: string,
+    staffUser?: any,
+  ): Promise<Order> {
+    const order = await this.findOne(id);
+    if (authorizedRestaurantId && order.restaurantId !== authorizedRestaurantId) {
+      throw new ForbiddenException('Access denied: Order does not belong to authorized restaurant');
+    }
+
+    // Idempotency check: verify if this idempotency key was already processed
+    const existingAudit = await this.auditService.findByEntity('ORDER', order.id, order.restaurantId);
+    const duplicateRefund = existingAudit.find(
+      (a) => a.action === AuditAction.ORDER_REFUND_SETTLED && a.metadata?.idempotencyKey === dto.idempotencyKey,
+    );
+    if (duplicateRefund) {
+      return order; // Idempotent success without duplicate deductions
+    }
+
+    if (order.paymentStatus === PaymentStatus.REFUNDED) {
+      throw new BadRequestException('Order is already fully refunded.');
+    }
+    if (order.paymentStatus !== PaymentStatus.REFUND_PENDING && order.paymentStatus !== PaymentStatus.PARTIALLY_REFUNDED) {
+      throw new BadRequestException(
+        `Cannot process refund for order with payment status ${order.paymentStatus}. Order must be in REFUND_PENDING or PARTIALLY_REFUNDED.`,
+      );
+    }
+
+    const currentRefunded = Number(order.refundAmount || 0);
+    const maxRefundable = Math.max(0, Number(order.totalAmount) - currentRefunded);
+    const refundAmount = dto.amount !== undefined ? Number(dto.amount) : maxRefundable;
+
+    if (refundAmount <= 0) {
+      throw new BadRequestException('Refund amount must be greater than zero.');
+    }
+    if (refundAmount > maxRefundable) {
+      throw new BadRequestException(
+        `Requested refund amount ₹${refundAmount.toFixed(2)} exceeds maximum refundable amount of ₹${maxRefundable.toFixed(2)}.`,
+      );
+    }
+
+    const nextTotalRefunded = currentRefunded + refundAmount;
+    order.refundAmount = nextTotalRefunded;
+    order.refundReason = dto.reason;
+    order.refundedAt = new Date();
+    order.refundedByStaffId = staffUser?.id || null;
+
+    if (nextTotalRefunded >= Number(order.totalAmount)) {
+      order.paymentStatus = PaymentStatus.REFUNDED;
+    } else {
+      order.paymentStatus = PaymentStatus.PARTIALLY_REFUNDED;
+    }
+
+    const saved = await this.orderRepo.save(order);
+
+    await this.auditService.record({
+      restaurantId: order.restaurantId,
+      entityType: 'ORDER',
+      entityId: order.id,
+      action: AuditAction.ORDER_REFUND_SETTLED,
+      staffId: staffUser?.id || null,
+      staffName: staffUser?.name || null,
+      staffRole: staffUser?.role || null,
+      reason: dto.reason,
+      metadata: {
+        idempotencyKey: dto.idempotencyKey,
+        refundMethod: dto.refundMethod,
+        refundAmount,
+        totalRefunded: nextTotalRefunded,
+        providerReference: dto.providerReference || null,
+        finalPaymentStatus: saved.paymentStatus,
+      },
+    });
 
     return saved;
   }
@@ -486,6 +874,11 @@ export class OrdersService {
     if (authorizedRestaurantId && order.restaurantId !== authorizedRestaurantId) {
       throw new ForbiddenException('Access denied: Order does not belong to authorized restaurant');
     }
+
+    if (order.orderStatus === OrderStatus.CANCELLED) {
+      throw new BadRequestException('Cannot mark a CANCELLED order as paid.');
+    }
+
     let restaurantSlug: string | undefined = order.restaurant?.slug;
     if (!restaurantSlug && order.restaurantId) {
       const rest = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });
@@ -496,7 +889,14 @@ export class OrdersService {
     order.settledAt = new Date();
     const saved = await this.orderRepo.save(order);
 
-    // If order is paid and ready or completed, update table accordingly
+    await this.syncTableStatus(order, restaurantSlug);
+
+    this.eventsGateway.emitOrderPaid(id, { ...saved, restaurant: { slug: restaurantSlug } }, restaurantSlug);
+
+    return saved;
+  }
+
+  private async syncTableStatus(order: Order, restaurantSlug?: string): Promise<void> {
     const table = await this.tableRepo.findOne({
       where: {
         restaurantId: order.restaurantId,
@@ -504,27 +904,31 @@ export class OrdersService {
       },
     });
 
-    if (table) {
-      if (order.orderStatus === OrderStatus.COMPLETED) {
-        const remainingOpen = await this.orderRepo.findOne({
-          where: {
-            restaurantId: order.restaurantId,
-            tableNumber: order.tableNumber,
-            orderStatus: Not(OrderStatus.COMPLETED),
-          },
-        });
-        table.status = remainingOpen ? TableStatus.SERVED : TableStatus.VACANT;
-      } else if (order.orderStatus === OrderStatus.READY) {
-        table.status = TableStatus.SERVED;
-      }
-      await this.tableRepo.save(table);
-      if (restaurantSlug) {
-        this.eventsGateway.emitTableStatus(restaurantSlug, table);
-      }
+    if (!table) return;
+
+    const allTableOrders = await this.orderRepo.find({
+      where: {
+        restaurantId: order.restaurantId,
+        tableNumber: order.tableNumber,
+      },
+    });
+
+    const activeOrders = allTableOrders.filter(
+      (o) => o.orderStatus !== OrderStatus.COMPLETED && o.orderStatus !== OrderStatus.CANCELLED,
+    );
+
+    if (activeOrders.length === 0) {
+      table.status = TableStatus.VACANT;
+    } else if (activeOrders.some((o) => o.orderStatus === OrderStatus.READY)) {
+      const allReadyPaid = activeOrders.every((o) => o.paymentStatus === PaymentStatus.PAID);
+      table.status = allReadyPaid ? TableStatus.SERVED : TableStatus.OCCUPIED;
+    } else {
+      table.status = TableStatus.PREPPING;
     }
 
-    this.eventsGateway.emitOrderPaid(id, { ...saved, restaurant: { slug: restaurantSlug } }, restaurantSlug);
-
-    return saved;
+    await this.tableRepo.save(table);
+    if (restaurantSlug) {
+      this.eventsGateway.emitTableStatus(restaurantSlug, table);
+    }
   }
 }

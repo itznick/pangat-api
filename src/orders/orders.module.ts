@@ -8,9 +8,13 @@ import { MenuItem } from '../menu/entities/menu-item.entity.js';
 import { Modifier } from '../menu/entities/modifier.entity.js';
 import { OrdersService } from './orders.service.js';
 import { OrdersController } from './orders.controller.js';
+import { AuditModule } from '../audit/audit.module.js';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Order, OrderItem, Restaurant, Table, MenuItem, Modifier])],
+  imports: [
+    TypeOrmModule.forFeature([Order, OrderItem, Restaurant, Table, MenuItem, Modifier]),
+    AuditModule,
+  ],
   controllers: [OrdersController],
   providers: [OrdersService],
   exports: [OrdersService],

@@ -55,9 +55,16 @@ export class TenantGuard implements CanActivate {
       targetRestaurantId = restaurant.id;
     }
 
-    // Resolve if an entity ID is in params
-    if (!targetRestaurantId && params?.id) {
-      const entityId = String(params.id).trim();
+    // Resolve explicit route parameters: :orderId, :tableId, :menuItemId, :categoryId, :id
+    const explicitEntityId =
+      params?.orderId ||
+      params?.tableId ||
+      params?.menuItemId ||
+      params?.categoryId ||
+      params?.id;
+
+    if (!targetRestaurantId && explicitEntityId) {
+      const entityId = String(explicitEntityId).trim();
 
       // 1. Is it an order?
       const order = await this.dataSource.getRepository(Order).findOne({

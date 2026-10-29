@@ -10,10 +10,6 @@ import {
 import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
 
-const allowedOrigins = process.env.FRONTEND_URL
-  ? process.env.FRONTEND_URL.split(',').map((u) => u.trim()).filter(Boolean)
-  : ['http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:3000'];
-
 @WebSocketGateway({
   cors: {
     origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {

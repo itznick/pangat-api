@@ -43,7 +43,12 @@ export class TenantGuard implements CanActivate {
     }
 
     // Resolve target restaurant by slug if provided
-    const targetSlug = query?.restaurantSlug || body?.restaurantSlug || params?.slug || params?.restaurantSlug;
+    const targetSlug =
+      query?.restaurantSlug ||
+      body?.restaurantSlug ||
+      params?.slug ||
+      params?.restaurantSlug;
+
     if (!targetRestaurantId && targetSlug) {
       const cleanSlug = String(targetSlug).trim().toLowerCase();
       const restaurant = await this.dataSource.getRepository(Restaurant).findOne({
@@ -110,26 +115,24 @@ export class TenantGuard implements CanActivate {
       }
     }
 
-    // FAIL-CLOSED: If no target restaurant could be resolved from params, query, or body,
-    // fallback ONLY to the user's explicit assigned restaurant if present; otherwise REJECT.
+    // STRICT FAIL-CLOSED ENFORCEMENT:
+    // If the request contains no explicit target restaurant or target entity reference,
+    // it is REJECTED with HTTP 403 Forbidden.
+    // There is no blanket return true or silent bypass.
     if (!targetRestaurantId) {
-      if (user.restaurantId) {
-        targetRestaurantId = user.restaurantId;
-      } else {
-        throw new ForbiddenException(
-          'Access denied: Target restaurant context is required for this operation',
-        );
-      }
+      throw new ForbiddenException(
+        'Access denied: Target restaurant context is required for this operation',
+      );
     }
 
-    // Verify authorized access to targetRestaurantId
+    // Verify authorized access to targetRestaurantId:
     // 1. Assigned staff (CHEF, CASHIER, STORE_MANAGER) strictly limited to their restaurant
     if (user.restaurantId && user.restaurantId === targetRestaurantId) {
       return true;
     }
 
     // 2. Organization Super Owner (SUPER_OWNER) can access any outlet in their organization
-    if (user.organizationId && targetRestaurantId) {
+    if (user.organizationId) {
       const targetRest = await this.dataSource.getRepository(Restaurant).findOne({
         where: { id: targetRestaurantId },
       });

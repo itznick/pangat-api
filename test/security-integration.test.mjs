@@ -1,4 +1,4 @@
-import test, { describe, it } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import * as crypto from 'node:crypto'
 import { EmailDeliveryService } from '../dist/common/services/email-delivery.service.js'
@@ -220,7 +220,7 @@ describe('3. Cryptographic Password-Reset Token Security', () => {
       return { token: rawToken }
     }
 
-    function verifyAndReset(token, newPass) {
+    function verifyAndReset(token, _newPass) {
       const tokenHash = crypto.createHash('sha256').update(token.trim()).digest('hex')
       const matched = staffDatabase.find((s) => s.tokenHash === tokenHash && s.expiresAt && s.expiresAt > Date.now())
       if (!matched) {

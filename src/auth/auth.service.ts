@@ -8,6 +8,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, MoreThan } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
+import { ConfigService } from '@nestjs/config';
 import { Staff } from './entities/staff.entity.js';
 import { LoginDto } from './dto/login.dto.js';
 import { OnboardDto } from './dto/onboard.dto.js';
@@ -28,6 +29,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly dataSource: DataSource,
     private readonly emailDeliveryService: EmailDeliveryService,
+    private readonly configService: ConfigService,
   ) {}
 
   async setupPlatformAdmin(dto: SetupSuperAdminDto) {
@@ -547,7 +549,7 @@ export class AuthService {
     let deliveryProvider = 'none';
 
     if (staff) {
-      // Cryptographically secure 32-byte hex token + 16-byte random salt
+      // Cryptographically secure 32-byte hex token
       const rawToken = crypto.randomBytes(32).toString('hex');
       const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
 
@@ -556,11 +558,30 @@ export class AuthService {
       staff.resetTokenExpiresAt = new Date(Date.now() + 60 * 60 * 1000);
       await this.staffRepo.save(staff);
 
-      // Attempt transactional email delivery
+      // Build reset URL strictly from validated environment configuration (preventing Host header poisoning)
+      const frontendBaseUrl =
+        this.configService.get<string>('FRONTEND_URL')?.split(',')[0]?.trim() ||
+        'https://layerform.in';
+      const resetUrl = `${frontendBaseUrl}/login?resetToken=${rawToken}`;
+
+      // Dispatch reset email with single-use raw token link
       const delivery = await this.emailDeliveryService.sendTransactionalEmail({
         to: staff.email,
         subject: 'Reset your Pangat password',
-        htmlContent: `<p>Namaskar ${staff.name},</p><p>You requested a password reset. Please use your secure reset link.</p>`,
+        htmlContent: `
+          <div style="font-family: sans-serif; padding: 20px; color: #1e293b;">
+            <h2>Namaskar ${staff.name},</h2>
+            <p>A password reset was requested for your Pangat account.</p>
+            <p>Please click the button below or copy the link into your browser to reset your password. This link is single-use and will expire in 60 minutes.</p>
+            <p style="margin: 24px 0;">
+              <a href="${resetUrl}" style="background-color: #059669; color: #ffffff; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block;">
+                Reset Password
+              </a>
+            </p>
+            <p style="font-size: 12px; color: #64748b;">If you did not request this reset, you can safely ignore this email.</p>
+          </div>
+        `,
+        textContent: `Namaskar ${staff.name},\n\nPlease use the following link to reset your Pangat password:\n${resetUrl}\n\nThis single-use link expires in 60 minutes.`,
       });
       deliveryProvider = delivery.provider;
     }

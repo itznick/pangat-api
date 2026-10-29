@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MenuItem } from './entities/menu-item.entity.js';
@@ -86,19 +86,25 @@ export class MenuService {
     });
   }
 
-  async updateAvailability(id: string, isAvailable: boolean) {
+  async updateAvailability(id: string, isAvailable: boolean, authorizedRestaurantId?: string) {
     const item = await this.menuItemRepo.findOne({ where: { id } });
     if (!item) {
       throw new NotFoundException(`Menu item '${id}' not found`);
+    }
+    if (authorizedRestaurantId && item.restaurantId !== authorizedRestaurantId) {
+      throw new ForbiddenException('Access denied: Menu item does not belong to authorized restaurant');
     }
     item.isAvailable = isAvailable;
     return this.menuItemRepo.save(item);
   }
 
-  async updatePrice(id: string, price: number) {
+  async updatePrice(id: string, price: number, authorizedRestaurantId?: string) {
     const item = await this.menuItemRepo.findOne({ where: { id } });
     if (!item) {
       throw new NotFoundException(`Menu item '${id}' not found`);
+    }
+    if (authorizedRestaurantId && item.restaurantId !== authorizedRestaurantId) {
+      throw new ForbiddenException('Access denied: Menu item does not belong to authorized restaurant');
     }
     item.price = price;
     return this.menuItemRepo.save(item);
@@ -125,10 +131,13 @@ export class MenuService {
     return this.categoryRepo.save(category);
   }
 
-  async removeCategory(id: string) {
+  async removeCategory(id: string, authorizedRestaurantId?: string) {
     const category = await this.categoryRepo.findOne({ where: { id } });
     if (!category) {
       throw new NotFoundException(`Category '${id}' not found`);
+    }
+    if (authorizedRestaurantId && category.restaurantId !== authorizedRestaurantId) {
+      throw new ForbiddenException('Access denied: Category does not belong to authorized restaurant');
     }
     await this.categoryRepo.remove(category);
   }
@@ -178,10 +187,13 @@ export class MenuService {
     });
   }
 
-  async updateItem(id: string, dto: UpdateItemDto) {
+  async updateItem(id: string, dto: UpdateItemDto, authorizedRestaurantId?: string) {
     const item = await this.menuItemRepo.findOne({ where: { id } });
     if (!item) {
       throw new NotFoundException(`Menu item '${id}' not found`);
+    }
+    if (authorizedRestaurantId && item.restaurantId !== authorizedRestaurantId) {
+      throw new ForbiddenException('Access denied: Menu item does not belong to authorized restaurant');
     }
 
     if (dto.name !== undefined) item.name = dto.name;

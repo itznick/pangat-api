@@ -1,8 +1,17 @@
-import { Controller, Post, Body, HttpCode, HttpStatus } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  Headers,
+  Req,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
 import { AuthService } from './auth.service.js';
 import { LoginDto } from './dto/login.dto.js';
 import { OnboardDto } from './dto/onboard.dto.js';
 import { SetupSuperAdminDto } from './dto/setup-super-admin.dto.js';
+import { RequestPasswordResetDto, ResetPasswordDto } from './dto/password-reset.dto.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
 
 @Controller('auth')
@@ -11,15 +20,23 @@ export class AuthController {
 
   @Post('setup-super-admin')
   @HttpCode(HttpStatus.CREATED)
-  async setupSuperAdmin(@Body() dto: SetupSuperAdminDto) {
-    const result = await this.authService.setupPlatformAdmin(dto);
+  async setupSuperAdmin(
+    @Body() dto: SetupSuperAdminDto,
+    @Headers('x-bootstrap-secret') bootstrapSecret?: string,
+    @Req() req?: any,
+  ) {
+    const result = await this.authService.setupPlatformAdmin(dto, req?.user, bootstrapSecret);
     return withMessage(result, 'Platform super admin provisioned successfully');
   }
 
   @Post('setup-platform-admin')
   @HttpCode(HttpStatus.CREATED)
-  async setupPlatformAdmin(@Body() dto: SetupSuperAdminDto) {
-    const result = await this.authService.setupPlatformAdmin(dto);
+  async setupPlatformAdmin(
+    @Body() dto: SetupSuperAdminDto,
+    @Headers('x-bootstrap-secret') bootstrapSecret?: string,
+    @Req() req?: any,
+  ) {
+    const result = await this.authService.setupPlatformAdmin(dto, req?.user, bootstrapSecret);
     return withMessage(result, 'Platform super admin provisioned successfully');
   }
 
@@ -35,6 +52,20 @@ export class AuthController {
   async kdsPinLogin(@Body() dto: { pinCode: string; outletSlug?: string; station?: string }) {
     const result = await this.authService.kdsPinLogin(dto);
     return withMessage(result, 'Kitchen station authenticated successfully');
+  }
+
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  async forgotPassword(@Body() dto: RequestPasswordResetDto) {
+    const result = await this.authService.requestPasswordReset(dto.email);
+    return withMessage(result, result.message);
+  }
+
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  async resetPassword(@Body() dto: ResetPasswordDto) {
+    const result = await this.authService.resetPassword(dto.token, dto.newPassword);
+    return withMessage(result, result.message);
   }
 
   @Post('onboard')

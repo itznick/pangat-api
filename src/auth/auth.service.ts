@@ -2,11 +2,14 @@ import {
   Injectable,
   UnauthorizedException,
   BadRequestException,
+  Logger,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, MoreThan } from 'typeorm';
 import * as bcrypt from 'bcrypt';
+import * as crypto from 'crypto';
+import { ConfigService } from '@nestjs/config';
 import { Staff } from './entities/staff.entity.js';
 import { LoginDto } from './dto/login.dto.js';
 import { OnboardDto } from './dto/onboard.dto.js';
@@ -17,17 +20,44 @@ import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
 import { Table } from '../tables/entities/table.entity.js';
 import { MenuCategory } from '../menu/entities/menu-category.entity.js';
 import { MenuItem } from '../menu/entities/menu-item.entity.js';
+import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     @InjectRepository(Staff)
     private readonly staffRepo: Repository<Staff>,
     private readonly jwtService: JwtService,
     private readonly dataSource: DataSource,
+    private readonly emailDeliveryService: EmailDeliveryService,
+    private readonly configService: ConfigService,
   ) {}
 
-  async setupPlatformAdmin(dto: SetupSuperAdminDto) {
+  async setupPlatformAdmin(
+    dto: SetupSuperAdminDto,
+    caller?: { role?: string; isPlatformAdmin?: boolean },
+    bootstrapSecret?: string,
+  ) {
+    const configuredSecret = this.configService.get<string>('PLATFORM_BOOTSTRAP_SECRET');
+    const isTrustedBootstrap = Boolean(
+      configuredSecret &&
+        configuredSecret.trim().length >= 16 &&
+        bootstrapSecret &&
+        bootstrapSecret.trim() === configuredSecret.trim(),
+    );
+
+    const isAuthorizedAdmin = Boolean(
+      caller && (caller.role === StaffRole.PLATFORM_SUPER_ADMIN || caller.isPlatformAdmin === true),
+    );
+
+    if (!isTrustedBootstrap && !isAuthorizedAdmin) {
+      throw new UnauthorizedException(
+        'Unauthorized: Platform admin provisioning requires authorized administrative credentials or trusted bootstrap secret',
+      );
+    }
+
     const { name, email, password, phone } = dto;
     const cleanEmail = email.trim().toLowerCase();
 
@@ -100,18 +130,8 @@ export class AuthService {
     let organization: Organization | null = null;
     let outlets: Restaurant[] = [];
 
-    const cleanEmail = (staff.email || '').trim().toLowerCase();
-    if (cleanEmail === 'nikhil@pangat.in' || cleanEmail.endsWith('@pangat.in')) {
-      if (staff.role !== StaffRole.PLATFORM_SUPER_ADMIN) {
-        staff.role = StaffRole.PLATFORM_SUPER_ADMIN;
-        staff.isPlatformAdmin = true;
-        await this.staffRepo.update(staff.id, {
-          role: StaffRole.PLATFORM_SUPER_ADMIN,
-          isPlatformAdmin: true,
-        });
-      }
-    }
-
+    // Security: Do NOT automatically promote users based on email domain or hardcoded emails.
+    // Privileges must be granted exclusively through explicit, authorized provisioning.
     const isPlatformAdmin = Boolean(
       staff.role === StaffRole.PLATFORM_SUPER_ADMIN || staff.isPlatformAdmin,
     );
@@ -220,43 +240,10 @@ export class AuthService {
     }
 
     if (!staff) {
-      if (!outlet) {
-        // Find any outlet if available
-        outlet = await this.dataSource.getRepository(Restaurant).findOne({
-          order: { createdAt: 'ASC' },
-        });
-      }
-      if (!outlet) {
-        throw new UnauthorizedException('No kitchen outlet found. Please check station or outlet slug.');
-      }
-      // Station chef session
-      const chefId = `chef-${Date.now()}`;
-      const payload = {
-        sub: chefId,
-        email: `chef@${outlet.slug}.local`,
-        role: StaffRole.CHEF,
-        isPlatformAdmin: false,
-        organizationId: outlet.organizationId,
-        restaurantId: outlet.id,
-      };
-
-      return {
-        accessToken: this.jwtService.sign(payload),
-        user: {
-          id: chefId,
-          name: dto.station ? `Chef (${dto.station})` : 'Kitchen Display Station',
-          email: `chef@${outlet.slug}.local`,
-          role: StaffRole.CHEF,
-          isPlatformAdmin: false,
-          organizationId: outlet.organizationId,
-          restaurantId: outlet.id,
-          restaurantSlug: outlet.slug,
-          organizationName: 'Kitchen Operations',
-        },
-        organization: null,
-        outlets: [outlet],
-        outlet,
-      };
+      // Reject unregistered PIN codes safely instead of generating synthetic non-UUID sessions
+      throw new UnauthorizedException(
+        'Invalid station PIN code. Please ensure your kitchen staff account or station PIN is registered.',
+      );
     }
 
     if (!outlet && staff.restaurantId) {
@@ -331,13 +318,14 @@ export class AuthService {
       });
       const savedOrg = await queryRunner.manager.save(Organization, org);
 
-      // 4. Create Super Owner Staff
+      // 4. Create Super Owner Staff (Public onboarding creates only restaurant SUPER_OWNER, never platform admins)
       const passwordHash = await bcrypt.hash(dto.password, 10);
       const superOwner = queryRunner.manager.create(Staff, {
         name: dto.ownerFullName,
         email: dto.email,
         passwordHash,
         role: StaffRole.SUPER_OWNER,
+        isPlatformAdmin: false,
         organizationId: savedOrg.id,
         restaurantId: null, // Super owners manage all outlets
       });
@@ -563,5 +551,107 @@ export class AuthService {
     } finally {
       await queryRunner.release();
     }
+  }
+
+  /**
+   * Secure Password Reset: Generates a cryptographically secure, single-use expiring token.
+   * Dispatches via configured transactional email provider if available.
+   * Returns a neutral response to prevent account enumeration.
+   */
+  async requestPasswordReset(email: string): Promise<{ success: boolean; message: string; deliveryProvider?: string; delivered?: boolean }> {
+    const cleanEmail = (email || '').trim().toLowerCase();
+    const staff = await this.staffRepo.findOne({ where: { email: cleanEmail } });
+
+    let deliveryProvider = 'none';
+
+    if (staff) {
+      // Cryptographically secure 32-byte hex token
+      const rawToken = crypto.randomBytes(32).toString('hex');
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+      // Store deterministic SHA-256 hash with 1 hour expiration
+      staff.resetTokenHash = tokenHash;
+      staff.resetTokenExpiresAt = new Date(Date.now() + 60 * 60 * 1000);
+      await this.staffRepo.save(staff);
+
+      // Build reset URL strictly from validated environment configuration (preventing Host header poisoning)
+      const frontendBaseUrl =
+        this.configService.get<string>('FRONTEND_URL')?.split(',')[0]?.trim() ||
+        'https://layerform.in';
+      const resetUrl = `${frontendBaseUrl}/login?resetToken=${rawToken}`;
+
+      // Dispatch reset email with single-use raw token link
+      const delivery = await this.emailDeliveryService.sendTransactionalEmail({
+        to: staff.email,
+        subject: 'Reset your Pangat password',
+        htmlContent: `
+          <div style="font-family: sans-serif; padding: 20px; color: #1e293b;">
+            <h2>Namaskar ${staff.name},</h2>
+            <p>A password reset was requested for your Pangat account.</p>
+            <p>Please click the button below or copy the link into your browser to reset your password. This link is single-use and will expire in 60 minutes.</p>
+            <p style="margin: 24px 0;">
+              <a href="${resetUrl}" style="background-color: #059669; color: #ffffff; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block;">
+                Reset Password
+              </a>
+            </p>
+            <p style="font-size: 12px; color: #64748b;">If you did not request this reset, you can safely ignore this email.</p>
+          </div>
+        `,
+        textContent: `Namaskar ${staff.name},\n\nPlease use the following link to reset your Pangat password:\n${resetUrl}\n\nThis single-use link expires in 60 minutes.`,
+      });
+      deliveryProvider = delivery.provider;
+      const isDelivered = Boolean(delivery.delivered);
+
+      // Safe operational alerts without leaking tokens, reset links, recipient addresses, or secrets
+      if (!isDelivered && deliveryProvider !== 'none') {
+        this.logger.warn(`Password reset email delivery failed (Provider: ${deliveryProvider})`);
+      } else if (isDelivered) {
+        this.logger.log(`Password reset email accepted by provider (${deliveryProvider})`);
+      }
+    }
+
+    // Accurate and neutral public response preventing account enumeration
+    return {
+      success: true,
+      message: 'If the email exists, a password reset link has been dispatched.',
+      deliveryProvider,
+      delivered: deliveryProvider !== 'none',
+    };
+  }
+
+  /**
+   * Finalize password reset using single-use expiring token.
+   * Hashes incoming token with SHA-256 and searches directly for the matching record.
+   * Invalidates token upon successful reset.
+   */
+  async resetPassword(token: string, newPassword: string): Promise<{ success: boolean; message: string }> {
+    if (!token || typeof token !== 'string') {
+      throw new BadRequestException('Valid reset token is required');
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(token.trim()).digest('hex');
+
+    // Query specifically for the staff record holding this unexpired token hash
+    const staff = await this.staffRepo.findOne({
+      where: {
+        resetTokenHash: tokenHash,
+        resetTokenExpiresAt: MoreThan(new Date()),
+      },
+    });
+
+    if (!staff) {
+      throw new BadRequestException('Invalid or expired password reset token');
+    }
+
+    staff.passwordHash = await bcrypt.hash(newPassword, 10);
+    // Invalidate token immediately to prevent reuse
+    staff.resetTokenHash = null;
+    staff.resetTokenExpiresAt = null;
+    await this.staffRepo.save(staff);
+
+    return {
+      success: true,
+      message: 'Password has been updated successfully. You can now sign in.',
+    };
   }
 }

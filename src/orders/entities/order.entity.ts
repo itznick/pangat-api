@@ -27,6 +27,10 @@ export class Order {
   @PrimaryColumn({ length: 20 })
   id: string;
 
+  /** High-entropy diner tracking token for secure, non-enumerable public tracking */
+  @Column({ name: 'tracking_token', type: 'varchar', length: 64, nullable: true, unique: true })
+  trackingToken: string | null;
+
   @Column({ name: 'restaurant_id' })
   restaurantId: string;
 
@@ -79,8 +83,18 @@ export class Order {
   idempotencyKey: string;
 
   /** Timestamp when payment was settled at counter or online */
-  @Column({ name: 'settled_at', type: 'timestamp', nullable: true })
+  @Column({ name: 'settled_at', type: 'timestamp with time zone', nullable: true })
   settledAt: Date | null;
+
+  /** Stage transition timestamps for SLA and KDS duration analytics */
+  @Column({ name: 'preparing_at', type: 'timestamp with time zone', nullable: true })
+  preparingAt: Date | null;
+
+  @Column({ name: 'ready_at', type: 'timestamp with time zone', nullable: true })
+  readyAt: Date | null;
+
+  @Column({ name: 'completed_at', type: 'timestamp with time zone', nullable: true })
+  completedAt: Date | null;
 
   /** Diner feedback & rating stored as json */
   @Column({ type: 'jsonb', nullable: true })
@@ -97,9 +111,9 @@ export class Order {
   })
   items: OrderItem[];
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ name: 'created_at', type: 'timestamp with time zone' })
   createdAt: Date;
 
-  @UpdateDateColumn({ name: 'updated_at' })
+  @UpdateDateColumn({ name: 'updated_at', type: 'timestamp with time zone' })
   updatedAt: Date;
 }

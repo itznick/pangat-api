@@ -65,9 +65,16 @@ export class Staff {
   @Column({ name: 'phone', type: 'varchar', length: 30, nullable: true })
   phone: string | null;
 
-  @CreateDateColumn({ name: 'created_at' })
+  /** Expiring single-use reset token hash for secure forgot-password flows */
+  @Column({ name: 'reset_token_hash', type: 'varchar', length: 255, nullable: true })
+  resetTokenHash: string | null;
+
+  @Column({ name: 'reset_token_expires_at', type: 'timestamp with time zone', nullable: true })
+  resetTokenExpiresAt: Date | null;
+
+  @CreateDateColumn({ name: 'created_at', type: 'timestamp with time zone' })
   createdAt: Date;
 
-  @UpdateDateColumn({ name: 'updated_at' })
+  @UpdateDateColumn({ name: 'updated_at', type: 'timestamp with time zone' })
   updatedAt: Date;
 }

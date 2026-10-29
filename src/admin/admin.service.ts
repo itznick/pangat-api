@@ -461,6 +461,8 @@ export class AdminService {
     owner.passwordHash = await bcrypt.hash(tempPassword, 10);
     await staffRepo.save(owner);
 
+    // Documented in Security Audit: In production, dispatch via transactional email (AWS SES/SendGrid/Resend)
+    // rather than relying solely on operator portal distribution.
     return {
       success: true,
       message: `Password reset successfully for ${owner.name}`,

@@ -1,12 +1,26 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Not } from 'typeorm';
+import * as crypto from 'crypto';
 import { Order } from './entities/order.entity.js';
-import { OrderItem } from './entities/order-item.entity.js';
+import { OrderItem, SelectedModifierSnapshot } from './entities/order-item.entity.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
 import { Table } from '../tables/entities/table.entity.js';
+import { MenuItem } from '../menu/entities/menu-item.entity.js';
+import { Modifier } from '../menu/entities/modifier.entity.js';
 import { CreateOrderDto } from './dto/create-order.dto.js';
-import { OrderStatus, PaymentMethod, PaymentStatus, TableStatus } from '../common/enums/index.js';
+import {
+  OrderStatus,
+  PaymentMethod,
+  PaymentStatus,
+  TableStatus,
+  StaffRole,
+} from '../common/enums/index.js';
 import { EventsGateway } from '../events/events.gateway.js';
 
 @Injectable()
@@ -20,6 +34,10 @@ export class OrdersService {
     private readonly restaurantRepo: Repository<Restaurant>,
     @InjectRepository(Table)
     private readonly tableRepo: Repository<Table>,
+    @InjectRepository(MenuItem)
+    private readonly menuItemRepo: Repository<MenuItem>,
+    @InjectRepository(Modifier)
+    private readonly modifierRepo: Repository<Modifier>,
     private readonly eventsGateway: EventsGateway,
   ) {}
 
@@ -88,25 +106,82 @@ export class OrdersService {
 
     const finalTableNumber = table ? table.tableNumber : rawTable;
 
-    // Compute bill values
+    // Server-Side Verification: Do NOT trust client-supplied item names, prices, or modifier amounts.
+    // Reload every item and modifier from the database, check restaurant ownership & availability.
     let subtotal = 0;
     const orderItems: OrderItem[] = [];
 
     for (const itemDto of dto.items) {
-      const modTotal = (itemDto.selectedModifiers || []).reduce(
-        (sum, m) => sum + Number(m.price),
-        0,
-      );
-      const lineTotal = (Number(itemDto.price) + modTotal) * itemDto.quantity;
+      const menuItem = await this.menuItemRepo.findOne({
+        where: { id: itemDto.menuItemId },
+        relations: { modifiers: true },
+      });
+
+      if (!menuItem) {
+        throw new BadRequestException(
+          `Menu item with ID '${itemDto.menuItemId}' does not exist`,
+        );
+      }
+
+      // Verify item belongs strictly to this restaurant
+      if (menuItem.restaurantId !== restaurant.id) {
+        throw new BadRequestException(
+          `Menu item '${menuItem.name}' does not belong to restaurant '${restaurant.name}'`,
+        );
+      }
+
+      // Verify item is currently available
+      if (!menuItem.isAvailable) {
+        throw new BadRequestException(
+          `Item '${menuItem.name}' is currently unavailable (out of stock)`,
+        );
+      }
+
+      const verifiedBasePrice = Number(menuItem.price);
+      const verifiedItemName = menuItem.name;
+
+      // Validate selected modifiers and compute verified modifier prices server-side
+      let verifiedModTotal = 0;
+      const verifiedSelectedModifiers: SelectedModifierSnapshot[] = [];
+
+      if (Array.isArray(itemDto.selectedModifiers) && itemDto.selectedModifiers.length > 0) {
+        const itemModifiers = menuItem.modifiers || [];
+        const validOptionsMap = new Map<string, number>();
+
+        for (const mod of itemModifiers) {
+          if (Array.isArray(mod.options)) {
+            for (const opt of mod.options) {
+              validOptionsMap.set(opt.name.trim().toLowerCase(), Number(opt.price));
+            }
+          }
+        }
+
+        for (const selected of itemDto.selectedModifiers) {
+          const optKey = (selected.name || '').trim().toLowerCase();
+          const officialPrice = validOptionsMap.get(optKey);
+          if (officialPrice === undefined) {
+            throw new BadRequestException(
+              `Invalid modifier selection '${selected.name}' for item '${menuItem.name}'`,
+            );
+          }
+          verifiedModTotal += officialPrice;
+          verifiedSelectedModifiers.push({
+            name: selected.name,
+            price: officialPrice,
+          });
+        }
+      }
+
+      const lineTotal = (verifiedBasePrice + verifiedModTotal) * itemDto.quantity;
       subtotal += lineTotal;
 
       const orderItem = this.orderItemRepo.create({
-        menuItemId: itemDto.menuItemId,
-        name: itemDto.name,
-        price: Number(itemDto.price),
+        menuItemId: menuItem.id,
+        name: verifiedItemName,
+        price: verifiedBasePrice,
         quantity: itemDto.quantity,
-        selectedModifiers: itemDto.selectedModifiers || [],
-        notes: itemDto.notes || null,
+        selectedModifiers: verifiedSelectedModifiers,
+        notes: itemDto.notes ? String(itemDto.notes).slice(0, 500) : null,
       });
       orderItems.push(orderItem);
     }
@@ -115,18 +190,22 @@ export class OrdersService {
     const gstAmount = Math.round(subtotal * (gstPct / 100) * 100) / 100;
     const totalAmount = Math.round((subtotal + gstAmount) * 100) / 100;
 
-    const orderId = `ORD-${Math.floor(1000 + Math.random() * 9000)}`;
+    // High-Entropy IDs: Replace enumerable sequential/4-digit IDs with high-entropy tracking token
+    const trackingToken = crypto.randomBytes(24).toString('hex');
+    const orderId = `ORD-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
 
-    const isCounter = dto.paymentMethod === PaymentMethod.PAY_AT_COUNTER;
-    const paymentStatus = isCounter ? PaymentStatus.PENDING : PaymentStatus.PAID;
+    // Security & Data Integrity: Never auto-mark orders as PAID without verified gateway confirmation.
+    // Both PAY_AT_COUNTER and UPI_INSTANT initialize as PENDING until confirmed by cashier or payment webhook.
+    const paymentStatus = PaymentStatus.PENDING;
 
     const order = this.orderRepo.create({
       id: orderId,
+      trackingToken,
       restaurantId: restaurant.id,
       tableNumber: finalTableNumber,
       orderStatus: OrderStatus.RECEIVED,
       paymentStatus,
-      paymentMethod: dto.paymentMethod || PaymentMethod.UPI_INSTANT,
+      paymentMethod: dto.paymentMethod || PaymentMethod.PAY_AT_COUNTER,
       customerPhone: dto.customerPhone || null,
       subtotal,
       gstAmount,
@@ -229,7 +308,7 @@ export class OrdersService {
 
   async findOne(id: string): Promise<Order> {
     const order = await this.orderRepo.findOne({
-      where: { id },
+      where: [{ id }, { trackingToken: id }],
       relations: { items: true, restaurant: true },
     });
 
@@ -238,6 +317,90 @@ export class OrdersService {
     }
 
     return order;
+  }
+
+  /**
+   * Secure Order Lookup for Caller:
+   * 1. Staff with JWT can view full order details for their restaurant.
+   * 2. Diners must supply the high-entropy tracking token (via path or query parameter).
+   * 3. Prevents enumeration: unauthenticated requests without the valid tracking token receive a non-disclosing 404.
+   * 4. Returns restricted, minimal diner-facing fields for public tracking.
+   */
+  async findOrderForCaller(
+    idOrToken: string,
+    tokenParam?: string,
+    user?: any,
+  ): Promise<any> {
+    const cleanIdentifier = (idOrToken || '').trim();
+    const cleanToken = (tokenParam || '').trim();
+
+    const order = await this.orderRepo.findOne({
+      where: [
+        { id: cleanIdentifier },
+        { trackingToken: cleanIdentifier },
+        ...(cleanToken ? [{ trackingToken: cleanToken }] : []),
+      ],
+      relations: { items: true, restaurant: true },
+    });
+
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    // 1. Authenticated Staff Access
+    if (user) {
+      const isPlatformAdmin =
+        user.isPlatformAdmin === true || user.role === StaffRole.PLATFORM_SUPER_ADMIN;
+      if (isPlatformAdmin) {
+        return order;
+      }
+      if (user.restaurantId && user.restaurantId === order.restaurantId) {
+        return order;
+      }
+      if (user.organizationId) {
+        const rest = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });
+        if (rest && rest.organizationId === user.organizationId) {
+          return order;
+        }
+      }
+      throw new ForbiddenException('Access denied: Unauthorized for this restaurant');
+    }
+
+    // 2. Unauthenticated Diner Tracking Access:
+    // Requires exact match with high-entropy tracking token to prevent sequential/enumerable order scraping.
+    const isTokenMatch =
+      order.trackingToken &&
+      (cleanIdentifier === order.trackingToken || cleanToken === order.trackingToken);
+
+    if (!isTokenMatch) {
+      // Non-disclosing 404 to block order enumeration attacks
+      throw new NotFoundException('Order not found');
+    }
+
+    // Restricted diner-facing projection
+    return {
+      id: order.id,
+      trackingToken: order.trackingToken,
+      tableNumber: order.tableNumber,
+      orderStatus: order.orderStatus,
+      paymentStatus: order.paymentStatus,
+      paymentMethod: order.paymentMethod,
+      subtotal: order.subtotal,
+      gstAmount: order.gstAmount,
+      totalAmount: order.totalAmount,
+      createdAt: order.createdAt,
+      preparingAt: order.preparingAt,
+      readyAt: order.readyAt,
+      settledAt: order.settledAt,
+      feedback: order.feedback,
+      items: (order.items || []).map((item) => ({
+        name: item.name,
+        quantity: item.quantity,
+        price: item.price,
+        selectedModifiers: item.selectedModifiers,
+        notes: item.notes,
+      })),
+    };
   }
 
   async submitFeedback(
@@ -254,8 +417,11 @@ export class OrdersService {
     return this.orderRepo.save(order);
   }
 
-  async updateStatus(id: string, status: OrderStatus): Promise<Order> {
+  async updateStatus(id: string, status: OrderStatus, authorizedRestaurantId?: string): Promise<Order> {
     const order = await this.findOne(id);
+    if (authorizedRestaurantId && order.restaurantId !== authorizedRestaurantId) {
+      throw new ForbiddenException('Access denied: Order does not belong to authorized restaurant');
+    }
     let restaurantSlug: string | undefined = order.restaurant?.slug;
     if (!restaurantSlug && order.restaurantId) {
       const rest = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });
@@ -263,6 +429,14 @@ export class OrdersService {
     }
 
     order.orderStatus = status;
+    const now = new Date();
+    if (status === OrderStatus.PREPARING && !order.preparingAt) {
+      order.preparingAt = now;
+    } else if (status === OrderStatus.READY && !order.readyAt) {
+      order.readyAt = now;
+    } else if (status === OrderStatus.COMPLETED && !order.completedAt) {
+      order.completedAt = now;
+    }
     const saved = await this.orderRepo.save(order);
 
     // Synchronize table status according to the full live orders state
@@ -307,8 +481,11 @@ export class OrdersService {
     return saved;
   }
 
-  async markPaid(id: string): Promise<Order> {
+  async markPaid(id: string, authorizedRestaurantId?: string): Promise<Order> {
     const order = await this.findOne(id);
+    if (authorizedRestaurantId && order.restaurantId !== authorizedRestaurantId) {
+      throw new ForbiddenException('Access denied: Order does not belong to authorized restaurant');
+    }
     let restaurantSlug: string | undefined = order.restaurant?.slug;
     if (!restaurantSlug && order.restaurantId) {
       const rest = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });

@@ -23,15 +23,25 @@ export class RestaurantsService {
     private readonly orderRepo: Repository<Order>,
   ) {}
 
-  async findBySlug(slug: string): Promise<Restaurant> {
-    const cleanSlug = slug.trim().toLowerCase();
-    const restaurant = await this.restaurantRepo.findOne({
-      where: [{ slug: cleanSlug }, { slug }],
-      relations: { tables: true },
-    });
+  async findBySlug(identifier: string): Promise<Restaurant> {
+    const clean = identifier.trim();
+    const cleanLower = clean.toLowerCase();
+    
+    // Check if identifier is a UUID
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clean);
+
+    const restaurant = isUuid
+      ? await this.restaurantRepo.findOne({
+          where: [{ id: clean }, { slug: cleanLower }],
+          relations: { tables: true },
+        })
+      : await this.restaurantRepo.findOne({
+          where: [{ slug: cleanLower }, { slug: clean }],
+          relations: { tables: true },
+        });
 
     if (!restaurant) {
-      throw new NotFoundException(`Restaurant with slug '${slug}' not found`);
+      throw new NotFoundException(`Restaurant '${identifier}' not found`);
     }
 
     return restaurant;

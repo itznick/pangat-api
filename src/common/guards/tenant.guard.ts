@@ -26,28 +26,28 @@ export class TenantGuard implements CanActivate {
       throw new UnauthorizedException('Authentication required');
     }
 
-    // Platform Super Admin bypasses single-tenant restriction
+    // Platform Super Admin bypasses single-tenant restriction explicitly
     if (user.isPlatformAdmin === true || user.role === StaffRole.PLATFORM_SUPER_ADMIN) {
       return true;
     }
 
     const { params, query, body } = request;
 
-    // Resolve targeted restaurantId from any available context
+    // Resolve targeted restaurantId from request context
     let targetRestaurantId: string | null = null;
 
     if (query?.restaurantId) {
-      targetRestaurantId = query.restaurantId;
+      targetRestaurantId = String(query.restaurantId).trim();
     } else if (body?.restaurantId) {
-      targetRestaurantId = body.restaurantId;
+      targetRestaurantId = String(body.restaurantId).trim();
     }
 
-    // Resolve if restaurantSlug is provided
+    // Resolve target restaurant by slug if provided
     const targetSlug = query?.restaurantSlug || body?.restaurantSlug || params?.slug || params?.restaurantSlug;
     if (!targetRestaurantId && targetSlug) {
       const cleanSlug = String(targetSlug).trim().toLowerCase();
       const restaurant = await this.dataSource.getRepository(Restaurant).findOne({
-        where: [{ slug: cleanSlug }, { slug: targetSlug }],
+        where: [{ slug: cleanSlug }, { slug: String(targetSlug).trim() }],
       });
       if (!restaurant) {
         throw new NotFoundException(`Target restaurant '${targetSlug}' not found`);
@@ -57,7 +57,8 @@ export class TenantGuard implements CanActivate {
 
     // Resolve if an entity ID is in params
     if (!targetRestaurantId && params?.id) {
-      const entityId = params.id;
+      const entityId = String(params.id).trim();
+
       // 1. Is it an order?
       const order = await this.dataSource.getRepository(Order).findOne({
         where: { id: entityId },
@@ -92,6 +93,9 @@ export class TenantGuard implements CanActivate {
               });
               if (rest) {
                 targetRestaurantId = rest.id;
+              } else {
+                // If an ID was given but no matching entity exists in the system, fail closed
+                throw new NotFoundException(`Resource with ID '${entityId}' not found`);
               }
             }
           }
@@ -99,19 +103,26 @@ export class TenantGuard implements CanActivate {
       }
     }
 
-    // If no specific restaurant was referenced, and user has an assigned restaurant or organization, allow
+    // FAIL-CLOSED: If no target restaurant could be resolved from params, query, or body,
+    // fallback ONLY to the user's explicit assigned restaurant if present; otherwise REJECT.
     if (!targetRestaurantId) {
-      return true;
+      if (user.restaurantId) {
+        targetRestaurantId = user.restaurantId;
+      } else {
+        throw new ForbiddenException(
+          'Access denied: Target restaurant context is required for this operation',
+        );
+      }
     }
 
-    // Now verify that the authenticated user is authorized for targetRestaurantId
-    // If user has a specific restaurantId assigned (e.g. CHEF, CASHIER, STORE_MANAGER)
+    // Verify authorized access to targetRestaurantId
+    // 1. Assigned staff (CHEF, CASHIER, STORE_MANAGER) strictly limited to their restaurant
     if (user.restaurantId && user.restaurantId === targetRestaurantId) {
       return true;
     }
 
-    // If user is SUPER_OWNER with organizationId, check if targetRestaurant belongs to their organization
-    if (user.organizationId) {
+    // 2. Organization Super Owner (SUPER_OWNER) can access any outlet in their organization
+    if (user.organizationId && targetRestaurantId) {
       const targetRest = await this.dataSource.getRepository(Restaurant).findOne({
         where: { id: targetRestaurantId },
       });
@@ -120,6 +131,7 @@ export class TenantGuard implements CanActivate {
       }
     }
 
+    // Fail closed with 403 Forbidden
     throw new ForbiddenException(
       'Access denied: You do not have permission to access or modify records for this restaurant',
     );

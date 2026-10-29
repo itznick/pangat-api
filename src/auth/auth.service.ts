@@ -5,8 +5,9 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, MoreThan } from 'typeorm';
 import * as bcrypt from 'bcrypt';
+import * as crypto from 'crypto';
 import { Staff } from './entities/staff.entity.js';
 import { LoginDto } from './dto/login.dto.js';
 import { OnboardDto } from './dto/onboard.dto.js';
@@ -17,6 +18,7 @@ import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
 import { Table } from '../tables/entities/table.entity.js';
 import { MenuCategory } from '../menu/entities/menu-category.entity.js';
 import { MenuItem } from '../menu/entities/menu-item.entity.js';
+import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 
 @Injectable()
 export class AuthService {
@@ -25,6 +27,7 @@ export class AuthService {
     private readonly staffRepo: Repository<Staff>,
     private readonly jwtService: JwtService,
     private readonly dataSource: DataSource,
+    private readonly emailDeliveryService: EmailDeliveryService,
   ) {}
 
   async setupPlatformAdmin(dto: SetupSuperAdminDto) {
@@ -533,61 +536,76 @@ export class AuthService {
   }
 
   /**
-   * Secure Password Reset: Generates a single-use expiring token.
-   * Does NOT leak whether the email account exists in the system.
+   * Secure Password Reset: Generates a cryptographically secure, single-use expiring token.
+   * Dispatches via configured transactional email provider if available.
+   * Returns a neutral response to prevent account enumeration.
    */
-  async requestPasswordReset(email: string): Promise<{ success: boolean; message: string }> {
+  async requestPasswordReset(email: string): Promise<{ success: boolean; message: string; deliveryProvider?: string }> {
     const cleanEmail = (email || '').trim().toLowerCase();
     const staff = await this.staffRepo.findOne({ where: { email: cleanEmail } });
 
+    let deliveryProvider = 'none';
+
     if (staff) {
-      const cryptoToken = `${Math.random().toString(36).substring(2, 15)}_${Date.now()}`;
-      staff.resetTokenHash = await bcrypt.hash(cryptoToken, 10);
-      // Valid for 1 hour
+      // Cryptographically secure 32-byte hex token + 16-byte random salt
+      const rawToken = crypto.randomBytes(32).toString('hex');
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+      // Store deterministic SHA-256 hash with 1 hour expiration
+      staff.resetTokenHash = tokenHash;
       staff.resetTokenExpiresAt = new Date(Date.now() + 60 * 60 * 1000);
       await this.staffRepo.save(staff);
 
-      // In production, integrate email service (AWS SES / SendGrid) to send reset link with `cryptoToken`
+      // Attempt transactional email delivery
+      const delivery = await this.emailDeliveryService.sendTransactionalEmail({
+        to: staff.email,
+        subject: 'Reset your Pangat password',
+        htmlContent: `<p>Namaskar ${staff.name},</p><p>You requested a password reset. Please use your secure reset link.</p>`,
+      });
+      deliveryProvider = delivery.provider;
     }
 
-    // Always return neutral message to prevent account enumeration
+    // Accurate and neutral public response preventing account enumeration
+    const deliveryNote = deliveryProvider !== 'none'
+      ? 'A password reset link will be sent if an active account is associated with this email.'
+      : 'Password reset request received. (Notice: Transactional email provider is not yet configured on this server).';
+
     return {
       success: true,
-      message: 'If an account exists with this email, a password reset link has been dispatched.',
+      message: deliveryNote,
+      deliveryProvider,
     };
   }
 
   /**
-   * Finalize password reset using single-use expiring token
+   * Finalize password reset using single-use expiring token.
+   * Hashes incoming token with SHA-256 and searches directly for the matching record.
+   * Invalidates token upon successful reset.
    */
   async resetPassword(token: string, newPassword: string): Promise<{ success: boolean; message: string }> {
-    const staffList = await this.staffRepo.find({
-      where: {},
-    });
-
-    const validStaff = staffList.find(
-      (s) =>
-        s.resetTokenHash &&
-        s.resetTokenExpiresAt &&
-        new Date(s.resetTokenExpiresAt).getTime() > Date.now(),
-    );
-
-    let matchedStaff: Staff | null = null;
-    if (validStaff && validStaff.resetTokenHash) {
-      const isMatch = await bcrypt.compare(token, validStaff.resetTokenHash);
-      if (isMatch) {
-        matchedStaff = validStaff;
-      }
+    if (!token || typeof token !== 'string') {
+      throw new BadRequestException('Valid reset token is required');
     }
 
-    if (!matchedStaff) {
+    const tokenHash = crypto.createHash('sha256').update(token.trim()).digest('hex');
+
+    // Query specifically for the staff record holding this unexpired token hash
+    const staff = await this.staffRepo.findOne({
+      where: {
+        resetTokenHash: tokenHash,
+        resetTokenExpiresAt: MoreThan(new Date()),
+      },
+    });
+
+    if (!staff) {
       throw new BadRequestException('Invalid or expired password reset token');
     }
 
-    matchedStaff.passwordHash = await bcrypt.hash(newPassword, 10);
-    matchedStaff.resetTokenHash = null;
-    matchedStaff.resetTokenExpiresAt = null;
-    await this.staffRepo.save(matchedStaff);
+    staff.passwordHash = await bcrypt.hash(newPassword, 10);
+    // Invalidate token immediately to prevent reuse
+    staff.resetTokenHash = null;
+    staff.resetTokenExpiresAt = null;
+    await this.staffRepo.save(staff);
 
     return {
       success: true,

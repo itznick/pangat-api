@@ -12,6 +12,7 @@ import { MenuItem } from '../menu/entities/menu-item.entity.js';
 import { AuthService } from './auth.service.js';
 import { AuthController, OnboardingController } from './auth.controller.js';
 import { JwtStrategy } from './jwt.strategy.js';
+import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 
 @Module({
   imports: [
@@ -36,7 +37,7 @@ import { JwtStrategy } from './jwt.strategy.js';
     }),
   ],
   controllers: [AuthController, OnboardingController],
-  providers: [AuthService, JwtStrategy],
-  exports: [AuthService, JwtStrategy, PassportModule],
+  providers: [AuthService, JwtStrategy, EmailDeliveryService],
+  exports: [AuthService, JwtStrategy, PassportModule, EmailDeliveryService],
 })
 export class AuthModule {}

@@ -8,7 +8,7 @@ import { EmailDeliveryService } from '../dist/common/services/email-delivery.ser
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('1. Real Email Delivery & Failure Reporting', () => {
-  it('returns delivered: false and provider: "none" when no email credentials exist', async () => {
+  it('handles missing configuration safely (returns delivered: false and provider: "none")', async () => {
     const mockConfigService = {
       get: (key) => {
         if (key === 'EMAIL_FROM') return 'no-reply@pangat.in'
@@ -17,37 +17,139 @@ describe('1. Real Email Delivery & Failure Reporting', () => {
     }
     const service = new EmailDeliveryService(mockConfigService)
     const result = await service.sendTransactionalEmail({
-      to: 'diner@example.com',
+      to: 'staff@example.com',
       subject: 'Password Reset',
       htmlContent: '<p>Reset link</p>',
     })
 
     assert.equal(result.delivered, false)
     assert.equal(result.provider, 'none')
+    assert.equal(result.messageId, undefined)
     assert.match(result.error || '', /Transactional email provider is not configured/)
   })
 
-  it('fails safely and reports error without fabricated message IDs on provider rejection or network failure', async () => {
-    // Provide a SendGrid key to test real failure reporting without fabricating IDs
-    const mockConfigService = {
-      get: (key) => {
-        if (key === 'SENDGRID_API_KEY') return 'SG.invalid_test_key_for_failure_handling'
-        if (key === 'EMAIL_FROM') return 'no-reply@pangat.in'
-        return undefined
-      },
-    }
-    const service = new EmailDeliveryService(mockConfigService)
-    const result = await service.sendTransactionalEmail({
-      to: 'diner@example.com',
-      subject: 'Password Reset',
-      htmlContent: '<p>Reset link</p>',
-    })
+  it('handles provider acceptance and returns genuine provider message ID', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = async () =>
+        new Response(null, {
+          status: 202,
+          headers: new Headers({ 'x-message-id': 'sg_real_unique_message_header_9981' }),
+        })
 
-    assert.equal(result.delivered, false)
-    assert.equal(result.provider, 'sendgrid')
-    // Correctly captures real network/HTTP rejection message
-    assert.ok(result.error)
-    assert.equal(result.messageId, undefined)
+      const mockConfigService = {
+        get: (key) => {
+          if (key === 'SENDGRID_API_KEY') return 'SG.valid_mock_key'
+          if (key === 'EMAIL_FROM') return 'no-reply@pangat.in'
+          return undefined
+        },
+      }
+      const service = new EmailDeliveryService(mockConfigService)
+      const result = await service.sendTransactionalEmail({
+        to: 'staff@example.com',
+        subject: 'Password Reset',
+        htmlContent: '<p>Reset link</p>',
+      })
+
+      assert.equal(result.delivered, true)
+      assert.equal(result.provider, 'sendgrid')
+      assert.equal(result.messageId, 'sg_real_unique_message_header_9981')
+      assert.equal(result.error, undefined)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('handles provider acceptance without message ID without fabricating synthetic fallbacks', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      // Provider accepts with 200/202, but does not provide an x-message-id header
+      globalThis.fetch = async () =>
+        new Response(null, {
+          status: 200,
+          headers: new Headers({}),
+        })
+
+      const mockConfigService = {
+        get: (key) => {
+          if (key === 'SENDGRID_API_KEY') return 'SG.valid_mock_key'
+          return undefined
+        },
+      }
+      const service = new EmailDeliveryService(mockConfigService)
+      const result = await service.sendTransactionalEmail({
+        to: 'staff@example.com',
+        subject: 'Password Reset',
+        htmlContent: '<p>Reset link</p>',
+      })
+
+      assert.equal(result.delivered, true)
+      assert.equal(result.provider, 'sendgrid')
+      // MUST NOT fabricate a fake sg_ fallback ID
+      assert.equal(result.messageId, undefined)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('handles rejected provider requests safely without returning false success or leaking secrets', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = async () =>
+        new Response(JSON.stringify({ errors: [{ message: 'Unauthorized grant' }] }), {
+          status: 401,
+          statusText: 'Unauthorized',
+        })
+
+      const mockConfigService = {
+        get: (key) => {
+          if (key === 'SENDGRID_API_KEY') return 'SG.invalid_key'
+          return undefined
+        },
+      }
+      const service = new EmailDeliveryService(mockConfigService)
+      const result = await service.sendTransactionalEmail({
+        to: 'staff@example.com',
+        subject: 'Password Reset',
+        htmlContent: '<p>Reset link</p>',
+      })
+
+      assert.equal(result.delivered, false)
+      assert.equal(result.provider, 'sendgrid')
+      assert.equal(result.messageId, undefined)
+      assert.match(result.error || '', /SendGrid HTTP 401/)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('handles network errors gracefully without crashing or fabricating message IDs', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = async () => {
+        throw new Error('connect ECONNREFUSED api.sendgrid.com:443')
+      }
+
+      const mockConfigService = {
+        get: (key) => {
+          if (key === 'SENDGRID_API_KEY') return 'SG.mock_key'
+          return undefined
+        },
+      }
+      const service = new EmailDeliveryService(mockConfigService)
+      const result = await service.sendTransactionalEmail({
+        to: 'staff@example.com',
+        subject: 'Password Reset',
+        htmlContent: '<p>Reset link</p>',
+      })
+
+      assert.equal(result.delivered, false)
+      assert.equal(result.provider, 'sendgrid')
+      assert.equal(result.messageId, undefined)
+      assert.match(result.error || '', /connect ECONNREFUSED/)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })
 

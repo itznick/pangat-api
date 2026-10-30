@@ -10,12 +10,19 @@ export enum TableStatus {
   SERVED   = 'SERVED',
 }
 
+export enum OrderType {
+  DINE_IN  = 'DINE_IN',
+  TAKEAWAY = 'TAKEAWAY',
+  DELIVERY = 'DELIVERY',
+}
+
 export enum OrderStatus {
-  RECEIVED  = 'RECEIVED',
-  PREPARING = 'PREPARING',
-  READY     = 'READY',
-  COMPLETED = 'COMPLETED',
-  CANCELLED = 'CANCELLED',
+  RECEIVED   = 'RECEIVED',
+  PREPARING  = 'PREPARING',
+  READY      = 'READY',
+  DISPATCHED = 'DISPATCHED',
+  COMPLETED  = 'COMPLETED',
+  CANCELLED  = 'CANCELLED',
 }
 
 export enum PaymentStatus {

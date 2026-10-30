@@ -64,3 +64,32 @@ CREATE TABLE IF NOT EXISTS stock_movements (
 CREATE INDEX IF NOT EXISTS idx_stock_movements_restaurant_date ON stock_movements(restaurant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stock_movements_ingredient_date ON stock_movements(ingredient_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stock_movements_order_ref ON stock_movements(reference_order_id);
+
+-- 6. Create recipes table
+CREATE TABLE IF NOT EXISTS recipes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  restaurant_id UUID NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+  menu_item_id UUID NOT NULL REFERENCES menu_items(id) ON DELETE CASCADE,
+  version INT NOT NULL DEFAULT 1,
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_recipes_restaurant_menu_item ON recipes(restaurant_id, menu_item_id);
+CREATE INDEX IF NOT EXISTS idx_recipes_active ON recipes(restaurant_id, menu_item_id, is_active);
+
+-- 7. Create recipe_ingredients table
+CREATE TABLE IF NOT EXISTS recipe_ingredients (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  recipe_id UUID NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
+  ingredient_id UUID NOT NULL REFERENCES ingredients(id) ON DELETE CASCADE,
+  quantity NUMERIC(12,3) NOT NULL,
+  unit VARCHAR(30) NOT NULL DEFAULT 'KG',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_recipe ON recipe_ingredients(recipe_id);
+CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_ingredient ON recipe_ingredients(ingredient_id);
+

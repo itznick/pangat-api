@@ -20,6 +20,7 @@ import { UpdateIngredientDto } from './dto/update-ingredient.dto.js';
 import { AdjustStockDto } from './dto/adjust-stock.dto.js';
 import { ReceiveStockDto } from './dto/receive-stock.dto.js';
 import { StockMovementQueryDto } from './dto/stock-movement-query.dto.js';
+import { CreateRecipeDto } from './dto/create-recipe.dto.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 import { RolesGuard } from '../common/guards/roles.guard.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
@@ -155,5 +156,42 @@ export class InventoryController {
   async getAlerts(@Query('restaurantId') restaurantId: string) {
     const alerts = await this.inventoryService.getLowStockAlerts(restaurantId);
     return withMessage(alerts, 'Inventory alerts retrieved successfully');
+  }
+
+  /**
+   * List all active recipes in the authorized outlet.
+   */
+  @Get('recipes')
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER, StaffRole.CHEF)
+  async findAllRecipes(@Query('restaurantId') restaurantId: string) {
+    const recipes = await this.inventoryService.findAllRecipes(restaurantId);
+    return withMessage(recipes, 'Recipes retrieved successfully');
+  }
+
+  /**
+   * Find active recipe for a specific menu item.
+   */
+  @Get('recipes/menu-item/:menuItemId')
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER, StaffRole.CHEF)
+  async findRecipeByMenuItem(
+    @Param('menuItemId') menuItemId: string,
+    @Query('restaurantId') restaurantId: string,
+  ) {
+    const recipe = await this.inventoryService.findRecipeByMenuItem(restaurantId, menuItemId);
+    return withMessage(recipe, 'Recipe retrieved successfully');
+  }
+
+  /**
+   * Create or update recipe for a menu item.
+   */
+  @Post('recipes')
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER, StaffRole.CHEF)
+  async upsertRecipe(
+    @Query('restaurantId') restaurantId: string,
+    @Body() dto: CreateRecipeDto,
+    @Req() req: any,
+  ) {
+    const recipe = await this.inventoryService.upsertRecipe(restaurantId, dto, req?.user);
+    return withMessage(recipe, 'Recipe saved successfully');
   }
 }

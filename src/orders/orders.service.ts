@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
@@ -29,6 +30,7 @@ import {
 } from '../common/enums/index.js';
 import { EventsGateway } from '../events/events.gateway.js';
 import { AuditService } from '../audit/audit.service.js';
+import { InventoryService } from '../inventory/inventory.service.js';
 
 @Injectable()
 export class OrdersService {
@@ -48,6 +50,8 @@ export class OrdersService {
     private readonly eventsGateway: EventsGateway,
     private readonly auditService: AuditService,
     private readonly dataSource: DataSource,
+    @Optional()
+    private readonly inventoryService?: InventoryService,
   ) {}
 
   async create(dto: CreateOrderDto, idempotencyKey: string): Promise<Order> {
@@ -266,6 +270,15 @@ export class OrdersService {
     });
 
     const savedOrder = await this.orderRepo.save(order);
+
+    // Concurrency-safe automatic inventory deduction when order enters RECEIVED
+    if (this.inventoryService) {
+      await this.inventoryService.deductInventoryForOrder(
+        restaurant.id,
+        savedOrder.id,
+        dto.items.map((i) => ({ menuItemId: i.menuItemId, quantity: i.quantity, name: i.name })),
+      );
+    }
 
     // Update table status to PREPPING if found
     if (table) {
@@ -690,6 +703,17 @@ export class OrdersService {
     }
 
     const saved = await this.orderRepo.save(order);
+
+    // Reverse stock exactly once if an order is cancelled before PREPARING.
+    // After PREPARING begins, NO automatic stock restoration is permitted.
+    if (previousStatus === OrderStatus.RECEIVED && this.inventoryService) {
+      await this.inventoryService.reverseInventoryForCancelledOrder(
+        order.restaurantId,
+        order.id,
+        staffUser,
+        fullReason,
+      );
+    }
 
     // Audit record for cancellation
     await this.auditService.record({

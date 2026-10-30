@@ -183,10 +183,27 @@ function createMockInventoryService(initialIngredients = [], initialMovements = 
     createQueryRunner: () => createMockQueryRunner(),
   };
 
+  const mockRecipeRepo = {
+    find: async () => [],
+    findOne: async () => null,
+    save: async (r) => r,
+  };
+
+  const mockRecipeIngredientRepo = {
+    save: async (ri) => ri,
+  };
+
+  const mockMenuItemRepo = {
+    findOne: async () => null,
+  };
+
   const service = new InventoryService(
     mockIngredientRepo,
     mockStockMovementRepo,
+    mockRecipeRepo,
+    mockRecipeIngredientRepo,
     mockRestaurantRepo,
+    mockMenuItemRepo,
     mockAuditService,
     mockDataSource,
   );

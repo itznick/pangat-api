@@ -14,13 +14,17 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { Ingredient } from './entities/ingredient.entity.js';
 import { StockMovement } from './entities/stock-movement.entity.js';
+import { Recipe } from './entities/recipe.entity.js';
+import { RecipeIngredient } from './entities/recipe-ingredient.entity.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
+import { MenuItem } from '../menu/entities/menu-item.entity.js';
 import { AuditService } from '../audit/audit.service.js';
 import { CreateIngredientDto } from './dto/create-ingredient.dto.js';
 import { UpdateIngredientDto } from './dto/update-ingredient.dto.js';
 import { AdjustStockDto } from './dto/adjust-stock.dto.js';
 import { ReceiveStockDto } from './dto/receive-stock.dto.js';
 import { StockMovementQueryDto } from './dto/stock-movement-query.dto.js';
+import { CreateRecipeDto } from './dto/create-recipe.dto.js';
 import { AuditAction, StockMovementType } from '../common/enums/index.js';
 
 @Injectable()
@@ -32,8 +36,14 @@ export class InventoryService {
     private readonly ingredientRepo: Repository<Ingredient>,
     @InjectRepository(StockMovement)
     private readonly stockMovementRepo: Repository<StockMovement>,
+    @InjectRepository(Recipe)
+    private readonly recipeRepo: Repository<Recipe>,
+    @InjectRepository(RecipeIngredient)
+    private readonly recipeIngredientRepo: Repository<RecipeIngredient>,
     @InjectRepository(Restaurant)
     private readonly restaurantRepo: Repository<Restaurant>,
+    @InjectRepository(MenuItem)
+    private readonly menuItemRepo: Repository<MenuItem>,
     private readonly auditService: AuditService,
     private readonly dataSource: DataSource,
   ) {}
@@ -489,5 +499,397 @@ export class InventoryService {
       lowStock,
       healthyCount,
     };
+  }
+
+  /**
+   * Create or update recipe for a menu item.
+   * Increments version on update and marks previous versions inactive.
+   */
+  async upsertRecipe(
+    restaurantId: string,
+    dto: CreateRecipeDto,
+    actor?: any,
+  ): Promise<Recipe> {
+    const restaurant = await this.restaurantRepo.findOne({ where: { id: restaurantId } });
+    if (!restaurant) {
+      throw new NotFoundException(`Restaurant '${restaurantId}' not found`);
+    }
+
+    const menuItem = await this.menuItemRepo.findOne({
+      where: { id: dto.menuItemId, restaurantId },
+    });
+    if (!menuItem) {
+      throw new NotFoundException(`Menu item '${dto.menuItemId}' not found in outlet '${restaurantId}'`);
+    }
+
+    if (!dto.ingredients || dto.ingredients.length === 0) {
+      throw new BadRequestException('Recipe must include at least one ingredient');
+    }
+
+    // Verify all ingredients exist in this restaurant
+    const foundIngredients = await this.ingredientRepo.find({
+      where: { restaurantId },
+    });
+    const foundMap = new Map(foundIngredients.map((ing) => [ing.id, ing]));
+
+    for (const item of dto.ingredients) {
+      const ing = foundMap.get(item.ingredientId);
+      if (!ing || !ing.isActive) {
+        throw new BadRequestException(`Ingredient '${item.ingredientId}' not found or inactive in this outlet`);
+      }
+    }
+
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      // Find existing active recipe for this menu item
+      const existing = await queryRunner.manager.findOne(Recipe, {
+        where: { restaurantId, menuItemId: dto.menuItemId, isActive: true },
+      });
+
+      let version = 1;
+      if (existing) {
+        version = existing.version + 1;
+        existing.isActive = false;
+        await queryRunner.manager.save(Recipe, existing);
+      }
+
+      const recipe = queryRunner.manager.create(Recipe, {
+        restaurantId,
+        menuItemId: dto.menuItemId,
+        version,
+        isActive: true,
+        notes: dto.notes ? dto.notes.trim() : null,
+      });
+
+      const savedRecipe = await queryRunner.manager.save(Recipe, recipe);
+
+      const recipeIngredients = dto.ingredients.map((ing) =>
+        queryRunner.manager.create(RecipeIngredient, {
+          recipeId: savedRecipe.id,
+          ingredientId: ing.ingredientId,
+          quantity: ing.quantity,
+          unit: ing.unit,
+        }),
+      );
+
+      await queryRunner.manager.save(RecipeIngredient, recipeIngredients);
+      await queryRunner.commitTransaction();
+
+      await this.auditService.record({
+        restaurantId,
+        entityType: 'Recipe',
+        entityId: savedRecipe.id,
+        action: existing ? AuditAction.RECIPE_UPDATED : AuditAction.RECIPE_CREATED,
+        staffId: actor?.id,
+        staffName: actor?.name,
+        staffRole: actor?.role,
+        reason: `Recipe for '${menuItem.name}' (v${version}) saved with ${recipeIngredients.length} ingredients`,
+        metadata: { menuItemId: dto.menuItemId, version, ingredientCount: recipeIngredients.length },
+      });
+
+      return this.findRecipeByMenuItem(restaurantId, dto.menuItemId);
+    } catch (err) {
+      await queryRunner.rollbackTransaction();
+      throw err;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  /**
+   * Find active recipe for a menu item with ingredient details.
+   */
+  async findRecipeByMenuItem(restaurantId: string, menuItemId: string): Promise<Recipe> {
+    const recipe = await this.recipeRepo.findOne({
+      where: { restaurantId, menuItemId, isActive: true },
+      relations: {
+        ingredients: { ingredient: true },
+        menuItem: true,
+      },
+    });
+
+    if (!recipe) {
+      throw new NotFoundException(`No active recipe found for menu item '${menuItemId}'`);
+    }
+
+    return recipe;
+  }
+
+  /**
+   * List all active recipes in an outlet.
+   */
+  async findAllRecipes(restaurantId: string): Promise<Recipe[]> {
+    return this.recipeRepo.find({
+      where: { restaurantId, isActive: true },
+      relations: {
+        ingredients: { ingredient: true },
+        menuItem: true,
+      },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  /**
+   * Atomic inventory deduction for confirmed order.
+   * Deducts ingredients when order enters RECEIVED.
+   * Row-level write locks prevent overselling across concurrent orders.
+   */
+  async deductInventoryForOrder(
+    restaurantId: string,
+    orderId: string,
+    orderItems: Array<{ menuItemId: string; quantity: number; name?: string }>,
+  ): Promise<void> {
+    const restaurant = await this.restaurantRepo.findOne({ where: { id: restaurantId } });
+    if (!restaurant || !restaurant.autoDeductInventory) {
+      this.logger.debug(`Auto inventory deduction skipped for restaurant ${restaurantId}`);
+      return;
+    }
+
+    // 1. Collect all menu item IDs and load active recipes
+    const menuItemIds = [...new Set(orderItems.map((i) => i.menuItemId))];
+    const recipes = await this.recipeRepo.find({
+      where: {
+        restaurantId,
+        isActive: true,
+      },
+      relations: {
+        ingredients: { ingredient: true },
+        menuItem: true,
+      },
+    });
+
+    const recipeMap = new Map<string, Recipe>();
+    for (const r of recipes) {
+      if (menuItemIds.includes(r.menuItemId)) {
+        recipeMap.set(r.menuItemId, r);
+      }
+    }
+
+    // If no active recipes exist for ordered items, nothing to deduct
+    if (recipeMap.size === 0) {
+      return;
+    }
+
+    // 2. Consolidate required ingredient amounts across all ordered items
+    const requiredAmounts = new Map<string, {
+      ingredient: Ingredient;
+      requiredQty: number;
+      recipeVersions: Set<number>;
+      itemNames: Set<string>;
+    }>();
+
+    for (const item of orderItems) {
+      const recipe = recipeMap.get(item.menuItemId);
+      if (!recipe || !recipe.ingredients) continue;
+
+      for (const ri of recipe.ingredients) {
+        const ing = ri.ingredient;
+        if (!ing) continue;
+
+        const needed = Number(ri.quantity) * Number(item.quantity);
+        const existing = requiredAmounts.get(ing.id);
+
+        if (existing) {
+          existing.requiredQty = Math.round((existing.requiredQty + needed) * 1000) / 1000;
+          existing.recipeVersions.add(recipe.version);
+          existing.itemNames.add(recipe.menuItem?.name || item.name || 'Dish');
+        } else {
+          requiredAmounts.set(ing.id, {
+            ingredient: ing,
+            requiredQty: Math.round(needed * 1000) / 1000,
+            recipeVersions: new Set([recipe.version]),
+            itemNames: new Set([recipe.menuItem?.name || item.name || 'Dish']),
+          });
+        }
+      }
+    }
+
+    if (requiredAmounts.size === 0) {
+      return;
+    }
+
+    // 3. Acquire row-level locks and deduct stock inside a concurrency-safe transaction
+    // Sort ingredient IDs alphabetically to prevent deadlocks
+    const sortedIngredientIds = Array.from(requiredAmounts.keys()).sort();
+
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const recordedMovements: StockMovement[] = [];
+
+      for (const ingredientId of sortedIngredientIds) {
+        const req = requiredAmounts.get(ingredientId)!;
+        const movementKey = `ord-deduct-${orderId}-${ingredientId}`;
+
+        // Check idempotency first
+        const existingMovement = await queryRunner.manager.findOne(StockMovement, {
+          where: { idempotencyKey: movementKey },
+        });
+        if (existingMovement) {
+          continue;
+        }
+
+        // Lock ingredient row
+        const lockedIng = await queryRunner.manager
+          .createQueryBuilder(Ingredient, 'i')
+          .setLock('pessimistic_write')
+          .where('i.id = :id AND i.restaurant_id = :restaurantId', {
+            id: ingredientId,
+            restaurantId,
+          })
+          .getOne();
+
+        if (!lockedIng) {
+          throw new BadRequestException(`Ingredient '${ingredientId}' not found for deduction`);
+        }
+
+        const currentStock = Number(lockedIng.currentStock);
+        if (currentStock < req.requiredQty) {
+          const dishList = Array.from(req.itemNames).join(', ');
+          throw new BadRequestException(
+            `Insufficient stock for '${lockedIng.name}' to fulfill ${dishList}. Available: ${currentStock} ${lockedIng.unit}, Required: ${req.requiredQty} ${lockedIng.unit}.`,
+          );
+        }
+
+        const balanceAfter = Math.round((currentStock - req.requiredQty) * 1000) / 1000;
+        lockedIng.currentStock = balanceAfter;
+        await queryRunner.manager.save(Ingredient, lockedIng);
+
+        const versionSummary = Array.from(req.recipeVersions).join(',');
+        const itemSummary = Array.from(req.itemNames).join(', ');
+        const movement = queryRunner.manager.create(StockMovement, {
+          restaurantId,
+          ingredientId,
+          type: StockMovementType.ORDER_CONSUMPTION,
+          quantity: -req.requiredQty,
+          balanceAfter,
+          reason: `Order ${orderId} preparation: ${itemSummary} (Recipe v${versionSummary})`,
+          referenceOrderId: orderId,
+          idempotencyKey: movementKey,
+        });
+
+        const savedMov = await queryRunner.manager.save(StockMovement, movement);
+        recordedMovements.push(savedMov);
+      }
+
+      await queryRunner.commitTransaction();
+
+      if (recordedMovements.length > 0) {
+        await this.auditService.record({
+          restaurantId,
+          entityType: 'Order',
+          entityId: orderId,
+          action: AuditAction.STOCK_DEDUCTED,
+          reason: `Auto deducted ${recordedMovements.length} ingredients for confirmed order ${orderId}`,
+          metadata: { orderId, deductedCount: recordedMovements.length },
+        });
+      }
+    } catch (err) {
+      await queryRunner.rollbackTransaction();
+      throw err;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  /**
+   * Reverse stock exactly once if an order is cancelled before PREPARING.
+   * If cancelled after PREPARING starts, no automatic stock restoration is performed.
+   */
+  async reverseInventoryForCancelledOrder(
+    restaurantId: string,
+    orderId: string,
+    actor?: any,
+    reason?: string,
+  ): Promise<void> {
+    // Find all consumption movements for this order
+    const consumptionMovements = await this.stockMovementRepo.find({
+      where: {
+        restaurantId,
+        referenceOrderId: orderId,
+        type: StockMovementType.ORDER_CONSUMPTION,
+      },
+    });
+
+    if (!consumptionMovements || consumptionMovements.length === 0) {
+      return; // Nothing was deducted for this order
+    }
+
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const restoredMovements: StockMovement[] = [];
+
+      for (const mov of consumptionMovements) {
+        const reversalKey = `ord-rev-${orderId}-${mov.id}`;
+
+        // Check idempotency: ensure exact-once reversal
+        const existingReversal = await queryRunner.manager.findOne(StockMovement, {
+          where: { idempotencyKey: reversalKey },
+        });
+        if (existingReversal) {
+          continue;
+        }
+
+        const lockedIng = await queryRunner.manager
+          .createQueryBuilder(Ingredient, 'i')
+          .setLock('pessimistic_write')
+          .where('i.id = :id AND i.restaurant_id = :restaurantId', {
+            id: mov.ingredientId,
+            restaurantId,
+          })
+          .getOne();
+
+        if (!lockedIng) continue;
+
+        const returnQty = Math.abs(Number(mov.quantity));
+        const newBalance = Math.round((Number(lockedIng.currentStock) + returnQty) * 1000) / 1000;
+        lockedIng.currentStock = newBalance;
+        await queryRunner.manager.save(Ingredient, lockedIng);
+
+        const reversal = queryRunner.manager.create(StockMovement, {
+          restaurantId,
+          ingredientId: mov.ingredientId,
+          type: StockMovementType.ORDER_CANCELLATION_REVERSAL,
+          quantity: returnQty,
+          balanceAfter: newBalance,
+          reason: reason || `Stock restored from cancelled order ${orderId} (Prior to preparation)`,
+          referenceOrderId: orderId,
+          actorStaffId: actor?.id || null,
+          idempotencyKey: reversalKey,
+        });
+
+        const saved = await queryRunner.manager.save(StockMovement, reversal);
+        restoredMovements.push(saved);
+      }
+
+      await queryRunner.commitTransaction();
+
+      if (restoredMovements.length > 0) {
+        await this.auditService.record({
+          restaurantId,
+          entityType: 'Order',
+          entityId: orderId,
+          action: AuditAction.STOCK_RESTORED,
+          staffId: actor?.id,
+          staffName: actor?.name,
+          staffRole: actor?.role,
+          reason: `Stock reversed for cancelled order ${orderId} (${restoredMovements.length} ingredients restored)`,
+          metadata: { orderId, restoredCount: restoredMovements.length },
+        });
+      }
+    } catch (err) {
+      await queryRunner.rollbackTransaction();
+      throw err;
+    } finally {
+      await queryRunner.release();
+    }
   }
 }

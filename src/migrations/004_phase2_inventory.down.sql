@@ -2,6 +2,8 @@
 -- Rollback Migration 004: Phase 2 Feature 3 — Inventory & Stock Management
 -- ─────────────────────────────────────────────────────────────────────────────
 
+DROP TABLE IF EXISTS recipe_ingredients CASCADE;
+DROP TABLE IF EXISTS recipes CASCADE;
 DROP TABLE IF EXISTS stock_movements CASCADE;
 DROP TABLE IF EXISTS ingredients CASCADE;
 

@@ -50,7 +50,7 @@ export class Order {
   orderType: OrderType;
 
   /** Table number string: '01' … '12' (nullable for TAKEAWAY and DELIVERY) */
-  @Column({ name: 'table_number', length: 10, nullable: true })
+  @Column({ name: 'table_number', type: 'varchar', length: 10, nullable: true })
   tableNumber: string | null;
 
   /** Customer name for takeaway pickup and delivery orders */

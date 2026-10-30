@@ -82,6 +82,10 @@ export class Restaurant {
   @Column({ name: 'out_of_stock_notification', default: true })
   outOfStockNotification: boolean;
 
+  /** Ability to toggle automated inventory deduction per outlet */
+  @Column({ name: 'auto_deduct_inventory', default: true })
+  autoDeductInventory: boolean;
+
   // ── Relations ──────────────────────────────────────────────────────────────
 
   @OneToMany(() => Table, (table) => table.restaurant, { cascade: true })

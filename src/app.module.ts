@@ -15,6 +15,7 @@ import { EventsModule } from './events/events.module.js';
 import { LeadsModule } from './leads/leads.module.js';
 import { AdminModule } from './admin/admin.module.js';
 import { AuditModule } from './audit/audit.module.js';
+import { InventoryModule } from './inventory/inventory.module.js';
 
 @Module({
   imports: [
@@ -79,6 +80,7 @@ import { AuditModule } from './audit/audit.module.js';
     LeadsModule,
     AdminModule,
     AuditModule,
+    InventoryModule,
   ],
   controllers: [AppController],
   providers: [

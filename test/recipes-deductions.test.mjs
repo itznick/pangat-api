@@ -156,11 +156,25 @@ function createMockInventoryService(options = {}) {
 
   // Mock QueryRunner for transactions with row-level locking simulation
   const createMockQueryRunner = () => {
+    let snapshotIngredients = null;
+    let snapshotMovements = null;
     return {
       connect: async () => {},
-      startTransaction: async () => {},
+      startTransaction: async () => {
+        snapshotIngredients = ingredients.map((i) => ({ ...i }));
+        snapshotMovements = movements.map((m) => ({ ...m }));
+      },
       commitTransaction: async () => {},
-      rollbackTransaction: async () => {},
+      rollbackTransaction: async () => {
+        if (snapshotIngredients) {
+          ingredients.length = 0;
+          snapshotIngredients.forEach((i) => ingredients.push({ ...i }));
+        }
+        if (snapshotMovements) {
+          movements.length = 0;
+          snapshotMovements.forEach((m) => movements.push({ ...m }));
+        }
+      },
       release: async () => {},
       manager: {
         create: (entityClass, dto) => ({
@@ -401,6 +415,179 @@ describe('InventoryService — Recipes & Automatic Deductions', () => {
       // Stock should remain unchanged
       const paneer = ingredients.find((i) => i.id === 'ing-paneer');
       assert.strictEqual(Number(paneer.currentStock), 300);
+    });
+
+    it('rolls back entire deduction and leaves no partial deductions if one of multiple ingredients fails', async () => {
+      const { service, ingredients, movements } = createMockInventoryService({
+        ingredients: [
+          { id: 'ing-butter', restaurantId: 'rest-uuid-1', name: 'Butter', unit: UnitOfMeasure.GRAM, currentStock: 1000, isActive: true },
+          { id: 'ing-paneer', restaurantId: 'rest-uuid-1', name: 'Paneer', unit: UnitOfMeasure.GRAM, currentStock: 100, isActive: true },
+        ],
+        menuItems: [
+          { id: 'item-pbm', restaurantId: 'rest-uuid-1', name: 'Paneer Butter Masala', price: 250 },
+        ],
+        recipes: [
+          {
+            id: 'rec-1',
+            restaurantId: 'rest-uuid-1',
+            menuItemId: 'item-pbm',
+            version: 1,
+            isActive: true,
+            ingredients: [
+              { ingredient: { id: 'ing-butter', name: 'Butter', unit: UnitOfMeasure.GRAM, currentStock: 1000, isActive: true }, quantity: 50, unit: UnitOfMeasure.GRAM },
+              { ingredient: { id: 'ing-paneer', name: 'Paneer', unit: UnitOfMeasure.GRAM, currentStock: 100, isActive: true }, quantity: 200, unit: UnitOfMeasure.GRAM },
+            ],
+          },
+        ],
+      });
+
+      // Butter has 1000g (sufficient), but Paneer has only 100g (needs 200g). Entire deduction must roll back!
+      await assert.rejects(
+        service.deductInventoryForOrder(
+          'rest-uuid-1',
+          'ORD-FAIL-1',
+          [{ menuItemId: 'item-pbm', quantity: 1, name: 'Paneer Butter Masala' }],
+        ),
+        /Insufficient stock for 'Paneer'/i,
+      );
+
+      // Butter must NOT have been partially deducted!
+      const butter = ingredients.find((i) => i.id === 'ing-butter');
+      assert.strictEqual(Number(butter.currentStock), 1000);
+      assert.strictEqual(movements.length, 0);
+    });
+
+    it('prevents duplicate deductions when the same order deduction is retried (exact idempotency)', async () => {
+      const { service, ingredients, movements } = createMockInventoryService({
+        ingredients: [
+          { id: 'ing-rice', restaurantId: 'rest-uuid-1', name: 'Basmati Rice', unit: UnitOfMeasure.GRAM, currentStock: 5000, isActive: true },
+        ],
+        menuItems: [
+          { id: 'item-biryani', restaurantId: 'rest-uuid-1', name: 'Dum Biryani', price: 300 },
+        ],
+        recipes: [
+          {
+            id: 'rec-biryani',
+            restaurantId: 'rest-uuid-1',
+            menuItemId: 'item-biryani',
+            version: 1,
+            isActive: true,
+            ingredients: [
+              { ingredient: { id: 'ing-rice', name: 'Basmati Rice', unit: UnitOfMeasure.GRAM, currentStock: 5000, isActive: true }, quantity: 250, unit: UnitOfMeasure.GRAM },
+            ],
+          },
+        ],
+      });
+
+      // First deduction
+      await service.deductInventoryForOrder(
+        'rest-uuid-1',
+        'ORD-DUP-01',
+        [{ menuItemId: 'item-biryani', quantity: 2, name: 'Dum Biryani' }],
+      );
+
+      const rice1 = ingredients.find((i) => i.id === 'ing-rice');
+      assert.strictEqual(Number(rice1.currentStock), 4500);
+      assert.strictEqual(movements.length, 1);
+
+      // Duplicate retry for same order
+      await service.deductInventoryForOrder(
+        'rest-uuid-1',
+        'ORD-DUP-01',
+        [{ menuItemId: 'item-biryani', quantity: 2, name: 'Dum Biryani' }],
+      );
+
+      // Stock must remain 4500, no second deduction!
+      const rice2 = ingredients.find((i) => i.id === 'ing-rice');
+      assert.strictEqual(Number(rice2.currentStock), 4500);
+      assert.strictEqual(movements.length, 1);
+    });
+
+    it('does not alter historical stock movements when a recipe version changes after order placement', async () => {
+      const { service, ingredients, movements } = createMockInventoryService({
+        ingredients: [
+          { id: 'ing-paneer', restaurantId: 'rest-uuid-1', name: 'Paneer', unit: UnitOfMeasure.GRAM, currentStock: 2000, isActive: true },
+        ],
+        menuItems: [
+          { id: 'item-pbm', restaurantId: 'rest-uuid-1', name: 'Paneer Butter Masala', price: 250 },
+        ],
+        recipes: [
+          {
+            id: 'rec-1',
+            restaurantId: 'rest-uuid-1',
+            menuItemId: 'item-pbm',
+            version: 1,
+            isActive: true,
+            ingredients: [
+              { ingredient: { id: 'ing-paneer', name: 'Paneer', unit: UnitOfMeasure.GRAM, currentStock: 2000, isActive: true }, quantity: 200, unit: UnitOfMeasure.GRAM },
+            ],
+          },
+        ],
+      });
+
+      // Order placed under Recipe v1 (200g per plate)
+      await service.deductInventoryForOrder(
+        'rest-uuid-1',
+        'ORD-HIST-01',
+        [{ menuItemId: 'item-pbm', quantity: 1, name: 'Paneer Butter Masala' }],
+      );
+      assert.strictEqual(Number(ingredients.find((i) => i.id === 'ing-paneer').currentStock), 1800);
+      assert.strictEqual(movements[0].reason.includes('Recipe v1'), true);
+
+      // Recipe is subsequently updated to v2 (250g per plate)
+      await service.upsertRecipe('rest-uuid-1', {
+        menuItemId: 'item-pbm',
+        notes: 'Increased portion in v2',
+        ingredients: [
+          { ingredientId: 'ing-paneer', quantity: 250, unit: UnitOfMeasure.GRAM },
+        ],
+      }, actor);
+
+      // Historical deduction movement for ORD-HIST-01 remains unchanged (-200g, v1)
+      const historicalMov = movements.find((m) => m.referenceOrderId === 'ORD-HIST-01');
+      assert.strictEqual(Number(historicalMov.quantity), -200);
+      assert.strictEqual(historicalMov.reason.includes('Recipe v1'), true);
+
+      // Cancelling ORD-HIST-01 restores strictly 200g (the historical amount), NOT the new v2 amount of 250g
+      await service.reverseInventoryForCancelledOrder('rest-uuid-1', 'ORD-HIST-01', actor);
+      assert.strictEqual(Number(ingredients.find((i) => i.id === 'ing-paneer').currentStock), 2000);
+    });
+
+    it('enforces tenant isolation: orders cannot deduct ingredients across restaurants', async () => {
+      const { service, ingredients } = createMockInventoryService({
+        ingredients: [
+          { id: 'ing-tenant-2', restaurantId: 'rest-uuid-2', name: 'Other Rest Paneer', unit: UnitOfMeasure.GRAM, currentStock: 2000, isActive: true },
+        ],
+        menuItems: [
+          { id: 'item-rest-1', restaurantId: 'rest-uuid-1', name: 'Local Paneer', price: 200 },
+        ],
+        recipes: [
+          {
+            id: 'rec-cross',
+            restaurantId: 'rest-uuid-1',
+            menuItemId: 'item-rest-1',
+            version: 1,
+            isActive: true,
+            ingredients: [
+              { ingredient: { id: 'ing-tenant-2', name: 'Other Rest Paneer', unit: UnitOfMeasure.GRAM, currentStock: 2000, isActive: true }, quantity: 200, unit: UnitOfMeasure.GRAM },
+            ],
+          },
+        ],
+      });
+
+      // Deduction query runner locks by (id = :id AND restaurant_id = :restaurantId)
+      // Attempting to deduct from rest-uuid-1 will find 0 matching rows for rest-uuid-2's ingredient
+      await assert.rejects(
+        service.deductInventoryForOrder(
+          'rest-uuid-1',
+          'ORD-CROSS-01',
+          [{ menuItemId: 'item-rest-1', quantity: 1 }],
+        ),
+        /Ingredient 'ing-tenant-2' not found for deduction/i,
+      );
+
+      // Tenant 2 ingredient untouched
+      assert.strictEqual(Number(ingredients.find((i) => i.id === 'ing-tenant-2').currentStock), 2000);
     });
   });
 

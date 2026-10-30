@@ -269,15 +269,28 @@ export class OrdersService {
       items: orderItems,
     });
 
-    const savedOrder = await this.orderRepo.save(order);
+    let savedOrder: Order | undefined = undefined;
+    try {
+      savedOrder = await this.orderRepo.save(order);
 
-    // Concurrency-safe automatic inventory deduction when order enters RECEIVED
-    if (this.inventoryService) {
-      await this.inventoryService.deductInventoryForOrder(
-        restaurant.id,
-        savedOrder.id,
-        dto.items.map((i) => ({ menuItemId: i.menuItemId, quantity: i.quantity, name: i.name })),
-      );
+      // Concurrency-safe automatic inventory deduction when order enters RECEIVED
+      if (this.inventoryService) {
+        await this.inventoryService.deductInventoryForOrder(
+          restaurant.id,
+          savedOrder.id,
+          dto.items.map((i) => ({ menuItemId: i.menuItemId, quantity: i.quantity, name: i.name })),
+        );
+      }
+    } catch (err) {
+      // Clean up order so it is not left in a misleading RECEIVED state upon inventory failure
+      if (savedOrder && this.orderRepo.delete) {
+        try {
+          await this.orderRepo.delete({ id: savedOrder.id });
+        } catch {
+          // Ignore secondary cleanup error
+        }
+      }
+      throw err;
     }
 
     // Update table status to PREPPING if found

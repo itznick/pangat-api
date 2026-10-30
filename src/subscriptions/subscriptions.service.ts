@@ -47,6 +47,49 @@ export class SubscriptionsService {
   ) {}
 
   /**
+   * Calculate place-of-supply tax splits in integer paise.
+   * Intra-state (e.g. MH to MH): CGST 9% + SGST 9%
+   * Inter-state (e.g. MH to outside MH): IGST 18%
+   */
+  calculateTaxes(
+    basePaise: number,
+    taxPercentage = 18.00,
+    buyerStateCode?: string | null,
+    supplierStateCode = '27',
+  ) {
+    const isIntraState = !buyerStateCode || buyerStateCode === supplierStateCode;
+    let cgstPaise = 0;
+    let sgstPaise = 0;
+    let igstPaise = 0;
+
+    if (isIntraState) {
+      cgstPaise = Math.round(basePaise * (taxPercentage / 200));
+      sgstPaise = Math.round(basePaise * (taxPercentage / 200));
+    } else {
+      igstPaise = Math.round(basePaise * (taxPercentage / 100));
+    }
+
+    const taxPaise = cgstPaise + sgstPaise + igstPaise;
+    const totalPaise = basePaise + taxPaise;
+
+    return {
+      basePaise,
+      taxPaise,
+      totalPaise,
+      cgstPaise,
+      sgstPaise,
+      igstPaise,
+      isIntraState,
+      baseRupees: Math.round(basePaise) / 100,
+      taxRupees: Math.round(taxPaise) / 100,
+      totalRupees: Math.round(totalPaise) / 100,
+      cgstRupees: Math.round(cgstPaise) / 100,
+      sgstRupees: Math.round(sgstPaise) / 100,
+      igstRupees: Math.round(igstPaise) / 100,
+    };
+  }
+
+  /**
    * List all public/active subscription plans with transparent GST calculation.
    */
   async findAllPlans(includeInactive = false) {
@@ -56,21 +99,29 @@ export class SubscriptionsService {
     });
 
     return plans.map((p) => {
-      const base = Number(p.basePrice);
+      const basePaise = Number(p.basePricePaise) || Math.round(Number(p.basePrice) * 100);
       const taxRate = Number(p.taxPercentage || 18.00);
-      const taxAmount = Math.round(base * (taxRate / 100) * 100) / 100;
-      const totalPayable = Math.round((base + taxAmount) * 100) / 100;
+      const taxBreakdown = this.calculateTaxes(basePaise, taxRate);
 
       return {
         ...p,
+        basePricePaise: basePaise,
+        maxStaffPerOutlet: p.maxStaffPerOutlet ?? 5,
+        sacCode: p.sacCode || null,
         pricing: {
-          basePrice: base,
+          basePrice: taxBreakdown.baseRupees,
+          basePricePaise: basePaise,
           taxPercentage: taxRate,
-          taxAmount,
-          totalPayable,
+          taxAmount: taxBreakdown.taxRupees,
+          taxAmountPaise: taxBreakdown.taxPaise,
+          totalPayable: taxBreakdown.totalRupees,
+          totalAmountPaise: taxBreakdown.totalPaise,
+          cgstAmountPaise: taxBreakdown.cgstPaise,
+          sgstAmountPaise: taxBreakdown.sgstPaise,
+          igstAmountPaise: taxBreakdown.igstPaise,
           currency: p.currency,
           billingInterval: p.billingInterval,
-          displaySummary: `₹${base.toLocaleString('en-IN')} + ${taxRate}% GST (Total: ₹${totalPayable.toLocaleString('en-IN')}) / ${p.billingInterval.toLowerCase()}`,
+          displaySummary: `₹${taxBreakdown.baseRupees.toLocaleString('en-IN')} + ${taxRate}% GST (Total: ₹${taxBreakdown.totalRupees.toLocaleString('en-IN')}) / ${p.billingInterval.toLowerCase()}`,
         },
       };
     });
@@ -88,17 +139,23 @@ export class SubscriptionsService {
       throw new BadRequestException(`Plan code '${dto.code}' already exists`);
     }
 
+    const basePaise = dto.basePricePaise ?? Math.round(Number(dto.basePrice) * 100);
+    const basePrice = dto.basePrice !== undefined ? Number(dto.basePrice) : Math.round(basePaise) / 100;
+
     const plan = this.planRepo.create({
       code: dto.code.trim().toUpperCase(),
       name: dto.name.trim(),
       description: dto.description?.trim() || null,
       billingInterval: dto.billingInterval,
-      basePrice: Number(dto.basePrice),
+      basePrice,
+      basePricePaise: basePaise,
       taxPercentage: Number(dto.taxPercentage ?? 18.00),
       maxOutlets: dto.maxOutlets ?? 1,
       maxTablesPerOutlet: dto.maxTablesPerOutlet ?? 10,
+      maxStaffPerOutlet: dto.maxStaffPerOutlet ?? 5,
       features: dto.features || [SubscriptionFeature.QR_ORDERING, SubscriptionFeature.KDS],
       razorpayPlanId: dto.razorpayPlanId?.trim() || null,
+      sacCode: dto.sacCode?.trim() || null,
       isActive: true,
     });
 
@@ -111,10 +168,18 @@ export class SubscriptionsService {
     if (dto.name !== undefined) plan.name = dto.name.trim();
     if (dto.description !== undefined) plan.description = dto.description?.trim() || null;
     if (dto.billingInterval !== undefined) plan.billingInterval = dto.billingInterval;
-    if (dto.basePrice !== undefined) plan.basePrice = Number(dto.basePrice);
+    if (dto.basePricePaise !== undefined) {
+      plan.basePricePaise = dto.basePricePaise;
+      plan.basePrice = Math.round(dto.basePricePaise) / 100;
+    } else if (dto.basePrice !== undefined) {
+      plan.basePrice = Number(dto.basePrice);
+      plan.basePricePaise = Math.round(Number(dto.basePrice) * 100);
+    }
     if (dto.taxPercentage !== undefined) plan.taxPercentage = Number(dto.taxPercentage);
     if (dto.maxOutlets !== undefined) plan.maxOutlets = dto.maxOutlets;
     if (dto.maxTablesPerOutlet !== undefined) plan.maxTablesPerOutlet = dto.maxTablesPerOutlet;
+    if (dto.maxStaffPerOutlet !== undefined) plan.maxStaffPerOutlet = dto.maxStaffPerOutlet;
+    if (dto.sacCode !== undefined) plan.sacCode = dto.sacCode?.trim() || null;
     if (dto.features !== undefined) plan.features = dto.features;
     if (dto.razorpayPlanId !== undefined) plan.razorpayPlanId = dto.razorpayPlanId?.trim() || null;
     if (dto.isActive !== undefined) plan.isActive = dto.isActive;
@@ -286,6 +351,23 @@ export class SubscriptionsService {
 
       case 'subscription.charged':
       case 'payment.captured': {
+        const paymentId = paymentEntity?.id || null;
+
+        // Idempotent duplicate invoice prevention: never issue duplicate invoices for the same payment
+        if (paymentId) {
+          const existingInvoice = await this.invoiceRepo.findOne({
+            where: { razorpayPaymentId: paymentId },
+          });
+          if (existingInvoice) {
+            this.logger.warn(`Invoice already exists for Razorpay payment ${paymentId}: ${existingInvoice.invoiceNumber}`);
+            return {
+              status: 'duplicate_payment_ignored',
+              invoiceId: existingInvoice.id,
+              invoiceNumber: existingInvoice.invoiceNumber,
+            };
+          }
+        }
+
         // Successful payment charge -> advance period, mark ACTIVE, create tax invoice
         sub.status = SubscriptionStatus.ACTIVE;
         sub.gracePeriodEndsAt = null;
@@ -301,12 +383,13 @@ export class SubscriptionsService {
         sub.currentPeriodEnd = periodEnd;
         await this.subRepo.save(sub);
 
-        // Generate verified Invoice with 18% GST breakdown
-        const base = Number(sub.plan.basePrice);
+        // Generate verified Invoice with integer paise precision and place-of-supply breakdown
+        const basePaise = Number(sub.plan.basePricePaise) || Math.round(Number(sub.plan.basePrice) * 100);
         const taxRate = Number(sub.plan.taxPercentage || 18.00);
-        const taxAmount = Math.round(base * (taxRate / 100) * 100) / 100;
-        const total = Math.round((base + taxAmount) * 100) / 100;
+        const buyerState = subEntity?.notes?.stateCode || paymentEntity?.notes?.stateCode || null;
+        const buyerGstin = subEntity?.notes?.buyerGstin || paymentEntity?.notes?.buyerGstin || null;
 
+        const taxes = this.calculateTaxes(basePaise, taxRate, buyerState);
         const invoiceNumber = `PANGAT-INV-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
         const invoice = this.invoiceRepo.create({
@@ -315,23 +398,40 @@ export class SubscriptionsService {
           invoiceNumber,
           billingPeriodStart: periodStart,
           billingPeriodEnd: periodEnd,
-          baseAmount: base,
+          baseAmount: taxes.baseRupees,
           taxPercentage: taxRate,
-          taxAmount,
-          totalAmount: total,
+          taxAmount: taxes.taxRupees,
+          totalAmount: taxes.totalRupees,
+          baseAmountPaise: taxes.basePaise,
+          taxAmountPaise: taxes.taxPaise,
+          totalAmountPaise: taxes.totalPaise,
+          cgstAmountPaise: taxes.cgstPaise,
+          sgstAmountPaise: taxes.sgstPaise,
+          igstAmountPaise: taxes.igstPaise,
+          stateCode: buyerState,
+          buyerGstin,
           status: SubscriptionInvoiceStatus.PAID,
-          razorpayPaymentId: paymentEntity?.id || null,
+          razorpayPaymentId: paymentId,
           razorpayInvoiceId: invoiceEntity?.id || null,
           paidAt: new Date(),
         });
 
         await this.invoiceRepo.save(invoice);
 
-        await this.recordAudit(organizationId, 'PAYMENT_CHARGED', 'RAZORPAY_WEBHOOK', `Successfully charged ₹${total} (Base: ₹${base} + GST: ₹${taxAmount})`, eventId, {
-          invoiceId: invoice.id,
-          invoiceNumber,
-          totalAmount: total,
-        });
+        await this.recordAudit(
+          organizationId,
+          'PAYMENT_CHARGED',
+          'RAZORPAY_WEBHOOK',
+          `Successfully charged ₹${taxes.totalRupees} (Base: ₹${taxes.baseRupees} + GST: ₹${taxes.taxRupees})`,
+          eventId,
+          {
+            invoiceId: invoice.id,
+            invoiceNumber,
+            totalAmount: taxes.totalRupees,
+            totalAmountPaise: taxes.totalPaise,
+            paymentId,
+          },
+        );
         break;
       }
 

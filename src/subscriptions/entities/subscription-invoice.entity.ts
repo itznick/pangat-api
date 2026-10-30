@@ -20,6 +20,7 @@ import { decimalTransformer } from '../../common/transformers/decimal.transforme
 @Entity('subscription_invoices')
 @Index(['organizationId', 'createdAt'])
 @Index(['invoiceNumber'], { unique: true })
+@Index(['razorpayPaymentId'], { unique: true })
 export class SubscriptionInvoice {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -83,6 +84,60 @@ export class SubscriptionInvoice {
     transformer: decimalTransformer,
   })
   totalAmount: number;
+
+  @Column({
+    name: 'base_amount_paise',
+    type: 'bigint',
+    default: 0,
+    transformer: decimalTransformer,
+  })
+  baseAmountPaise: number;
+
+  @Column({
+    name: 'tax_amount_paise',
+    type: 'bigint',
+    default: 0,
+    transformer: decimalTransformer,
+  })
+  taxAmountPaise: number;
+
+  @Column({
+    name: 'total_amount_paise',
+    type: 'bigint',
+    default: 0,
+    transformer: decimalTransformer,
+  })
+  totalAmountPaise: number;
+
+  @Column({
+    name: 'cgst_amount_paise',
+    type: 'bigint',
+    default: 0,
+    transformer: decimalTransformer,
+  })
+  cgstAmountPaise: number;
+
+  @Column({
+    name: 'sgst_amount_paise',
+    type: 'bigint',
+    default: 0,
+    transformer: decimalTransformer,
+  })
+  sgstAmountPaise: number;
+
+  @Column({
+    name: 'igst_amount_paise',
+    type: 'bigint',
+    default: 0,
+    transformer: decimalTransformer,
+  })
+  igstAmountPaise: number;
+
+  @Column({ name: 'state_code', type: 'varchar', length: 10, nullable: true })
+  stateCode: string | null;
+
+  @Column({ name: 'buyer_gstin', type: 'varchar', length: 20, nullable: true })
+  buyerGstin: string | null;
 
   @Column({
     type: 'enum',

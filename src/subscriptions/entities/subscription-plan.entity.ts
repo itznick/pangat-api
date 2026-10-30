@@ -48,6 +48,17 @@ export class SubscriptionPlan {
   })
   basePrice: number;
 
+  /**
+   * Base recurring price in paise (1 INR = 100 paise), exclusive of GST.
+   */
+  @Column({
+    name: 'base_price_paise',
+    type: 'bigint',
+    default: 0,
+    transformer: decimalTransformer,
+  })
+  basePricePaise: number;
+
   @Column({ type: 'varchar', length: 10, default: 'INR' })
   currency: string;
 
@@ -75,6 +86,18 @@ export class SubscriptionPlan {
    */
   @Column({ name: 'max_tables_per_outlet', type: 'int', default: 10 })
   maxTablesPerOutlet: number;
+
+  /**
+   * Maximum allowed staff members per outlet (-1 = unlimited).
+   */
+  @Column({ name: 'max_staff_per_outlet', type: 'int', default: 5 })
+  maxStaffPerOutlet: number;
+
+  /**
+   * Configurable Service Accounting Code (SAC) for GST compliance.
+   */
+  @Column({ name: 'sac_code', type: 'varchar', length: 20, nullable: true })
+  sacCode: string | null;
 
   /**
    * Entitled feature flags (e.g. ["QR_ORDERING", "KDS", "INVENTORY", "ANALYTICS"]).

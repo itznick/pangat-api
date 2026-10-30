@@ -33,6 +33,11 @@ export class UpdatePlanDto {
   basePrice?: number;
 
   @IsOptional()
+  @IsInt()
+  @Min(0)
+  basePricePaise?: number;
+
+  @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   taxPercentage?: number;
@@ -44,6 +49,14 @@ export class UpdatePlanDto {
   @IsOptional()
   @IsInt()
   maxTablesPerOutlet?: number;
+
+  @IsOptional()
+  @IsInt()
+  maxStaffPerOutlet?: number;
+
+  @IsOptional()
+  @IsString()
+  sacCode?: string;
 
   @IsOptional()
   @IsArray()

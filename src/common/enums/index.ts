@@ -93,3 +93,34 @@ export enum StockMovementType {
   ORDER_CANCELLATION_REVERSAL = 'ORDER_CANCELLATION_REVERSAL',
   WASTAGE                     = 'WASTAGE',
 }
+
+export enum SubscriptionStatus {
+  TRIAL        = 'TRIAL',
+  ACTIVE       = 'ACTIVE',
+  PAST_DUE     = 'PAST_DUE',
+  GRACE_PERIOD = 'GRACE_PERIOD',
+  HALTED       = 'HALTED',
+  CANCELLED    = 'CANCELLED',
+  EXPIRED      = 'EXPIRED',
+}
+
+export enum BillingInterval {
+  MONTHLY = 'MONTHLY',
+  YEARLY  = 'YEARLY',
+}
+
+export enum SubscriptionInvoiceStatus {
+  DRAFT    = 'DRAFT',
+  PAID     = 'PAID',
+  FAILED   = 'FAILED',
+  REFUNDED = 'REFUNDED',
+}
+
+export enum SubscriptionFeature {
+  QR_ORDERING      = 'QR_ORDERING',
+  KDS              = 'KDS',
+  INVENTORY        = 'INVENTORY',
+  ANALYTICS        = 'ANALYTICS',
+  MULTI_OUTLET     = 'MULTI_OUTLET',
+  ADVANCED_REPORTS = 'ADVANCED_REPORTS',
+}

@@ -16,6 +16,7 @@ import { LeadsModule } from './leads/leads.module.js';
 import { AdminModule } from './admin/admin.module.js';
 import { AuditModule } from './audit/audit.module.js';
 import { InventoryModule } from './inventory/inventory.module.js';
+import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
 
 @Module({
   imports: [
@@ -81,6 +82,7 @@ import { InventoryModule } from './inventory/inventory.module.js';
     AdminModule,
     AuditModule,
     InventoryModule,
+    SubscriptionsModule,
   ],
   controllers: [AppController],
   providers: [

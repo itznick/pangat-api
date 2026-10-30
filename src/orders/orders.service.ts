@@ -20,6 +20,7 @@ import { EditOrderItemsDto } from './dto/edit-order-items.dto.js';
 import { ProcessRefundDto } from './dto/process-refund.dto.js';
 import {
   OrderStatus,
+  OrderType,
   PaymentMethod,
   PaymentStatus,
   TableStatus,
@@ -63,56 +64,90 @@ export class OrdersService {
       throw new BadRequestException('Order must contain at least one item');
     }
 
-    // Robust table lookup supporting 'T01', '01', '1', etc.
-    const rawTable = dto.tableNumber.trim().toUpperCase();
-    const numOnly = rawTable.replace(/\D/g, '');
-    const padded = numOnly ? `T${numOnly.padStart(2, '0')}` : rawTable;
+    const orderType = dto.orderType || OrderType.DINE_IN;
+    let finalTableNumber: string | null = null;
+    let table: Table | null = null;
 
-    let table = await this.tableRepo.findOne({
-      where: {
-        restaurantId: restaurant.id,
-        tableNumber: rawTable,
-      },
-    });
+    if (orderType === OrderType.DINE_IN) {
+      if (!dto.tableNumber || !dto.tableNumber.trim()) {
+        throw new BadRequestException('Table number is required for dine-in orders');
+      }
+      const rawTable = dto.tableNumber.trim().toUpperCase();
+      const numOnly = rawTable.replace(/\D/g, '');
+      const padded = numOnly ? `T${numOnly.padStart(2, '0')}` : rawTable;
 
-    if (!table && padded !== rawTable) {
       table = await this.tableRepo.findOne({
         where: {
           restaurantId: restaurant.id,
-          tableNumber: padded,
+          tableNumber: rawTable,
         },
       });
+
+      if (!table && padded !== rawTable) {
+        table = await this.tableRepo.findOne({
+          where: {
+            restaurantId: restaurant.id,
+            tableNumber: padded,
+          },
+        });
+      }
+
+      if (!table && numOnly) {
+        table = await this.tableRepo.findOne({
+          where: {
+            restaurantId: restaurant.id,
+            tableNumber: numOnly,
+          },
+        });
+      }
+
+      if (!table) {
+        const allTables = await this.tableRepo.find({ where: { restaurantId: restaurant.id } });
+        table = allTables.find((t) => {
+          const sA = t.tableNumber.trim().toUpperCase();
+          const sB = rawTable;
+          if (sA === sB) return true;
+          const nA = sA.replace(/\D/g, '');
+          const nB = sB.replace(/\D/g, '');
+          if (nA && nB && Number(nA) === Number(nB)) {
+            const pA = sA.replace(/\d/g, '');
+            const pB = sB.replace(/\d/g, '');
+            const normA = (!pA || pA === 'T') ? 'T' : pA;
+            const normB = (!pB || pB === 'T') ? 'T' : pB;
+            return normA === normB;
+          }
+          return false;
+        }) || null;
+      }
+
+      if (!table) {
+        throw new BadRequestException(`Table '${dto.tableNumber}' does not exist in restaurant '${restaurant.name}'`);
+      }
+      finalTableNumber = table.tableNumber;
+    } else {
+      // TAKEAWAY or DELIVERY must NOT require or assign a table
+      if (dto.tableNumber && dto.tableNumber.trim()) {
+        throw new BadRequestException(`Table assignment is only permitted for dine-in orders, not ${orderType}`);
+      }
+      finalTableNumber = null;
     }
 
-    if (!table && numOnly) {
-      table = await this.tableRepo.findOne({
-        where: {
-          restaurantId: restaurant.id,
-          tableNumber: numOnly,
-        },
-      });
+    // Validation for Takeaway and Delivery customer details
+    if (orderType === OrderType.TAKEAWAY && (!dto.customerName || !dto.customerName.trim())) {
+      throw new BadRequestException('Customer name is required for takeaway / parcel pickup');
     }
 
-    if (!table) {
-      const allTables = await this.tableRepo.find({ where: { restaurantId: restaurant.id } });
-      table = allTables.find((t) => {
-        const sA = t.tableNumber.trim().toUpperCase();
-        const sB = rawTable;
-        if (sA === sB) return true;
-        const nA = sA.replace(/\D/g, '');
-        const nB = sB.replace(/\D/g, '');
-        if (nA && nB && Number(nA) === Number(nB)) {
-          const pA = sA.replace(/\d/g, '');
-          const pB = sB.replace(/\d/g, '');
-          const normA = (!pA || pA === 'T') ? 'T' : pA;
-          const normB = (!pB || pB === 'T') ? 'T' : pB;
-          return normA === normB;
-        }
-        return false;
-      }) || null;
+    if (orderType === OrderType.DELIVERY) {
+      if (!dto.customerName || !dto.customerName.trim()) {
+        throw new BadRequestException('Customer name is required for delivery orders');
+      }
+      if (!dto.customerPhone || !dto.customerPhone.trim()) {
+        throw new BadRequestException('Customer contact phone is required for delivery orders');
+      }
+      if (!dto.deliveryAddress || !dto.deliveryAddress.trim()) {
+        throw new BadRequestException('Delivery address is required for delivery orders');
+      }
     }
-
-    const finalTableNumber = table ? table.tableNumber : rawTable;
 
     // Server-Side Verification: Do NOT trust client-supplied item names, prices, or modifier amounts.
     // Reload every item and modifier from the database, check restaurant ownership & availability.
@@ -196,7 +231,10 @@ export class OrdersService {
 
     const gstPct = Number(restaurant.gstPercentage || 5);
     const gstAmount = Math.round(subtotal * (gstPct / 100) * 100) / 100;
-    const totalAmount = Math.round((subtotal + gstAmount) * 100) / 100;
+
+    // Server-Authoritative Delivery Fee (standard flat delivery fee if delivery order, ₹30 or configured)
+    const serverDeliveryFee = orderType === OrderType.DELIVERY ? 30.00 : 0.00;
+    const totalAmount = Math.round((subtotal + gstAmount + serverDeliveryFee) * 100) / 100;
 
     // High-Entropy IDs: Replace enumerable sequential/4-digit IDs with high-entropy tracking token
     const trackingToken = crypto.randomBytes(24).toString('hex');
@@ -210,11 +248,16 @@ export class OrdersService {
       id: orderId,
       trackingToken,
       restaurantId: restaurant.id,
+      orderType,
       tableNumber: finalTableNumber,
+      customerName: dto.customerName ? dto.customerName.trim() : null,
+      customerPhone: dto.customerPhone ? dto.customerPhone.trim() : null,
+      deliveryAddress: dto.deliveryAddress ? dto.deliveryAddress.trim() : null,
+      deliveryInstructions: dto.deliveryInstructions ? dto.deliveryInstructions.trim() : null,
+      deliveryFee: serverDeliveryFee,
       orderStatus: OrderStatus.RECEIVED,
       paymentStatus,
       paymentMethod: dto.paymentMethod || PaymentMethod.PAY_AT_COUNTER,
-      customerPhone: dto.customerPhone || null,
       subtotal,
       gstAmount,
       totalAmount,
@@ -376,16 +419,29 @@ export class OrdersService {
     }
 
     // Restricted diner-facing projection
+    return this.getPublicTrackingProjection(order);
+  }
+
+  getPublicTrackingProjection(order: Order) {
     return {
       id: order.id,
       trackingToken: order.trackingToken,
+      orderType: order.orderType,
       tableNumber: order.tableNumber,
+      customerName: order.customerName,
+      deliveryAddress: order.deliveryAddress,
+      deliveryInstructions: order.deliveryInstructions,
+      deliveryFee: order.deliveryFee,
+      dispatchedAt: order.dispatchedAt,
+      deliveredAt: order.deliveredAt,
       orderStatus: order.orderStatus,
       paymentStatus: order.paymentStatus,
       paymentMethod: order.paymentMethod,
       subtotal: order.subtotal,
       gstAmount: order.gstAmount,
       totalAmount: order.totalAmount,
+      cancellationReason: order.cancellationReason,
+      refundAmount: order.refundAmount,
       createdAt: order.createdAt,
       preparingAt: order.preparingAt,
       readyAt: order.readyAt,
@@ -437,18 +493,28 @@ export class OrdersService {
       throw new BadRequestException('Use the POST /orders/:id/cancel endpoint with a mandatory cancellation reason.');
     }
 
-    // Permitted forward progression
-    const validForward: Record<OrderStatus, OrderStatus> = {
-      [OrderStatus.RECEIVED]: OrderStatus.PREPARING,
-      [OrderStatus.PREPARING]: OrderStatus.READY,
-      [OrderStatus.READY]: OrderStatus.COMPLETED,
-      [OrderStatus.COMPLETED]: OrderStatus.COMPLETED,
-      [OrderStatus.CANCELLED]: OrderStatus.CANCELLED,
-    };
+    // Permitted forward progression based on orderType
+    let isPermitted = false;
+    if (order.orderStatus === OrderStatus.RECEIVED && status === OrderStatus.PREPARING) {
+      isPermitted = true;
+    } else if (order.orderStatus === OrderStatus.PREPARING && status === OrderStatus.READY) {
+      isPermitted = true;
+    } else if (order.orderType === OrderType.DELIVERY) {
+      if (order.orderStatus === OrderStatus.READY && status === OrderStatus.DISPATCHED) {
+        isPermitted = true;
+      } else if (order.orderStatus === OrderStatus.DISPATCHED && status === OrderStatus.COMPLETED) {
+        isPermitted = true;
+      }
+    } else {
+      // DINE_IN and TAKEAWAY transition directly from READY to COMPLETED
+      if (order.orderStatus === OrderStatus.READY && status === OrderStatus.COMPLETED) {
+        isPermitted = true;
+      }
+    }
 
-    if (validForward[order.orderStatus] !== status) {
+    if (!isPermitted) {
       throw new BadRequestException(
-        `Invalid forward order status transition from ${order.orderStatus} to ${status}. For ticket regressions, use the regress-status endpoint with a reason.`,
+        `Invalid forward order status transition from ${order.orderStatus} to ${status} for order type ${order.orderType}. For ticket regressions, use the regress-status endpoint with a reason.`,
       );
     }
 
@@ -457,6 +523,10 @@ export class OrdersService {
       if (status === OrderStatus.PREPARING || status === OrderStatus.READY) {
         if (![StaffRole.CHEF, StaffRole.STORE_MANAGER, StaffRole.SUPER_OWNER, StaffRole.PLATFORM_SUPER_ADMIN].includes(staffUser.role)) {
           throw new ForbiddenException(`Role ${staffUser.role} is not authorized to advance kitchen orders to ${status}`);
+        }
+      } else if (status === OrderStatus.DISPATCHED) {
+        if (![StaffRole.STEWARD, StaffRole.STORE_MANAGER, StaffRole.SUPER_OWNER, StaffRole.PLATFORM_SUPER_ADMIN].includes(staffUser.role)) {
+          throw new ForbiddenException(`Role ${staffUser.role} is not authorized to dispatch orders`);
         }
       } else if (status === OrderStatus.COMPLETED) {
         if (![StaffRole.STEWARD, StaffRole.STORE_MANAGER, StaffRole.SUPER_OWNER, StaffRole.PLATFORM_SUPER_ADMIN].includes(staffUser.role)) {
@@ -472,8 +542,14 @@ export class OrdersService {
       order.preparingAt = now;
     } else if (status === OrderStatus.READY && !order.readyAt) {
       order.readyAt = now;
-    } else if (status === OrderStatus.COMPLETED && !order.completedAt) {
+    } else if (status === OrderStatus.DISPATCHED) {
+      order.dispatchedAt = now;
+      order.dispatchedByStaffId = staffUser?.id || null;
+    } else if (status === OrderStatus.COMPLETED) {
       order.completedAt = now;
+      if (order.orderType === OrderType.DELIVERY) {
+        order.deliveredAt = now;
+      }
     }
 
     const saved = await this.orderRepo.save(order);
@@ -522,18 +598,23 @@ export class OrdersService {
       throw new BadRequestException('CANCELLED orders cannot be regressed.');
     }
 
-    // Rule 4: Authorized chef regressions
-    const validRegressions: Record<OrderStatus, OrderStatus> = {
-      [OrderStatus.READY]: OrderStatus.PREPARING,
-      [OrderStatus.PREPARING]: OrderStatus.RECEIVED,
-      [OrderStatus.RECEIVED]: OrderStatus.RECEIVED,
-      [OrderStatus.COMPLETED]: OrderStatus.COMPLETED,
-      [OrderStatus.CANCELLED]: OrderStatus.CANCELLED,
-    };
+    // Rule 4: Authorized chef and manager regressions
+    let isRegressionValid = false;
+    if (order.orderStatus === OrderStatus.READY && dto.targetStatus === OrderStatus.PREPARING) {
+      isRegressionValid = true;
+    } else if (order.orderStatus === OrderStatus.PREPARING && dto.targetStatus === OrderStatus.RECEIVED) {
+      isRegressionValid = true;
+    } else if (order.orderStatus === OrderStatus.DISPATCHED && dto.targetStatus === OrderStatus.READY) {
+      // Regressing from DISPATCHED to READY requires manager role
+      if (staffUser?.role && ![StaffRole.STORE_MANAGER, StaffRole.SUPER_OWNER, StaffRole.PLATFORM_SUPER_ADMIN].includes(staffUser.role)) {
+        throw new ForbiddenException('Only managers and owners can regress dispatched orders back to ready status.');
+      }
+      isRegressionValid = true;
+    }
 
-    if (validRegressions[order.orderStatus] !== dto.targetStatus) {
+    if (!isRegressionValid) {
       throw new BadRequestException(
-        `Invalid regression from ${order.orderStatus} to ${dto.targetStatus}. Only READY -> PREPARING and PREPARING -> RECEIVED are permitted.`,
+        `Invalid regression from ${order.orderStatus} to ${dto.targetStatus}.`,
       );
     }
 
@@ -897,6 +978,10 @@ export class OrdersService {
   }
 
   private async syncTableStatus(order: Order, restaurantSlug?: string): Promise<void> {
+    // If orderType is specified and not DINE_IN, it does not affect physical tables
+    if (order.orderType && order.orderType !== OrderType.DINE_IN) return;
+    if (!order.tableNumber) return;
+
     const table = await this.tableRepo.findOne({
       where: {
         restaurantId: order.restaurantId,

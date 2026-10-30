@@ -15,6 +15,7 @@ import {
 } from 'typeorm';
 import {
   OrderStatus,
+  OrderType,
   PaymentMethod,
   PaymentStatus,
 } from '../../common/enums/index.js';
@@ -39,9 +40,51 @@ export class Order {
   @JoinColumn({ name: 'restaurant_id' })
   restaurant: Restaurant;
 
-  /** Two-digit table number string: '01' … '12' */
-  @Column({ name: 'table_number', length: 10 })
-  tableNumber: string;
+  /** Order fulfillment type: DINE_IN, TAKEAWAY, or DELIVERY */
+  @Column({
+    name: 'order_type',
+    type: 'enum',
+    enum: OrderType,
+    default: OrderType.DINE_IN,
+  })
+  orderType: OrderType;
+
+  /** Table number string: '01' … '12' (nullable for TAKEAWAY and DELIVERY) */
+  @Column({ name: 'table_number', length: 10, nullable: true })
+  tableNumber: string | null;
+
+  /** Customer name for takeaway pickup and delivery orders */
+  @Column({ name: 'customer_name', type: 'varchar', length: 100, nullable: true })
+  customerName: string | null;
+
+  @Column({ name: 'customer_phone', type: 'varchar', length: 15, nullable: true })
+  customerPhone: string | null;
+
+  /** Delivery fulfillment details */
+  @Column({ name: 'delivery_address', type: 'text', nullable: true })
+  deliveryAddress: string | null;
+
+  @Column({ name: 'delivery_instructions', type: 'text', nullable: true })
+  deliveryInstructions: string | null;
+
+  @Column({
+    name: 'delivery_fee',
+    type: 'decimal',
+    precision: 10,
+    scale: 2,
+    default: 0.00,
+    transformer: decimalTransformer,
+  })
+  deliveryFee: number;
+
+  @Column({ name: 'dispatched_at', type: 'timestamp with time zone', nullable: true })
+  dispatchedAt: Date | null;
+
+  @Column({ name: 'delivered_at', type: 'timestamp with time zone', nullable: true })
+  deliveredAt: Date | null;
+
+  @Column({ name: 'dispatched_by_staff_id', type: 'uuid', nullable: true })
+  dispatchedByStaffId: string | null;
 
   @Column({
     name: 'order_status',
@@ -66,9 +109,6 @@ export class Order {
     nullable: true,
   })
   paymentMethod: PaymentMethod | null;
-
-  @Column({ name: 'customer_phone', type: 'varchar', length: 15, nullable: true })
-  customerPhone: string | null;
 
   @Column({ name: 'subtotal', type: 'decimal', precision: 10, scale: 2, transformer: decimalTransformer })
   subtotal: number;

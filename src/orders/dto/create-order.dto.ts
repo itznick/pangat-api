@@ -7,10 +7,11 @@ import {
   IsOptional,
   IsString,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { PaymentMethod } from '../../common/enums/index.js';
+import { OrderType, PaymentMethod } from '../../common/enums/index.js';
 
 export class SelectedModifierDto {
   @IsString()
@@ -58,16 +59,39 @@ export class CreateOrderDto {
   @IsNotEmpty()
   restaurantSlug: string;
 
+  @IsOptional()
+  @IsEnum(OrderType)
+  orderType?: OrderType;
+
+  /** tableNumber is mandatory only for DINE_IN orders */
+  @ValidateIf((o) => !o.orderType || o.orderType === OrderType.DINE_IN)
   @IsString()
   @IsNotEmpty()
-  tableNumber: string;
+  tableNumber?: string;
+
+  /** customerName for takeaway pickup or delivery */
+  @ValidateIf((o) => o.orderType === OrderType.TAKEAWAY || o.orderType === OrderType.DELIVERY)
+  @IsString()
+  @IsNotEmpty()
+  customerName?: string;
+
+  /** Delivery specific requirements */
+  @ValidateIf((o) => o.orderType === OrderType.DELIVERY)
+  @IsString()
+  @IsNotEmpty()
+  deliveryAddress?: string;
+
+  @IsOptional()
+  @IsString()
+  deliveryInstructions?: string;
 
   @IsOptional()
   @IsEnum(PaymentMethod)
   paymentMethod?: PaymentMethod;
 
-  @IsOptional()
+  @ValidateIf((o) => o.orderType === OrderType.DELIVERY)
   @IsString()
+  @IsNotEmpty()
   customerPhone?: string;
 
   @IsArray()

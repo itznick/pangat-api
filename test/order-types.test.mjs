@@ -5,6 +5,7 @@ import {
   OrderType,
   OrderStatus,
   PaymentStatus,
+  PaymentMethod,
   StaffRole,
   TableStatus,
 } from '../dist/common/enums/index.js';
@@ -261,6 +262,54 @@ describe('Feature 2 — Suite 2: Delivery Workflow, Verification & Fee Security'
     // Verifies phone is stripped from public projection to protect diner privacy
     assert.equal(projection.customerPhone, undefined);
     assert.equal(projection.deliveryFee, 30);
+  });
+
+  it('creates order with refundAmount explicitly set to 0.00 and delivery payment defaulted to COD', async () => {
+    const { service } = createMockOrdersService([], { menuItems });
+    const order = await service.create({
+      restaurantSlug: 'pangat-pune',
+      orderType: OrderType.DELIVERY,
+      customerName: 'Aarav Patel',
+      customerPhone: '+919876543210',
+      deliveryAddress: 'Flat 101, Galaxy, Pune',
+      items: [{ menuItemId: 'item-1', name: 'Thali Special', price: 200, quantity: 1 }],
+    }, 'idem-cod-01');
+
+    assert.equal(order.orderType, OrderType.DELIVERY);
+    assert.equal(order.refundAmount, 0.00);
+    assert.equal(order.paymentMethod, PaymentMethod.COD);
+  });
+
+  it('rejects PAY_AT_COUNTER for DELIVERY orders', async () => {
+    const { service } = createMockOrdersService([], { menuItems });
+    await assert.rejects(
+      () =>
+        service.create({
+          restaurantSlug: 'pangat-pune',
+          orderType: OrderType.DELIVERY,
+          customerName: 'Aarav Patel',
+          customerPhone: '+919876543210',
+          deliveryAddress: 'Flat 101, Galaxy, Pune',
+          paymentMethod: PaymentMethod.PAY_AT_COUNTER,
+          items: [{ menuItemId: 'item-1', name: 'Thali Special', price: 200, quantity: 1 }],
+        }, 'idem-cod-02'),
+      (err) => err.status === 400 && /Pay at counter is not available for delivery orders/.test(err.message),
+    );
+  });
+
+  it('rejects COD for DINE_IN or TAKEAWAY orders', async () => {
+    const { service } = createMockOrdersService([], { menuItems });
+    await assert.rejects(
+      () =>
+        service.create({
+          restaurantSlug: 'pangat-pune',
+          orderType: OrderType.DINE_IN,
+          tableNumber: 'T01',
+          paymentMethod: PaymentMethod.COD,
+          items: [{ menuItemId: 'item-1', name: 'Thali Special', price: 200, quantity: 1 }],
+        }, 'idem-cod-03'),
+      (err) => err.status === 400 && /Cash on Delivery \(COD\) is only available for delivery orders/.test(err.message),
+    );
   });
 });
 

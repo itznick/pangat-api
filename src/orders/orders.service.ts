@@ -151,6 +151,13 @@ export class OrdersService {
       if (!dto.deliveryAddress || !dto.deliveryAddress.trim()) {
         throw new BadRequestException('Delivery address is required for delivery orders');
       }
+      if (dto.paymentMethod === PaymentMethod.PAY_AT_COUNTER) {
+        throw new BadRequestException('Pay at counter is not available for delivery orders. Please select UPI or Cash on Delivery (COD).');
+      }
+    } else {
+      if (dto.paymentMethod === PaymentMethod.COD) {
+        throw new BadRequestException('Cash on Delivery (COD) is only available for delivery orders.');
+      }
     }
 
     // Server-Side Verification: Do NOT trust client-supplied item names, prices, or modifier amounts.
@@ -261,10 +268,11 @@ export class OrdersService {
       deliveryFee: serverDeliveryFee,
       orderStatus: OrderStatus.RECEIVED,
       paymentStatus,
-      paymentMethod: dto.paymentMethod || PaymentMethod.PAY_AT_COUNTER,
+      paymentMethod: dto.paymentMethod || (orderType === OrderType.DELIVERY ? PaymentMethod.COD : PaymentMethod.PAY_AT_COUNTER),
       subtotal,
       gstAmount,
       totalAmount,
+      refundAmount: 0.00,
       idempotencyKey,
       items: orderItems,
     });

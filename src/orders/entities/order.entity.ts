@@ -75,7 +75,7 @@ export class Order {
     default: 0.00,
     transformer: decimalTransformer,
   })
-  deliveryFee: number;
+  deliveryFee: number = 0;
 
   @Column({ name: 'dispatched_at', type: 'timestamp with time zone', nullable: true })
   dispatchedAt: Date | null;
@@ -156,7 +156,7 @@ export class Order {
     default: 0.00,
     transformer: decimalTransformer,
   })
-  refundAmount: number;
+  refundAmount: number = 0;
 
   @Column({ name: 'refund_reason', type: 'text', nullable: true })
   refundReason: string | null;

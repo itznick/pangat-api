@@ -1,8 +1,9 @@
 import { ValueTransformer } from 'typeorm';
 
 export class DecimalTransformer implements ValueTransformer {
-  to(data?: number | null): number | null {
-    if (data === null || data === undefined) return null;
+  to(data?: number | null): number | null | undefined {
+    if (data === undefined) return undefined;
+    if (data === null) return null;
     return Number(data);
   }
 

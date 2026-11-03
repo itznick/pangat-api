@@ -37,6 +37,7 @@ export enum PaymentStatus {
 export enum PaymentMethod {
   UPI_INSTANT     = 'UPI_INSTANT',
   PAY_AT_COUNTER  = 'PAY_AT_COUNTER',
+  COD             = 'COD',
 }
 
 export enum ModifierType {

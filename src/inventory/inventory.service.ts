@@ -25,7 +25,7 @@ import { AdjustStockDto } from './dto/adjust-stock.dto.js';
 import { ReceiveStockDto } from './dto/receive-stock.dto.js';
 import { StockMovementQueryDto } from './dto/stock-movement-query.dto.js';
 import { CreateRecipeDto } from './dto/create-recipe.dto.js';
-import { AuditAction, StockMovementType } from '../common/enums/index.js';
+import { AuditAction, StockMovementType, UnitOfMeasure } from '../common/enums/index.js';
 
 @Injectable()
 export class InventoryService {
@@ -502,6 +502,26 @@ export class InventoryService {
   }
 
   /**
+   * Safe unit conversion factor between recipe ingredient and inventory stock.
+   * Converts recipe unit to ingredient stock unit:
+   * e.g. recipe in GRAM, ingredient in KG -> factor is 0.001
+   * e.g. recipe in ML, ingredient in LITRE -> factor is 0.001
+   */
+  getUnitConversionFactor(fromUnit: string, toUnit: string): number {
+    if (fromUnit === toUnit) return 1;
+    // Mass conversions
+    if (fromUnit === UnitOfMeasure.GRAM && toUnit === UnitOfMeasure.KG) return 0.001;
+    if (fromUnit === UnitOfMeasure.KG && toUnit === UnitOfMeasure.GRAM) return 1000;
+    // Volume conversions
+    if (fromUnit === UnitOfMeasure.ML && toUnit === UnitOfMeasure.LITRE) return 0.001;
+    if (fromUnit === UnitOfMeasure.LITRE && toUnit === UnitOfMeasure.ML) return 1000;
+    // Incompatible units
+    throw new BadRequestException(
+      `Incompatible unit conversion from ${fromUnit} to ${toUnit}. Only compatible mass (KG/GRAM) or volume (LITRE/ML) units can be converted.`,
+    );
+  }
+
+  /**
    * Create or update recipe for a menu item.
    * Increments version on update and marks previous versions inactive.
    */
@@ -526,17 +546,26 @@ export class InventoryService {
       throw new BadRequestException('Recipe must include at least one ingredient');
     }
 
-    // Verify all ingredients exist in this restaurant
+    // Verify all ingredients exist in this restaurant, reject duplicates, and validate unit compatibility
     const foundIngredients = await this.ingredientRepo.find({
       where: { restaurantId },
     });
     const foundMap = new Map(foundIngredients.map((ing) => [ing.id, ing]));
 
+    const seenIngredientIds = new Set<string>();
     for (const item of dto.ingredients) {
+      if (seenIngredientIds.has(item.ingredientId)) {
+        throw new BadRequestException(`Duplicate ingredient entry in recipe: '${item.ingredientId}'`);
+      }
+      seenIngredientIds.add(item.ingredientId);
+
       const ing = foundMap.get(item.ingredientId);
       if (!ing || !ing.isActive) {
         throw new BadRequestException(`Ingredient '${item.ingredientId}' not found or inactive in this outlet`);
       }
+
+      // Validates compatible unit pairing (e.g. GRAM <-> KG, ML <-> LITRE) or throws BadRequestException
+      this.getUnitConversionFactor(item.unit, ing.unit);
     }
 
     const queryRunner = this.dataSource.createQueryRunner();
@@ -689,7 +718,8 @@ export class InventoryService {
         const ing = ri.ingredient;
         if (!ing) continue;
 
-        const needed = Number(ri.quantity) * Number(item.quantity);
+        const factor = this.getUnitConversionFactor(ri.unit, ing.unit);
+        const needed = Math.round(Number(ri.quantity) * factor * Number(item.quantity) * 1000) / 1000;
         const existing = requiredAmounts.get(ing.id);
 
         if (existing) {
@@ -885,6 +915,188 @@ export class InventoryService {
           metadata: { orderId, restoredCount: restoredMovements.length },
         });
       }
+    } catch (err) {
+      await queryRunner.rollbackTransaction();
+      throw err;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  /**
+   * Adjust inventory when an order's items/quantities are edited while in RECEIVED stage.
+   * Calculates delta per dish recipe:
+   * delta > 0 -> deducts additional required ingredients
+   * delta < 0 -> restores unneeded ingredients
+   */
+  async adjustInventoryForOrderEdit(
+    restaurantId: string,
+    orderId: string,
+    previousItems: Array<{ menuItemId: string; quantity: number; name?: string }>,
+    newItems: Array<{ menuItemId: string; quantity: number; name?: string }>,
+    actor?: any,
+  ): Promise<void> {
+    const restaurant = await this.restaurantRepo.findOne({ where: { id: restaurantId } });
+    if (!restaurant || !restaurant.autoDeductInventory) {
+      return;
+    }
+
+    // Map item quantities: menuItemId -> delta quantity
+    const itemDeltas = new Map<string, { deltaQty: number; name?: string }>();
+
+    for (const prev of previousItems) {
+      const cur = itemDeltas.get(prev.menuItemId) || { deltaQty: 0, name: prev.name };
+      cur.deltaQty -= Number(prev.quantity);
+      itemDeltas.set(prev.menuItemId, cur);
+    }
+
+    for (const next of newItems) {
+      const cur = itemDeltas.get(next.menuItemId) || { deltaQty: 0, name: next.name };
+      cur.deltaQty += Number(next.quantity);
+      cur.name = next.name || cur.name;
+      itemDeltas.set(next.menuItemId, cur);
+    }
+
+    // Filter to only items with non-zero delta
+    const changedItemIds = Array.from(itemDeltas.entries())
+      .filter(([_, d]) => d.deltaQty !== 0)
+      .map(([id]) => id);
+
+    if (changedItemIds.length === 0) {
+      return; // No quantity change
+    }
+
+    // Load active recipes for changed items
+    const recipes = await this.recipeRepo.find({
+      where: { restaurantId, isActive: true },
+      relations: {
+        ingredients: { ingredient: true },
+        menuItem: true,
+      },
+    });
+
+    const recipeMap = new Map<string, Recipe>();
+    for (const r of recipes) {
+      if (changedItemIds.includes(r.menuItemId)) {
+        recipeMap.set(r.menuItemId, r);
+      }
+    }
+
+    // Aggregate required delta per ingredient
+    const ingredientDeltas = new Map<string, {
+      ingredient: Ingredient;
+      deltaQty: number; // positive = needs deduction, negative = needs restoration
+      recipeVersions: Set<number>;
+      itemNames: Set<string>;
+    }>();
+
+    for (const [menuItemId, itemDelta] of itemDeltas.entries()) {
+      if (itemDelta.deltaQty === 0) continue;
+      const recipe = recipeMap.get(menuItemId);
+      if (!recipe || !recipe.ingredients) continue;
+
+      for (const ri of recipe.ingredients) {
+        const ing = ri.ingredient;
+        if (!ing) continue;
+
+        const factor = this.getUnitConversionFactor(ri.unit, ing.unit);
+        const neededStockDelta = Number(ri.quantity) * factor * itemDelta.deltaQty;
+
+        const existing = ingredientDeltas.get(ing.id);
+        if (existing) {
+          existing.deltaQty = Math.round((existing.deltaQty + neededStockDelta) * 1000) / 1000;
+          existing.recipeVersions.add(recipe.version);
+          existing.itemNames.add(recipe.menuItem?.name || itemDelta.name || 'Dish');
+        } else {
+          ingredientDeltas.set(ing.id, {
+            ingredient: ing,
+            deltaQty: Math.round(neededStockDelta * 1000) / 1000,
+            recipeVersions: new Set([recipe.version]),
+            itemNames: new Set([recipe.menuItem?.name || itemDelta.name || 'Dish']),
+          });
+        }
+      }
+    }
+
+    if (ingredientDeltas.size === 0) {
+      return;
+    }
+
+    const sortedIngredientIds = Array.from(ingredientDeltas.keys()).sort();
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const editTimestamp = Date.now();
+
+      for (const ingredientId of sortedIngredientIds) {
+        const deltaInfo = ingredientDeltas.get(ingredientId)!;
+        if (deltaInfo.deltaQty === 0) continue;
+
+        const lockedIng = await queryRunner.manager
+          .createQueryBuilder(Ingredient, 'i')
+          .setLock('pessimistic_write')
+          .where('i.id = :id AND i.restaurant_id = :restaurantId', {
+            id: ingredientId,
+            restaurantId,
+          })
+          .getOne();
+
+        if (!lockedIng) {
+          throw new BadRequestException(`Ingredient '${ingredientId}' not found for edit adjustment`);
+        }
+
+        const currentStock = Number(lockedIng.currentStock);
+
+        if (deltaInfo.deltaQty > 0) {
+          // Additional consumption
+          if (currentStock < deltaInfo.deltaQty) {
+            const dishList = Array.from(deltaInfo.itemNames).join(', ');
+            throw new BadRequestException(
+              `Insufficient stock for '${lockedIng.name}' to fulfill edited order. Available: ${currentStock} ${lockedIng.unit}, Additional Required: ${deltaInfo.deltaQty} ${lockedIng.unit}.`,
+            );
+          }
+
+          const balanceAfter = Math.round((currentStock - deltaInfo.deltaQty) * 1000) / 1000;
+          lockedIng.currentStock = balanceAfter;
+          await queryRunner.manager.save(Ingredient, lockedIng);
+
+          const movement = queryRunner.manager.create(StockMovement, {
+            restaurantId,
+            ingredientId,
+            type: StockMovementType.ORDER_CONSUMPTION,
+            quantity: -deltaInfo.deltaQty,
+            balanceAfter,
+            reason: `Order ${orderId} edited (+${deltaInfo.deltaQty} ${lockedIng.unit}): ${Array.from(deltaInfo.itemNames).join(', ')}`,
+            referenceOrderId: orderId,
+            actorStaffId: actor?.id || null,
+            idempotencyKey: `ord-edit-deduct-${orderId}-${ingredientId}-${editTimestamp}`,
+          });
+          await queryRunner.manager.save(StockMovement, movement);
+        } else {
+          // Return unneeded stock (deltaQty < 0)
+          const returnQty = Math.abs(deltaInfo.deltaQty);
+          const balanceAfter = Math.round((currentStock + returnQty) * 1000) / 1000;
+          lockedIng.currentStock = balanceAfter;
+          await queryRunner.manager.save(Ingredient, lockedIng);
+
+          const movement = queryRunner.manager.create(StockMovement, {
+            restaurantId,
+            ingredientId,
+            type: StockMovementType.ORDER_CANCELLATION_REVERSAL,
+            quantity: returnQty,
+            balanceAfter,
+            reason: `Order ${orderId} edited (-${returnQty} ${lockedIng.unit} returned): ${Array.from(deltaInfo.itemNames).join(', ')}`,
+            referenceOrderId: orderId,
+            actorStaffId: actor?.id || null,
+            idempotencyKey: `ord-edit-restore-${orderId}-${ingredientId}-${editTimestamp}`,
+          });
+          await queryRunner.manager.save(StockMovement, movement);
+        }
+      }
+
+      await queryRunner.commitTransaction();
     } catch (err) {
       await queryRunner.rollbackTransaction();
       throw err;

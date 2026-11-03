@@ -127,3 +127,106 @@ describe('QA Remediation — Priority 1: Security & Database Safety', () => {
     assert.equal(synchronize, false, 'TypeORM synchronize must be false in production');
   });
 });
+
+describe('QA Remediation — Priority 2: Order & Inventory Integrity', () => {
+  it('BUG-005: InventoryService performs safe unit conversions and rejects incompatible pairings', async () => {
+    const { InventoryService } = await import('../dist/inventory/inventory.service.js');
+    const { UnitOfMeasure } = await import('../dist/common/enums/index.js');
+
+    const service = new InventoryService({}, {}, {}, {}, {}, {}, {}, {});
+
+    // Mass: 200g should equal 0.2kg
+    const factorGramToKg = service.getUnitConversionFactor(UnitOfMeasure.GRAM, UnitOfMeasure.KG);
+    assert.equal(factorGramToKg, 0.001);
+    assert.equal(200 * factorGramToKg, 0.2);
+
+    // Mass: 2kg should equal 2000g
+    const factorKgToGram = service.getUnitConversionFactor(UnitOfMeasure.KG, UnitOfMeasure.GRAM);
+    assert.equal(factorKgToGram, 1000);
+    assert.equal(2 * factorKgToGram, 2000);
+
+    // Volume: 500ml should equal 0.5L
+    const factorMlToL = service.getUnitConversionFactor(UnitOfMeasure.ML, UnitOfMeasure.LITRE);
+    assert.equal(factorMlToL, 0.001);
+    assert.equal(500 * factorMlToL, 0.5);
+
+    // Rejection of incompatible pairing (KG vs LITRE, PIECE vs GRAM)
+    assert.throws(
+      () => service.getUnitConversionFactor(UnitOfMeasure.GRAM, UnitOfMeasure.LITRE),
+      (err) => {
+        assert.match(err.message, /Incompatible unit conversion/);
+        return true;
+      },
+    );
+    assert.throws(
+      () => service.getUnitConversionFactor(UnitOfMeasure.PIECE, UnitOfMeasure.GRAM),
+      (err) => {
+        assert.match(err.message, /Incompatible unit conversion/);
+        return true;
+      },
+    );
+  });
+
+  it('BUG-007: MenuService rejects category deletion when menu items are still attached', async () => {
+    const { MenuService } = await import('../dist/menu/menu.service.js');
+
+    const mockCategory = { id: 'cat-1', name: 'Desserts', restaurantId: 'rest-1' };
+    const mockCategoryRepo = {
+      findOne: async () => mockCategory,
+      remove: async () => {},
+    };
+    const mockMenuItemRepo = {
+      count: async ({ where }) => (where.categoryId === 'cat-1' ? 4 : 0),
+    };
+
+    const service = new MenuService(mockMenuItemRepo, mockCategoryRepo, {}, {});
+
+    await assert.rejects(
+      async () => service.removeCategory('cat-1', 'rest-1'),
+      (err) => {
+        assert.match(err.message, /contains 4 menu dish\(es\)/);
+        return true;
+      },
+      'Should block category deletion when dishes remain attached',
+    );
+  });
+
+  it('BUG-014: TablesService rejects table deletion when table is not VACANT or has active orders', async () => {
+    const { TablesService } = await import('../dist/tables/tables.service.js');
+    const { TableStatus } = await import('../dist/common/enums/index.js');
+
+    const tableBusy = { id: 'tbl-1', tableNumber: 'T01', status: TableStatus.PREPPING, restaurantId: 'rest-1' };
+    const tableVacantWithOrder = { id: 'tbl-2', tableNumber: 'T02', status: TableStatus.VACANT, restaurantId: 'rest-1' };
+
+    const mockTableRepo = {
+      findOne: async ({ where }) => (where.id === 'tbl-1' ? tableBusy : tableVacantWithOrder),
+      remove: async () => {},
+    };
+
+    const mockDataSource = {
+      getRepository: () => ({
+        count: async ({ where }) => (where.tableNumber === 'T02' ? 2 : 0),
+      }),
+    };
+
+    const service = new TablesService(mockTableRepo, {}, mockDataSource);
+
+    // Rejects busy table
+    await assert.rejects(
+      async () => service.remove('tbl-1', 'rest-1'),
+      (err) => {
+        assert.match(err.message, /while its status is PREPPING/);
+        return true;
+      },
+    );
+
+    // Rejects vacant table that has active cooking orders
+    await assert.rejects(
+      async () => service.remove('tbl-2', 'rest-1'),
+      (err) => {
+        assert.match(err.message, /while it has 2 active dining order\(s\)/);
+        return true;
+      },
+    );
+  });
+});

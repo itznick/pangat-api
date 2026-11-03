@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MenuItem } from './entities/menu-item.entity.js';
@@ -139,6 +139,14 @@ export class MenuService {
     if (authorizedRestaurantId && category.restaurantId !== authorizedRestaurantId) {
       throw new ForbiddenException('Access denied: Category does not belong to authorized restaurant');
     }
+
+    const existingItemsCount = await this.menuItemRepo.count({ where: { categoryId: id } });
+    if (existingItemsCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete category '${category.name}' because it contains ${existingItemsCount} menu dish(es). Reassign or remove items first.`,
+      );
+    }
+
     await this.categoryRepo.remove(category);
   }
 

@@ -874,13 +874,36 @@ export class OrdersService {
         newItems.push(orderItem);
       }
 
-      const gstRate = 0.05;
-      const gstAmount = Math.round(subtotal * gstRate * 100) / 100;
-      const totalAmount = Math.round((subtotal + gstAmount) * 100) / 100;
+      // Snapshot previous items for exact delta inventory adjustment
+      const previousOrderItems = (order.items || []).map((i) => ({
+        menuItemId: i.menuItemId || '',
+        quantity: i.quantity,
+        name: i.name,
+      }));
+
+      // Server-Authoritative Tax Calculation from Restaurant Configuration
+      const restaurant = await manager.findOne(Restaurant, { where: { id: order.restaurantId } });
+      const gstPct = Number(restaurant?.gstPercentage ?? 5);
+      const gstAmount = Math.round(subtotal * (gstPct / 100) * 100) / 100;
+
+      // Preserve Server Delivery Fee for delivery orders
+      const deliveryFee = Number(order.deliveryFee || 0);
+      const totalAmount = Math.round((subtotal + gstAmount + deliveryFee) * 100) / 100;
 
       const previousSubtotal = order.subtotal;
       const previousTotal = order.totalAmount;
       const previousItemsCount = order.items?.length || 0;
+
+      // Adjust inventory by quantity difference only (no duplicate deductions or ghost balances)
+      if (this.inventoryService) {
+        await this.inventoryService.adjustInventoryForOrderEdit(
+          order.restaurantId,
+          order.id,
+          previousOrderItems,
+          newItems.map((i) => ({ menuItemId: i.menuItemId!, quantity: i.quantity, name: i.name })),
+          staffUser,
+        );
+      }
 
       await manager.delete(OrderItem, { orderId: order.id });
       await manager.save(OrderItem, newItems);

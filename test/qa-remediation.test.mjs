@@ -343,4 +343,96 @@ describe('QA Remediation — Priority 4: Role Alignments & Cashier Settlement', 
     assert.ok(roles.includes(StaffRole.STORE_MANAGER), 'markPaid must allow StaffRole.STORE_MANAGER');
     assert.ok(roles.includes(StaffRole.SUPER_OWNER), 'markPaid must allow StaffRole.SUPER_OWNER');
   });
+
+  it('BUG-015: TenantGuard strictly prevents non-SUPER_OWNER staff with matching organizationId from accessing other outlets', async () => {
+    const { TenantGuard } = await import('../dist/common/guards/tenant.guard.js');
+    const { StaffRole } = await import('../dist/common/enums/index.js');
+
+    const mockDataSource = {
+      getRepository: () => ({
+        findOne: async () => ({ id: 'outlet-002', organizationId: 'org-1' }),
+      }),
+    };
+
+    const guard = new TenantGuard(mockDataSource);
+
+    // STORE_MANAGER from outlet-001 in org-1 tries to access outlet-002 in org-1
+    const managerContext = {
+      switchToHttp: () => ({
+        getRequest: () => ({
+          user: { restaurantId: 'outlet-001', organizationId: 'org-1', role: StaffRole.STORE_MANAGER },
+          query: { restaurantId: 'outlet-002' },
+          params: {},
+          body: {},
+        }),
+      }),
+    };
+
+    await assert.rejects(
+      async () => guard.canActivate(managerContext),
+      (err) => {
+        assert.match(err.message, /Access denied: You do not have permission/);
+        return true;
+      },
+      'STORE_MANAGER must not access another outlet even within the same organization',
+    );
+
+    // SUPER_OWNER in org-1 should be allowed
+    const ownerContext = {
+      switchToHttp: () => ({
+        getRequest: () => ({
+          user: { restaurantId: 'outlet-001', organizationId: 'org-1', role: StaffRole.SUPER_OWNER },
+          query: { restaurantId: 'outlet-002' },
+          params: {},
+          body: {},
+        }),
+      }),
+    };
+
+    const allowed = await guard.canActivate(ownerContext);
+    assert.equal(allowed, true, 'SUPER_OWNER should be allowed to access any outlet in their organization');
+  });
+
+  it('BUG-017: RestaurantsService.submitFeedback clamps customer ratings between 1 and 5 stars', async () => {
+    const { RestaurantsService } = await import('../dist/restaurants/restaurants.service.js');
+
+    let savedFeedback = null;
+    const mockOrderRepo = {
+      findOne: async () => ({
+        id: 'ord-123',
+        restaurantId: 'rest-001',
+        feedback: null,
+      }),
+      save: async (o) => {
+        savedFeedback = o.feedback;
+        return o;
+      },
+    };
+
+    const service = new RestaurantsService(
+      { findOne: async () => ({ id: 'rest-001', slug: 'pangat' }) },
+      {},
+      mockOrderRepo,
+      {},
+      {},
+    );
+
+    // Submit invalid 10-star rating
+    await service.submitFeedback('pangat', { orderId: 'ord-123', rating: 10 });
+    assert.equal(savedFeedback.rating, 5, 'Rating above 5 must clamp to 5');
+
+    // Submit invalid 0-star rating
+    await service.submitFeedback('pangat', { orderId: 'ord-123', rating: 0 });
+    assert.equal(savedFeedback.rating, 1, 'Rating below 1 must clamp to 1');
+  });
+
+  it('BUG-018: TablesController.updateStatus includes StaffRole.CASHIER in allowed roles', async () => {
+    const { StaffRole } = await import('../dist/common/enums/index.js');
+    const { TablesController } = await import('../dist/tables/tables.controller.js');
+    const { ROLES_KEY } = await import('../dist/common/decorators/roles.decorator.js');
+
+    const roles = Reflect.getMetadata(ROLES_KEY, TablesController.prototype.updateStatus);
+    assert.ok(Array.isArray(roles), 'updateStatus should have roles metadata defined');
+    assert.ok(roles.includes(StaffRole.CASHIER), 'updateStatus must allow StaffRole.CASHIER');
+  });
 });

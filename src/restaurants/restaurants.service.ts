@@ -111,6 +111,8 @@ export class RestaurantsService {
     dto: { orderId?: string; tableNumber?: string; rating: number; tags?: string[]; comment?: string },
   ) {
     const restaurant = await this.findBySlug(slug);
+    const rawRating = Number(dto.rating);
+    const safeRating = Number.isFinite(rawRating) ? Math.min(5, Math.max(1, Math.round(rawRating))) : 5;
 
     if (dto.orderId) {
       const order = await this.orderRepo.findOne({
@@ -118,7 +120,7 @@ export class RestaurantsService {
       });
       if (order) {
         order.feedback = {
-          rating: Number(dto.rating) || 5,
+          rating: safeRating,
           tags: Array.isArray(dto.tags) ? dto.tags : [],
           comment: dto.comment?.trim() || undefined,
           submittedAt: new Date().toISOString(),
@@ -131,7 +133,7 @@ export class RestaurantsService {
     return {
       success: true,
       feedback: {
-        rating: Number(dto.rating) || 5,
+        rating: safeRating,
         tags: Array.isArray(dto.tags) ? dto.tags : [],
         comment: dto.comment?.trim() || undefined,
         submittedAt: new Date().toISOString(),

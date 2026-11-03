@@ -174,7 +174,7 @@ export class TenantGuard implements CanActivate {
     }
 
     // Organization Super Owner (SUPER_OWNER) can access any outlet in their organization
-    if (user.organizationId) {
+    if (user.role === StaffRole.SUPER_OWNER && user.organizationId) {
       const targetRest = await this.dataSource.getRepository(Restaurant).findOne({
         where: { id: targetRestaurantId },
       });

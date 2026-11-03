@@ -49,6 +49,7 @@ export class TablesController {
     StaffRole.STORE_MANAGER,
     StaffRole.CHEF,
     StaffRole.STEWARD,
+    StaffRole.CASHIER,
   )
   async updateStatus(
     @Param('id') id: string,

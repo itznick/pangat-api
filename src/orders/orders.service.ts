@@ -432,7 +432,7 @@ export class OrdersService {
       if (user.restaurantId && user.restaurantId === order.restaurantId) {
         return order;
       }
-      if (user.organizationId) {
+      if (user.role === StaffRole.SUPER_OWNER && user.organizationId) {
         const rest = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });
         if (rest && rest.organizationId === user.organizationId) {
           return order;

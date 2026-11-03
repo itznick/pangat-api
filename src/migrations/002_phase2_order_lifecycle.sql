@@ -7,13 +7,27 @@
 
 BEGIN;
 
--- 1. Extend order_status enum
-ALTER TYPE "order_status_enum" ADD VALUE IF NOT EXISTS 'CANCELLED';
+-- 1. Extend order_status and payment_status enums safely
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'orders_order_status_enum') THEN
+    ALTER TYPE "orders_order_status_enum" ADD VALUE IF NOT EXISTS 'CANCELLED';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'order_status_enum') THEN
+    ALTER TYPE "order_status_enum" ADD VALUE IF NOT EXISTS 'CANCELLED';
+  END IF;
 
--- 2. Extend payment_status enum with refund statuses
-ALTER TYPE "payment_status_enum" ADD VALUE IF NOT EXISTS 'REFUND_PENDING';
-ALTER TYPE "payment_status_enum" ADD VALUE IF NOT EXISTS 'PARTIALLY_REFUNDED';
-ALTER TYPE "payment_status_enum" ADD VALUE IF NOT EXISTS 'REFUNDED';
+  IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'orders_payment_status_enum') THEN
+    ALTER TYPE "orders_payment_status_enum" ADD VALUE IF NOT EXISTS 'REFUND_PENDING';
+    ALTER TYPE "orders_payment_status_enum" ADD VALUE IF NOT EXISTS 'PARTIALLY_REFUNDED';
+    ALTER TYPE "orders_payment_status_enum" ADD VALUE IF NOT EXISTS 'REFUNDED';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'payment_status_enum') THEN
+    ALTER TYPE "payment_status_enum" ADD VALUE IF NOT EXISTS 'REFUND_PENDING';
+    ALTER TYPE "payment_status_enum" ADD VALUE IF NOT EXISTS 'PARTIALLY_REFUNDED';
+    ALTER TYPE "payment_status_enum" ADD VALUE IF NOT EXISTS 'REFUNDED';
+  END IF;
+END $$;
 
 -- 3. Upgrade orders table with cancellation, refund, and concurrency versioning
 ALTER TABLE "orders"

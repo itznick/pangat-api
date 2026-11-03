@@ -11,7 +11,12 @@ END $$;
 -- Add DISPATCHED to order_status enum if not present
 DO $$
 BEGIN
-  ALTER TYPE "order_status_enum" ADD VALUE IF NOT EXISTS 'DISPATCHED';
+  IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'orders_order_status_enum') THEN
+    ALTER TYPE "orders_order_status_enum" ADD VALUE IF NOT EXISTS 'DISPATCHED';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'order_status_enum') THEN
+    ALTER TYPE "order_status_enum" ADD VALUE IF NOT EXISTS 'DISPATCHED';
+  END IF;
 EXCEPTION
   WHEN duplicate_object THEN NULL;
 END $$;

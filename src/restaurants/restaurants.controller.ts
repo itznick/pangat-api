@@ -11,6 +11,10 @@ import { RestaurantsService } from './restaurants.service.js';
 import { UpdateSettingsDto } from './dto/update-settings.dto.js';
 import { CreateStaffDto } from './dto/create-staff.dto.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
+import { RolesGuard } from '../common/guards/roles.guard.js';
+import { TenantGuard } from '../common/guards/tenant.guard.js';
+import { Roles } from '../common/decorators/roles.decorator.js';
+import { StaffRole } from '../common/enums/index.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
 
 @Controller('restaurants')
@@ -38,8 +42,9 @@ export class RestaurantsController {
     return withMessage(result, 'Customer review recorded successfully');
   }
 
-  @UseGuards(JwtAuthGuard)
   @Patch(':slug/settings')
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
   async updateSettings(
     @Param('slug') slug: string,
     @Body() dto: UpdateSettingsDto,
@@ -48,8 +53,9 @@ export class RestaurantsController {
     return withMessage(updated, 'Restaurant settings updated successfully');
   }
 
-  @UseGuards(JwtAuthGuard)
   @Post(':id/staff')
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @Roles(StaffRole.SUPER_OWNER)
   async createStaff(
     @Param('id') id: string,
     @Body() dto: CreateStaffDto,

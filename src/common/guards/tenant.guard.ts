@@ -12,6 +12,8 @@ import { Order } from '../../orders/entities/order.entity.js';
 import { Table } from '../../tables/entities/table.entity.js';
 import { MenuItem } from '../../menu/entities/menu-item.entity.js';
 import { MenuCategory } from '../../menu/entities/menu-category.entity.js';
+import { Ingredient } from '../../inventory/entities/ingredient.entity.js';
+import { Recipe } from '../../inventory/entities/recipe.entity.js';
 
 @Injectable()
 export class TenantGuard implements CanActivate {
@@ -76,15 +78,31 @@ export class TenantGuard implements CanActivate {
             if (category) {
               targetRestaurantId = category.restaurantId;
             } else {
-              // Check Restaurant itself
-              const rest = await this.dataSource.getRepository(Restaurant).findOne({
+              // Check Ingredient
+              const ingredient = await this.dataSource.getRepository(Ingredient).findOne({
                 where: { id: entityId },
               });
-              if (rest) {
-                targetRestaurantId = rest.id;
+              if (ingredient) {
+                targetRestaurantId = ingredient.restaurantId;
               } else {
-                // If resource does not exist, fail with non-disclosing 404
-                throw new NotFoundException(`Resource with ID '${entityId}' not found`);
+                // Check Recipe
+                const recipe = await this.dataSource.getRepository(Recipe).findOne({
+                  where: { id: entityId },
+                });
+                if (recipe) {
+                  targetRestaurantId = recipe.restaurantId;
+                } else {
+                  // Check Restaurant itself
+                  const rest = await this.dataSource.getRepository(Restaurant).findOne({
+                    where: { id: entityId },
+                  });
+                  if (rest) {
+                    targetRestaurantId = rest.id;
+                  } else {
+                    // If resource does not exist, fail with non-disclosing 404
+                    throw new NotFoundException(`Resource with ID '${entityId}' not found`);
+                  }
+                }
               }
             }
           }

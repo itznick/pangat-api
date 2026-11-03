@@ -10,10 +10,13 @@ import {
 import { OrganizationsService } from './organizations.service.js';
 import { CreateOutletDto } from './dto/create-outlet.dto.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
+import { RolesGuard } from '../common/guards/roles.guard.js';
+import { Roles } from '../common/decorators/roles.decorator.js';
+import { StaffRole } from '../common/enums/index.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
 
 @Controller('organizations')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
 export class OrganizationsController {
   constructor(private readonly orgService: OrganizationsService) {}
 
@@ -24,6 +27,7 @@ export class OrganizationsController {
   }
 
   @Post('outlets')
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.PLATFORM_SUPER_ADMIN)
   async createOutlet(@Req() req: any, @Body() dto: CreateOutletDto) {
     const outlet = await this.orgService.createOutlet(req.user, dto);
     return withMessage(

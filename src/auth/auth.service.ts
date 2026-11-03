@@ -2,6 +2,7 @@ import {
   Injectable,
   UnauthorizedException,
   BadRequestException,
+  NotFoundException,
   Logger,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -227,15 +228,34 @@ export class AuthService {
       throw new BadRequestException('Please enter a valid 4-digit station PIN');
     }
 
-    let staff = await this.staffRepo.findOne({
-      where: { pinCode: cleanPin },
-    });
-
     let outlet: Restaurant | null = null;
     if (outletSlug) {
       const cleanSlug = outletSlug.trim().toLowerCase();
       outlet = await this.dataSource.getRepository(Restaurant).findOne({
         where: [{ slug: cleanSlug }, { slug: outletSlug.trim() }],
+      });
+      if (!outlet) {
+        throw new NotFoundException(`Outlet with slug '${outletSlug}' not found`);
+      }
+    }
+
+    // Attempt scoped lookup first if target outlet is specified to disambiguate identical PINs
+    let staff: Staff | null = null;
+    if (outlet) {
+      const conditions: Array<{ pinCode: string; restaurantId?: string; organizationId?: string }> = [
+        { pinCode: cleanPin, restaurantId: outlet.id },
+      ];
+      if (outlet.organizationId) {
+        conditions.push({ pinCode: cleanPin, organizationId: outlet.organizationId });
+      }
+      staff = await this.staffRepo.findOne({
+        where: conditions,
+      });
+    }
+
+    if (!staff) {
+      staff = await this.staffRepo.findOne({
+        where: { pinCode: cleanPin },
       });
     }
 
@@ -244,6 +264,18 @@ export class AuthService {
       throw new UnauthorizedException(
         'Invalid station PIN code. Please ensure your kitchen staff account or station PIN is registered.',
       );
+    }
+
+    // Strict Tenant Validation: Ensure staff belongs to the specified outlet or parent organization
+    if (outlet) {
+      const belongsToOutlet =
+        staff.restaurantId === outlet.id ||
+        (Boolean(staff.organizationId) && staff.organizationId === outlet.organizationId);
+      if (!belongsToOutlet) {
+        throw new UnauthorizedException(
+          'Access denied: Station PIN is not registered for this outlet',
+        );
+      }
     }
 
     if (!outlet && staff.restaurantId) {

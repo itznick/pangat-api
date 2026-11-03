@@ -52,7 +52,7 @@ import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
           type: 'postgres',
           url: dbUrl,
           autoLoadEntities: true,
-          synchronize: true, // Auto-sync database schema on Neon
+          synchronize: !isProd, // Disabled in production: SQL migrations (001-007) are the authoritative schema mechanism
           ssl: isNeonOrCloud
             ? { rejectUnauthorized: false }
             : false,

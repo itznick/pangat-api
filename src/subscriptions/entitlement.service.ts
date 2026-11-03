@@ -129,4 +129,28 @@ export class EntitlementService {
       maxTables: sub.plan.maxTablesPerOutlet,
     };
   }
+
+  /**
+   * Check if outlet has capacity to add another staff member based on plan maxStaffPerOutlet.
+   */
+  async canAddStaff(organizationId: string, currentStaffCount: number): Promise<{ allowed: boolean; maxStaff: number }> {
+    const sub = await this.getEffectiveSubscription(organizationId);
+    if (!sub || !sub.plan) {
+      return { allowed: false, maxStaff: 0 };
+    }
+
+    if (sub.status === SubscriptionStatus.EXPIRED || sub.status === SubscriptionStatus.HALTED) {
+      return { allowed: false, maxStaff: sub.plan.maxStaffPerOutlet || 5 };
+    }
+
+    const limit = sub.plan.maxStaffPerOutlet;
+    if (limit === -1 || limit === null || limit === undefined) {
+      return { allowed: true, maxStaff: -1 };
+    }
+
+    return {
+      allowed: currentStaffCount < limit,
+      maxStaff: limit,
+    };
+  }
 }

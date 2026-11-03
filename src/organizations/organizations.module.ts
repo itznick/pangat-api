@@ -5,9 +5,13 @@ import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
 import { Table } from '../tables/entities/table.entity.js';
 import { OrganizationsService } from './organizations.service.js';
 import { OrganizationsController } from './organizations.controller.js';
+import { SubscriptionsModule } from '../subscriptions/subscriptions.module.js';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Organization, Restaurant, Table])],
+  imports: [
+    TypeOrmModule.forFeature([Organization, Restaurant, Table]),
+    SubscriptionsModule,
+  ],
   controllers: [OrganizationsController],
   providers: [OrganizationsService],
   exports: [OrganizationsService],

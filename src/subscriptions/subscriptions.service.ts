@@ -343,10 +343,24 @@ export class SubscriptionsService {
         break;
 
       case 'subscription.activated':
-        // Rule: Subscription activated
-        sub.status = SubscriptionStatus.ACTIVE;
-        await this.subRepo.save(sub);
-        await this.recordAudit(organizationId, 'SUBSCRIPTION_ACTIVATED', 'RAZORPAY_WEBHOOK', 'Subscription activated', eventId, { rzpSubId });
+        // Rule: Subscription activated at gateway. Never grant paid ACTIVE status without verified payment capture.
+        const hasVerifiedPaidInvoice = (await this.invoiceRepo.count({
+          where: { subscriptionId: sub.id, status: SubscriptionInvoiceStatus.PAID },
+        })) > 0;
+        if (hasVerifiedPaidInvoice) {
+          sub.status = SubscriptionStatus.ACTIVE;
+          await this.subRepo.save(sub);
+        }
+        await this.recordAudit(
+          organizationId,
+          'SUBSCRIPTION_ACTIVATED',
+          'RAZORPAY_WEBHOOK',
+          hasVerifiedPaidInvoice
+            ? 'Subscription activated with verified payment record'
+            : 'Subscription activated at gateway; awaiting initial payment capture before granting paid access',
+          eventId,
+          { rzpSubId, hasVerifiedPaidInvoice },
+        );
         break;
 
       case 'subscription.charged':

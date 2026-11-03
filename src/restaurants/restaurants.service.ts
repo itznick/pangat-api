@@ -2,6 +2,8 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -11,6 +13,7 @@ import { Staff } from '../auth/entities/staff.entity.js';
 import { Order } from '../orders/entities/order.entity.js';
 import { UpdateSettingsDto } from './dto/update-settings.dto.js';
 import { CreateStaffDto } from './dto/create-staff.dto.js';
+import { EntitlementService } from '../subscriptions/entitlement.service.js';
 
 @Injectable()
 export class RestaurantsService {
@@ -21,6 +24,8 @@ export class RestaurantsService {
     private readonly staffRepo: Repository<Staff>,
     @InjectRepository(Order)
     private readonly orderRepo: Repository<Order>,
+    @Optional()
+    private readonly entitlementService?: EntitlementService,
   ) {}
 
   async findBySlug(identifier: string): Promise<Restaurant> {
@@ -156,6 +161,22 @@ export class RestaurantsService {
 
     if (existing) {
       throw new BadRequestException('A user with this email address already exists');
+    }
+
+    // Entitlement Check: Verify staff quota per outlet has not been exceeded
+    if (this.entitlementService && restaurant.organizationId) {
+      const currentStaffCount = await this.staffRepo.count({
+        where: { restaurantId },
+      });
+      const capacity = await this.entitlementService.canAddStaff(
+        restaurant.organizationId,
+        currentStaffCount,
+      );
+      if (!capacity.allowed) {
+        throw new ForbiddenException(
+          `Plan staff limit reached (${capacity.maxStaff} staff members maximum per outlet). Upgrade your subscription plan to add more staff.`,
+        );
+      }
     }
 
     const passwordHash = await bcrypt.hash(dto.password || 'pangat123', 10);

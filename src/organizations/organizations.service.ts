@@ -1,6 +1,8 @@
 import {
   Injectable,
   BadRequestException,
+  ForbiddenException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
@@ -9,6 +11,7 @@ import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
 import { Table } from '../tables/entities/table.entity.js';
 import { TableStatus, StaffRole } from '../common/enums/index.js';
 import { CreateOutletDto } from './dto/create-outlet.dto.js';
+import { EntitlementService } from '../subscriptions/entitlement.service.js';
 
 @Injectable()
 export class OrganizationsService {
@@ -18,6 +21,8 @@ export class OrganizationsService {
     @InjectRepository(Restaurant)
     private readonly restaurantRepo: Repository<Restaurant>,
     private readonly dataSource: DataSource,
+    @Optional()
+    private readonly entitlementService?: EntitlementService,
   ) {}
 
   async listOutlets(user: any, requestedOrgId?: string): Promise<Restaurant[]> {
@@ -69,6 +74,19 @@ export class OrganizationsService {
       throw new BadRequestException(
         'Valid organization context is required to create a new restaurant outlet. Please contact platform administration.',
       );
+    }
+
+    // Entitlement Check: Verify organization has not exceeded plan outlet limits
+    if (this.entitlementService) {
+      const currentOutletCount = await this.restaurantRepo.count({
+        where: { organizationId: orgId },
+      });
+      const capacity = await this.entitlementService.canAddOutlet(orgId, currentOutletCount);
+      if (!capacity.allowed) {
+        throw new ForbiddenException(
+          `Plan outlet limit reached (${capacity.maxOutlets} outlet maximum). Upgrade your subscription plan to create additional branches.`,
+        );
+      }
     }
 
     // Check slug collision

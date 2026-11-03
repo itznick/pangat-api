@@ -5,9 +5,13 @@ import { Staff } from '../auth/entities/staff.entity.js';
 import { Order } from '../orders/entities/order.entity.js';
 import { RestaurantsService } from './restaurants.service.js';
 import { RestaurantsController } from './restaurants.controller.js';
+import { SubscriptionsModule } from '../subscriptions/subscriptions.module.js';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Restaurant, Staff, Order])],
+  imports: [
+    TypeOrmModule.forFeature([Restaurant, Staff, Order]),
+    SubscriptionsModule,
+  ],
   controllers: [RestaurantsController],
   providers: [RestaurantsService],
   exports: [RestaurantsService],

@@ -230,3 +230,99 @@ describe('QA Remediation — Priority 2: Order & Inventory Integrity', () => {
     );
   });
 });
+
+describe('QA Remediation — Priority 3: Billing & SaaS Entitlements', () => {
+  it('BUG-008: subscription.activated does NOT grant ACTIVE status without verified payment capture', async () => {
+    const { SubscriptionsService } = await import('../dist/subscriptions/subscriptions.service.js');
+    const { SubscriptionStatus, SubscriptionInvoiceStatus } = await import('../dist/common/enums/index.js');
+
+    let sub = {
+      id: 'sub-1',
+      organizationId: 'org-1',
+      razorpaySubscriptionId: 'sub_rzp_123',
+      status: SubscriptionStatus.TRIAL,
+      plan: { basePrice: 5000, taxPercentage: 18 },
+    };
+
+    const mockSubRepo = {
+      findOne: async () => sub,
+      save: async (s) => {
+        sub = s;
+        return s;
+      },
+    };
+
+    // No verified invoices exist
+    const mockInvoiceRepo = {
+      count: async () => 0,
+      findOne: async () => null,
+      create: (inv) => inv,
+      save: async (inv) => inv,
+    };
+
+    const mockAuditRepo = {
+      findOne: async () => null,
+      create: (a) => a,
+      save: async (a) => a,
+    };
+
+    const service = new SubscriptionsService(
+      {},
+      mockSubRepo,
+      mockInvoiceRepo,
+      mockAuditRepo,
+      {},
+      {},
+    );
+
+    // Incoming subscription.activated event WITHOUT payment capture
+    await service.handleRazorpayWebhook(
+      JSON.stringify({ event: 'subscription.activated' }),
+      'dummy-sig',
+      {
+        id: 'evt_act_001',
+        event: 'subscription.activated',
+        payload: {
+          subscription: {
+            entity: { id: 'sub_rzp_123' },
+          },
+        },
+      },
+    );
+
+    // Status MUST remain TRIAL, not ACTIVE
+    assert.equal(sub.status, SubscriptionStatus.TRIAL, 'Subscription must NOT be marked ACTIVE without verified payment');
+  });
+
+  it('BUG-009: EntitlementService enforces outlet and staff quotas', async () => {
+    const { EntitlementService } = await import('../dist/subscriptions/entitlement.service.js');
+    const { SubscriptionStatus } = await import('../dist/common/enums/index.js');
+
+    const mockSubRepo = {
+      findOne: async () => ({
+        id: 'sub-starter',
+        status: SubscriptionStatus.ACTIVE,
+        plan: {
+          maxOutlets: 1, // Starter allows 1 outlet
+          maxStaffPerOutlet: 3, // Starter allows 3 staff per outlet
+        },
+      }),
+    };
+
+    const entitlementService = new EntitlementService(mockSubRepo, {});
+
+    // Outlet check: current is 1 -> cannot add second
+    const outletCap = await entitlementService.canAddOutlet('org-1', 1);
+    assert.equal(outletCap.allowed, false, 'Should disallow adding 2nd outlet on Starter plan');
+    assert.equal(outletCap.maxOutlets, 1);
+
+    // Staff check: current is 3 -> cannot add 4th
+    const staffCap = await entitlementService.canAddStaff('org-1', 3);
+    assert.equal(staffCap.allowed, false, 'Should disallow adding 4th staff member on Starter plan');
+    assert.equal(staffCap.maxStaff, 3);
+
+    // Staff check: current is 2 -> can add 3rd
+    const staffCapOk = await entitlementService.canAddStaff('org-1', 2);
+    assert.equal(staffCapOk.allowed, true, 'Should allow adding 3rd staff member');
+  });
+});

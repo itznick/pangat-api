@@ -326,3 +326,21 @@ describe('QA Remediation — Priority 3: Billing & SaaS Entitlements', () => {
     assert.equal(staffCapOk.allowed, true, 'Should allow adding 3rd staff member');
   });
 });
+
+describe('QA Remediation — Priority 4: Role Alignments & Cashier Settlement', () => {
+  it('BUG-006: StaffRole includes CASHIER and OrdersController.markPaid allows CASHIER', async () => {
+    const { StaffRole } = await import('../dist/common/enums/index.js');
+    const { OrdersController } = await import('../dist/orders/orders.controller.js');
+    const { ROLES_KEY } = await import('../dist/common/decorators/roles.decorator.js');
+
+    assert.equal(StaffRole.CASHIER, 'CASHIER', 'StaffRole must contain CASHIER');
+
+    // Verify reflector metadata on markPaid method
+    const roles = Reflect.getMetadata(ROLES_KEY, OrdersController.prototype.markPaid);
+    assert.ok(Array.isArray(roles), 'markPaid should have roles metadata defined');
+    assert.ok(roles.includes(StaffRole.CASHIER), 'markPaid must allow StaffRole.CASHIER');
+    assert.ok(roles.includes(StaffRole.STEWARD), 'markPaid must allow StaffRole.STEWARD');
+    assert.ok(roles.includes(StaffRole.STORE_MANAGER), 'markPaid must allow StaffRole.STORE_MANAGER');
+    assert.ok(roles.includes(StaffRole.SUPER_OWNER), 'markPaid must allow StaffRole.SUPER_OWNER');
+  });
+});

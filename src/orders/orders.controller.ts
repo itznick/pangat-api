@@ -139,7 +139,7 @@ export class OrdersController {
   /** Settle counter payment: Allowed for Cashiers, Stewards, Managers, Owners */
   @Patch(':id/mark-paid')
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
-  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER, StaffRole.STEWARD)
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER, StaffRole.STEWARD, StaffRole.CASHIER)
   async markPaid(@Param('id') id: string, @Req() req: any) {
     const updated = await this.ordersService.markPaid(id, req?.user?.restaurantId);
     return withMessage(updated, 'Order marked as paid');

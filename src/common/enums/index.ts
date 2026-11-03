@@ -51,6 +51,7 @@ export enum StaffRole {
   STORE_MANAGER        = 'STORE_MANAGER',
   CHEF                 = 'CHEF',
   STEWARD              = 'STEWARD',
+  CASHIER              = 'CASHIER',
 }
 
 export enum LeadStatus {

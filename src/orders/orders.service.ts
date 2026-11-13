@@ -5,6 +5,7 @@ import {
   ForbiddenException,
   Optional,
 } from '@nestjs/common';
+import { getOrderingStatus, resolveOperations } from '../restaurants/operations.js';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import * as crypto from 'crypto';
@@ -68,7 +69,28 @@ export class OrdersService {
       throw new BadRequestException('Order must contain at least one item');
     }
 
+    // Operating rules: pause switch, opening hours, and which order types / payments are offered
+    const ordering = getOrderingStatus(restaurant.operations);
+    if (!ordering.accepting) {
+      throw new BadRequestException(ordering.message || 'This outlet is not taking orders right now');
+    }
+    const ops = resolveOperations(restaurant.operations);
+
     const orderType = dto.orderType || OrderType.DINE_IN;
+    if (
+      (orderType === OrderType.DINE_IN && !ops.orderTypes.dineIn) ||
+      (orderType === OrderType.TAKEAWAY && !ops.orderTypes.takeaway) ||
+      (orderType === OrderType.DELIVERY && !ops.orderTypes.delivery)
+    ) {
+      throw new BadRequestException('This order type is not available at this outlet right now');
+    }
+    if (
+      (dto.paymentMethod === PaymentMethod.UPI_INSTANT && !ops.payments.upi) ||
+      (dto.paymentMethod === PaymentMethod.PAY_AT_COUNTER && !ops.payments.payAtCounter) ||
+      (dto.paymentMethod === PaymentMethod.COD && !ops.payments.cod)
+    ) {
+      throw new BadRequestException('This payment method is not accepted at this outlet');
+    }
     let finalTableNumber: string | null = null;
     let table: Table | null = null;
 

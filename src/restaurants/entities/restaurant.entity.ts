@@ -17,6 +17,7 @@ import { MenuItem } from '../../menu/entities/menu-item.entity.js';
 import { Order } from '../../orders/entities/order.entity.js';
 import { Organization } from '../../organizations/entities/organization.entity.js';
 import { decimalTransformer } from '../../common/transformers/decimal.transformer.js';
+import type { OutletOperations } from '../operations.js';
 
 @Entity('restaurants')
 export class Restaurant {
@@ -85,6 +86,10 @@ export class Restaurant {
   /** Ability to toggle automated inventory deduction per outlet */
   @Column({ name: 'auto_deduct_inventory', default: true })
   autoDeductInventory: boolean;
+
+  /** Operating rules (pause switch, hours, order types, payment methods). See operations.ts. */
+  @Column({ name: 'operations', type: 'jsonb', nullable: true })
+  operations: Partial<OutletOperations> | null;
 
   // ── Relations ──────────────────────────────────────────────────────────────
 

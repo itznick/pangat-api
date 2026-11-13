@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { getOrderingStatus, resolveOperations } from '../restaurants/operations.js';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MenuItem } from './entities/menu-item.entity.js';
@@ -50,6 +51,8 @@ export class MenuService {
         upiVpa: restaurant.upiVpa,
         gstPercentage: Number(restaurant.gstPercentage),
         isVegOnly: restaurant.isVegOnly,
+        operations: resolveOperations(restaurant.operations),
+        ordering: getOrderingStatus(restaurant.operations),
       },
       categories: categories.map((c) => ({
         id: c.id,

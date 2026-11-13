@@ -5,6 +5,7 @@ import {
   ForbiddenException,
   Optional,
 } from '@nestjs/common';
+import { resolveOperations } from './operations.js';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
@@ -144,7 +145,19 @@ export class RestaurantsService {
   async updateSettings(slug: string, dto: UpdateSettingsDto): Promise<Restaurant> {
     const restaurant = await this.findBySlug(slug);
 
-    Object.assign(restaurant, dto);
+    const { operations, ...rest } = dto;
+    Object.assign(restaurant, rest);
+    if (operations) {
+      // Merge section by section so a partial update never wipes the rest of the rules
+      const current = resolveOperations(restaurant.operations);
+      restaurant.operations = {
+        ...current,
+        ...operations,
+        hours: { ...current.hours, ...(operations.hours ?? {}) },
+        orderTypes: { ...current.orderTypes, ...(operations.orderTypes ?? {}) },
+        payments: { ...current.payments, ...(operations.payments ?? {}) },
+      } as typeof current;
+    }
     return this.restaurantRepo.save(restaurant);
   }
 

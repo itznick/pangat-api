@@ -7,6 +7,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleInit,
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -26,9 +27,10 @@ import {
   SubscriptionStatus,
 } from '../common/enums/index.js';
 import { EntitlementService } from './entitlement.service.js';
+import { DEFAULT_PLANS } from './default-plans.js';
 
 @Injectable()
-export class SubscriptionsService {
+export class SubscriptionsService implements OnModuleInit {
   private readonly logger = new Logger(SubscriptionsService.name);
 
   constructor(
@@ -45,6 +47,49 @@ export class SubscriptionsService {
     private readonly entitlementService: EntitlementService,
     private readonly dataSource: DataSource,
   ) {}
+
+  /** Make sure the plan catalogue exists on every boot, however the schema was created. */
+  async onModuleInit() {
+    try {
+      const created = await this.ensureDefaultPlans();
+      if (created > 0) this.logger.log(`Seeded ${created} missing subscription plan(s)`);
+    } catch (err) {
+      this.logger.error(`Could not verify default subscription plans: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Insert any canonical plan that is missing (matched by unique `code`). Existing rows are never
+   * modified, so admin edits to prices and limits are preserved. Returns how many were created.
+   */
+  async ensureDefaultPlans(): Promise<number> {
+    const existing = await this.planRepo.find({ select: { code: true } });
+    const have = new Set(existing.map((p) => p.code));
+    const missing = DEFAULT_PLANS.filter((p) => !have.has(p.code));
+    for (const p of missing) {
+      await this.planRepo.save(
+        this.planRepo.create({
+          id: p.id,
+          code: p.code,
+          name: p.name,
+          description: p.description,
+          billingInterval: p.billingInterval,
+          basePrice: p.basePrice,
+          basePricePaise: Math.round(p.basePrice * 100),
+          currency: 'INR',
+          taxPercentage: 18,
+          maxOutlets: p.maxOutlets,
+          maxTablesPerOutlet: p.maxTablesPerOutlet,
+          maxStaffPerOutlet: p.maxStaffPerOutlet,
+          features: p.features,
+          sacCode: null,
+          razorpayPlanId: null,
+          isActive: true,
+        }),
+      );
+    }
+    return missing.length;
+  }
 
   /**
    * Calculate place-of-supply tax splits in integer paise.
@@ -235,7 +280,17 @@ export class SubscriptionsService {
    * Provision or reset a 14-day trial subscription.
    */
   async startTrial(organizationId: string, planCode = 'GROWTH'): Promise<OrganizationSubscription> {
-    const plan = await this.planRepo.findOne({ where: { code: planCode, isActive: true } });
+    let plan = await this.planRepo.findOne({ where: { code: planCode, isActive: true } });
+    if (!plan) {
+      // Self-heal an empty or partially seeded catalogue, then fall back to the cheapest monthly plan
+      await this.ensureDefaultPlans();
+      plan =
+        (await this.planRepo.findOne({ where: { code: planCode, isActive: true } })) ??
+        (await this.planRepo.findOne({
+          where: { isActive: true, billingInterval: BillingInterval.MONTHLY },
+          order: { basePrice: 'ASC' },
+        }));
+    }
     if (!plan) {
       throw new NotFoundException(`Plan '${planCode}' not found`);
     }

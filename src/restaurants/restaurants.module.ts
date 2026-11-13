@@ -5,6 +5,7 @@ import { Staff } from '../auth/entities/staff.entity.js';
 import { Order } from '../orders/entities/order.entity.js';
 import { RestaurantsService } from './restaurants.service.js';
 import { RestaurantsController } from './restaurants.controller.js';
+import { OperationsColumnBootstrap } from './operations-column.bootstrap.js';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module.js';
 
 @Module({
@@ -13,7 +14,7 @@ import { SubscriptionsModule } from '../subscriptions/subscriptions.module.js';
     SubscriptionsModule,
   ],
   controllers: [RestaurantsController],
-  providers: [RestaurantsService],
+  providers: [RestaurantsService, OperationsColumnBootstrap],
   exports: [RestaurantsService],
 })
 export class RestaurantsModule {}

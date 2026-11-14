@@ -29,6 +29,10 @@ export class RolesGuard implements CanActivate {
     }
 
     if (user.isPlatformAdmin === true || user.role === StaffRole.PLATFORM_SUPER_ADMIN) {
+      const m = String(context.switchToHttp().getRequest().method || 'GET').toUpperCase();
+      if (m !== 'GET' && m !== 'HEAD' && m !== 'OPTIONS' && !(user.platformPermissions || []).includes('merchant.operate')) {
+        throw new ForbiddenException('Access denied: your platform role is read-only inside restaurant consoles');
+      }
       return true;
     }
 

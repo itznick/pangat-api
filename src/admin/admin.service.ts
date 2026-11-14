@@ -17,6 +17,7 @@ import { Lead } from '../leads/entities/lead.entity.js';
 import { LeadStatus, OrderStatus, StaffRole, TableStatus } from '../common/enums/index.js';
 import { ProvisionRestaurantDto } from './dto/provision-restaurant.dto.js';
 import { UpdateLeadDto } from '../leads/dto/update-lead.dto.js';
+import { ensureTrial } from '../subscriptions/subscription-access.js';
 import { EventsGateway } from '../events/events.gateway.js';
 
 @Injectable()
@@ -347,6 +348,7 @@ export class AdminService {
 
       // Commit transaction cleanly
       await queryRunner.commitTransaction();
+      await ensureTrial(this.dataSource, savedOrg.id).catch(() => undefined);
 
       return {
         success: true,

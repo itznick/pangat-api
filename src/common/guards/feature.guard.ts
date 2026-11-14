@@ -3,6 +3,7 @@ import { Reflector } from '@nestjs/core';
 import { DataSource } from 'typeorm';
 import { Restaurant } from '../../restaurants/entities/restaurant.entity.js';
 import { getOrgPlan, planHasFeature } from '../../subscriptions/subscription-access.js';
+import { resolveFeatureAccess } from '../../platform/features.js';
 
 export const FEATURE_KEY = 'plan_feature';
 /** Restrict a controller / route to organizations whose subscription plan includes this feature. */
@@ -28,10 +29,14 @@ export class FeatureGuard implements CanActivate {
     }
     if (!orgId) return true;
     const plan = await getOrgPlan(this.dataSource, orgId);
-    if (!planHasFeature(plan, feature)) {
+    const decision = await resolveFeatureAccess(this.dataSource, orgId, feature, planHasFeature(plan, feature));
+    if (!decision.allowed) {
+      const label = feature.replace(/_/g, ' ').toLowerCase();
       throw new HttpException(
-        { message: `Your current plan does not include ${feature.replace(/_/g, ' ').toLowerCase()}. Upgrade to unlock it.`, code: 'FEATURE_NOT_IN_PLAN', feature },
-        HttpStatus.PAYMENT_REQUIRED,
+        decision.reason === 'PLAN'
+          ? { message: `Your current plan does not include ${label}. Upgrade to unlock it.`, code: 'FEATURE_NOT_IN_PLAN', feature }
+          : { message: `${label.charAt(0).toUpperCase()}${label.slice(1)} is currently unavailable for your account.`, code: 'FEATURE_DISABLED', feature },
+        decision.reason === 'PLAN' ? HttpStatus.PAYMENT_REQUIRED : HttpStatus.FORBIDDEN,
       );
     }
     return true;

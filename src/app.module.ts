@@ -19,6 +19,7 @@ import { AdminModule } from './admin/admin.module.js';
 import { AuditModule } from './audit/audit.module.js';
 import { InventoryModule } from './inventory/inventory.module.js';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
+import { PlatformModule } from './platform/platform.module.js';
 
 @Module({
   imports: [
@@ -89,6 +90,7 @@ import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
     AuditModule,
     InventoryModule,
     SubscriptionsModule,
+    PlatformModule,
     ReportsModule,
   ],
   controllers: [AppController],

@@ -24,6 +24,8 @@ import { RolesGuard } from '../common/guards/roles.guard.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { StaffRole } from '../common/enums/index.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
+import { PlatformAdminGuard, RequirePermission } from '../platform/guards.js';
+import { actorOf, PlatformAuditService } from '../platform/audit.service.js';
 
 export class RequestPlanChangeDto {
   @IsString()
@@ -59,7 +61,10 @@ export class AssignPlanDto {
 
 @Controller('subscriptions')
 export class SubscriptionsController {
-  constructor(private readonly subscriptionsService: SubscriptionsService) {}
+  constructor(
+    private readonly subscriptionsService: SubscriptionsService,
+    private readonly platformAudit: PlatformAuditService,
+  ) {}
 
   /**
    * Public list of available subscription plans with GST breakdown.
@@ -131,11 +136,10 @@ export class SubscriptionsController {
     return withMessage(r, 'Request sent. The Pangat team will contact you shortly.');
   }
 
-  // ── Super Admin Plan Management ──────────────────────────────────────────
-
+  // ── Super Admin Plan Management (permission-checked on the server) ───────
   @Get('admin/organizations/:orgId')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(StaffRole.PLATFORM_SUPER_ADMIN)
+  @UseGuards(JwtAuthGuard, PlatformAdminGuard)
+  @RequirePermission('subscriptions.view')
   async adminOrgSubscription(@Param('orgId') orgId: string) {
     const [data, audit] = await Promise.all([
       this.subscriptionsService.getOrganizationSubscription(orgId),
@@ -144,36 +148,58 @@ export class SubscriptionsController {
     return withMessage({ ...data, audit }, 'Organization subscription retrieved');
   }
 
+  /** Kept for existing clients; the console uses /admin/restaurants/:id/subscription/assign (reason required). */
   @Post('admin/organizations/:orgId/assign')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(StaffRole.PLATFORM_SUPER_ADMIN)
+  @UseGuards(JwtAuthGuard, PlatformAdminGuard)
+  @RequirePermission('subscriptions.manage')
   @HttpCode(200)
   async adminAssign(@Param('orgId') orgId: string, @Body() dto: AssignPlanDto, @Req() req: any) {
     const sub = await this.subscriptionsService.adminAssignPlan(orgId, dto, req.user);
+    await this.platformAudit.record(actorOf(req), {
+      action: 'SUBSCRIPTION_ASSIGNED', category: 'SUBSCRIPTION', entityType: 'organization', entityId: orgId, organizationId: orgId,
+      summary: `Granted plan ${dto.planCode || dto.planId} for ${dto.months} month(s) (manual grant, no payment recorded)`, reason: dto.note ?? null,
+    });
     return withMessage(sub, 'Plan assigned successfully');
   }
 
   @Get('admin/plans')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(StaffRole.PLATFORM_SUPER_ADMIN)
+  @UseGuards(JwtAuthGuard, PlatformAdminGuard)
+  @RequirePermission('subscriptions.view')
   async listAllPlansForAdmin() {
     const plans = await this.subscriptionsService.findAllPlans(true);
     return withMessage(plans, 'All plans retrieved successfully');
   }
 
   @Post('admin/plans')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(StaffRole.PLATFORM_SUPER_ADMIN)
-  async createPlan(@Body() dto: CreatePlanDto) {
+  @UseGuards(JwtAuthGuard, PlatformAdminGuard)
+  @RequirePermission('plans.manage')
+  async createPlan(@Body() dto: CreatePlanDto, @Req() req: any) {
     const plan = await this.subscriptionsService.createPlan(dto);
+    await this.platformAudit.record(actorOf(req), {
+      action: 'PLAN_CREATED', category: 'PLAN', entityType: 'plan', entityId: plan.id, entityLabel: plan.code,
+      summary: `Created plan ${plan.code} (${plan.name}) at ₹${plan.basePrice}/${String(plan.billingInterval).toLowerCase()}`, changes: dto,
+    });
     return withMessage(plan, `Plan '${plan.name}' created successfully`);
   }
 
   @Patch('admin/plans/:id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(StaffRole.PLATFORM_SUPER_ADMIN)
-  async updatePlan(@Param('id') id: string, @Body() dto: UpdatePlanDto) {
+  @UseGuards(JwtAuthGuard, PlatformAdminGuard)
+  @RequirePermission('plans.manage')
+  async updatePlan(@Param('id') id: string, @Body() dto: UpdatePlanDto, @Req() req: any) {
+    const before = await this.subscriptionsService.findPlanById(id);
+    const prev: Record<string, unknown> = {};
+    for (const k of Object.keys(dto)) prev[k] = (before as any)[k];
     const plan = await this.subscriptionsService.updatePlan(id, dto);
+    const changes: Record<string, { from: unknown; to: unknown }> = {};
+    for (const k of Object.keys(dto)) {
+      const a = JSON.stringify(prev[k]);
+      const b = JSON.stringify((plan as any)[k]);
+      if (a !== b) changes[k] = { from: prev[k], to: (plan as any)[k] };
+    }
+    await this.platformAudit.record(actorOf(req), {
+      action: dto.isActive === false ? 'PLAN_RETIRED' : 'PLAN_UPDATED', category: 'PLAN', entityType: 'plan', entityId: plan.id, entityLabel: plan.code,
+      summary: `Updated plan ${plan.code}: ${Object.keys(changes).join(', ') || 'no field changes'}`, changes,
+    });
     return withMessage(plan, `Plan '${plan.name}' updated successfully`);
   }
 }

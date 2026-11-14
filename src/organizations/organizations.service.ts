@@ -11,6 +11,7 @@ import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
 import { Table } from '../tables/entities/table.entity.js';
 import { TableStatus, StaffRole } from '../common/enums/index.js';
 import { CreateOutletDto } from './dto/create-outlet.dto.js';
+import { resolveFeatureAccess } from '../platform/features.js';
 import { EntitlementService } from '../subscriptions/entitlement.service.js';
 
 @Injectable()
@@ -81,6 +82,10 @@ export class OrganizationsService {
       const currentOutletCount = await this.restaurantRepo.count({
         where: { organizationId: orgId },
       });
+      const multi = await resolveFeatureAccess(this.dataSource, orgId, 'MULTI_OUTLET', true);
+      if (!multi.allowed && currentOutletCount >= 1) {
+        throw new ForbiddenException('Adding more outlets is currently unavailable for your account.');
+      }
       const capacity = await this.entitlementService.canAddOutlet(orgId, currentOutletCount);
       if (!capacity.allowed) {
         throw new ForbiddenException(

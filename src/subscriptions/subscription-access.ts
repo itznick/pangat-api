@@ -4,7 +4,10 @@ import { OrganizationSubscription } from './entities/organization-subscription.e
 import { SubscriptionPlan } from './entities/subscription-plan.entity.js';
 import { SubscriptionStatus } from '../common/enums/index.js';
 
-const GRACE_DAYS = 7;
+import { getSetting } from '../platform/settings.service.js';
+import { getOrgLifecycle } from '../platform/org-status.js';
+
+const graceDays = () => Number(getSetting<number>('subscription.gracePeriodDays') ?? 7);
 const TTL_MS = 20_000;
 const cache = new Map<string, { at: number; blocked: boolean; reason: string | null }>();
 
@@ -26,7 +29,7 @@ export function evaluateAccess(
   if (end && end.getTime() < now.getTime()) {
     const graceEnd = sub.gracePeriodEndsAt
       ? new Date(sub.gracePeriodEndsAt)
-      : new Date(end.getTime() + GRACE_DAYS * 86_400_000);
+      : new Date(end.getTime() + graceDays() * 86_400_000);
     if (now.getTime() >= graceEnd.getTime() || sub.status === SubscriptionStatus.CANCELLED || sub.cancelAtPeriodEnd) {
       return {
         blocked: true,
@@ -48,29 +51,16 @@ export async function getOrgAccess(dataSource: DataSource, organizationId: strin
   const hit = cache.get(organizationId);
   if (hit && Date.now() - hit.at < TTL_MS) return { blocked: hit.blocked, reason: hit.reason };
 
-  const subRepo = dataSource.getRepository(OrganizationSubscription);
-  let sub = await subRepo.findOne({ where: { organizationId }, order: { createdAt: 'DESC' } });
-  if (!sub) {
-    const plan =
-      (await dataSource.getRepository(SubscriptionPlan).findOne({ where: { code: 'GROWTH', isActive: true } })) ??
-      (await dataSource.getRepository(SubscriptionPlan).findOne({ where: { isActive: true }, order: { basePrice: 'ASC' } }));
-    if (plan) {
-      const now = new Date();
-      const end = new Date(now.getTime() + 14 * 86_400_000);
-      sub = await subRepo.save(
-        subRepo.create({
-          organizationId,
-          planId: plan.id,
-          status: SubscriptionStatus.TRIAL,
-          currentPeriodStart: now,
-          currentPeriodEnd: end,
-          trialEndsAt: end,
-          gracePeriodEndsAt: null,
-          cancelAtPeriodEnd: false,
-        }),
-      );
-    }
+  // A suspended / deactivated restaurant is closed regardless of its subscription
+  const life = await getOrgLifecycle(dataSource, organizationId);
+  if (life.status !== 'ACTIVE') {
+    const closed = { blocked: true, reason: life.status === 'SUSPENDED' ? 'This restaurant account is suspended. Contact Pangat support.' : 'This restaurant account has been deactivated.' };
+    cache.set(organizationId, { at: Date.now(), ...closed });
+    return closed;
   }
+
+  const subRepo = dataSource.getRepository(OrganizationSubscription);
+  const sub = (await subRepo.findOne({ where: { organizationId }, order: { createdAt: 'DESC' } })) ?? (await ensureTrial(dataSource, organizationId));
   const access = evaluateAccess(sub);
   cache.set(organizationId, { at: Date.now(), ...access });
   return access;
@@ -98,4 +88,38 @@ export function planHasFeature(plan: { features: unknown } | null, feature: stri
   if (!plan) return false;
   const list = Array.isArray(plan.features) ? (plan.features as string[]) : String(plan.features || '').split(',').map((s) => s.trim());
   return list.includes(feature) || list.includes('*');
+}
+
+/**
+ * Make sure an organization has a subscription row: starts a trial (plan and length come from platform settings / the plan)
+ * if it has none. Called at sign-up / provisioning, by the daily sweep, and lazily on first access for legacy organizations.
+ */
+export async function ensureTrial(dataSource: DataSource, organizationId: string, actor = 'SYSTEM'): Promise<OrganizationSubscription | null> {
+  const subRepo = dataSource.getRepository(OrganizationSubscription);
+  const existing = await subRepo.findOne({ where: { organizationId }, order: { createdAt: 'DESC' } });
+  if (existing) return existing;
+  const plans = dataSource.getRepository(SubscriptionPlan);
+  const plan =
+    (await plans.findOne({ where: { code: String(getSetting('subscription.defaultTrialPlanCode') || 'GROWTH'), isActive: true } })) ??
+    (await plans.findOne({ where: { isActive: true }, order: { basePrice: 'ASC' } }));
+  if (!plan) return null;
+  const now = new Date();
+  const trialDays = Number(plan.trialDays ?? getSetting<number>('subscription.defaultTrialDays') ?? 14);
+  const end = new Date(now.getTime() + trialDays * 86_400_000);
+  const sub = await subRepo.save(
+    subRepo.create({
+      organizationId,
+      planId: plan.id,
+      status: SubscriptionStatus.TRIAL,
+      currentPeriodStart: now,
+      currentPeriodEnd: end,
+      trialEndsAt: end,
+      gracePeriodEndsAt: null,
+      cancelAtPeriodEnd: false,
+      source: 'TRIAL',
+      assignedBy: actor,
+    }),
+  );
+  invalidateOrgAccess(organizationId);
+  return sub;
 }

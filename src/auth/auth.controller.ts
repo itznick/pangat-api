@@ -19,6 +19,7 @@ import { OnboardDto } from './dto/onboard.dto.js';
 import { SetupSuperAdminDto } from './dto/setup-super-admin.dto.js';
 import { RequestPasswordResetDto, ResetPasswordDto } from './dto/password-reset.dto.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
+import { clientMeta } from '../platform/login-events.js';
 
 export class ChangePasswordDto {
   @IsString()
@@ -72,8 +73,8 @@ export class AuthController {
   @Post('login')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @HttpCode(HttpStatus.OK)
-  async login(@Body() loginDto: LoginDto) {
-    const result = await this.authService.login(loginDto);
+  async login(@Body() loginDto: LoginDto, @Req() req: any) {
+    const result = await this.authService.login(loginDto, clientMeta(req));
     return withMessage(result, 'Authentication successful');
   }
 

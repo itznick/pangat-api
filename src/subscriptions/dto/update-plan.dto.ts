@@ -70,4 +70,13 @@ export class UpdatePlanDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  trialDays?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  isPublic?: boolean;
 }

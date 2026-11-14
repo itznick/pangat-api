@@ -8,13 +8,16 @@ import { Repository } from 'typeorm';
 import { OrganizationSubscription } from './entities/organization-subscription.entity.js';
 import { SubscriptionPlan } from './entities/subscription-plan.entity.js';
 import { SubscriptionStatus } from '../common/enums/index.js';
+import { getSetting } from '../platform/settings.service.js';
 
 @Injectable()
 export class EntitlementService {
   private readonly logger = new Logger(EntitlementService.name);
 
   // Default grace period window after period end before feature cutoff (7 days)
-  private readonly GRACE_PERIOD_DAYS = 7;
+  private get GRACE_PERIOD_DAYS(): number {
+    return Number(getSetting<number>('subscription.gracePeriodDays') ?? 7);
+  }
 
   constructor(
     @InjectRepository(OrganizationSubscription)

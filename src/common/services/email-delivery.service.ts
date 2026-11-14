@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { getSetting } from '../../platform/settings.service.js';
 
 export interface EmailDeliveryResult {
   delivered: boolean;
@@ -33,8 +34,9 @@ export class EmailDeliveryService {
    * Never logs recipient email addresses, tokens, or provider secrets.
    */
   async sendTransactionalEmail(options: EmailOptions): Promise<EmailDeliveryResult> {
-    const sendgridApiKey = this.configService.get<string>('SENDGRID_API_KEY');
-    const fromEmail = this.configService.get<string>('EMAIL_FROM') || 'no-reply@pangat.in';
+    const sendgridApiKey = getSetting<string | null>('email.sendgridApiKey') || this.configService.get<string>('SENDGRID_API_KEY');
+    const fromEmail = getSetting<string | null>('email.fromEmail') || this.configService.get<string>('EMAIL_FROM') || 'no-reply@pangat.in';
+    const fromName = getSetting<string | null>('email.fromName') || 'Pangat Hospitality';
 
     // 1. SendGrid Real HTTP Transport via native fetch
     if (sendgridApiKey) {
@@ -46,7 +48,7 @@ export class EmailDeliveryService {
               subject: options.subject,
             },
           ],
-          from: { email: fromEmail, name: 'Pangat Hospitality' },
+          from: { email: fromEmail, name: fromName },
           content: [
             {
               type: 'text/html',

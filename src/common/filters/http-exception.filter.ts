@@ -12,6 +12,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { reportServerError } from '../../platform/monitoring.service.js';
 
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
@@ -36,6 +37,10 @@ export class HttpExceptionFilter implements ExceptionFilter {
         `${req.method} ${req.url} -> ${(exception as Error)?.message}`,
         (exception as Error)?.stack,
       );
+    }
+
+    if (status >= 500) {
+      reportServerError({ method: req.method, url: req.originalUrl || req.url, status, error: exception as Error, userId: (req as any).user?.id, orgId: (req as any).user?.organizationId });
     }
 
     const messages: string[] =

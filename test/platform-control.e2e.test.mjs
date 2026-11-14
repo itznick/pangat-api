@@ -65,7 +65,12 @@ before(async () => {
     admins[role] = { id: c.data.id, email: e, token: await tokenOf(e, PW + 'xyz') };
   }
 });
-after(async () => { await db.end(); });
+after(async () => {
+  // leave the shared database tidy: retire the plans and banners this run created
+  await db.query(`UPDATE subscription_plans SET is_active = false, is_public = false WHERE code LIKE $1 OR code LIKE $2`, [`PRO${run}%`.toUpperCase(), `TPRO${run}%`.toUpperCase()]);
+  await db.query(`UPDATE announcements SET is_active = false WHERE title = 'Scheduled maintenance'`);
+  await db.end();
+});
 
 describe('Role-based access control (enforced on the server)', () => {
   it('rejects anonymous and merchant users on every platform route', async () => {

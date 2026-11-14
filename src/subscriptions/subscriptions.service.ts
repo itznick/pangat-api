@@ -145,7 +145,7 @@ export class SubscriptionsService implements OnModuleInit {
    */
   async findAllPlans(includeInactive = false) {
     const plans = await this.planRepo.find({
-      where: includeInactive ? {} : { isActive: true },
+      where: includeInactive ? {} : { isActive: true, isPublic: true },
       order: { basePrice: 'ASC' },
     });
 

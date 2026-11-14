@@ -110,6 +110,7 @@ export class RestaurantsAdminService {
       this.ds.query(
         `SELECT r.id, r.name, r.slug, r.branch_area, r.phone, r.email, r.is_active, r.upi_vpa, r.gstin, r.gst_percentage::float AS gst_percentage, r.created_at,
                 (SELECT COUNT(*)::int FROM tables t WHERE t.restaurant_id = r.id) AS tables,
+                (SELECT COALESCE(array_agg(t.table_number ORDER BY t.table_number), '{}') FROM tables t WHERE t.restaurant_id = r.id) AS table_numbers,
                 (SELECT COUNT(*)::int FROM menu_items m WHERE m.restaurant_id = r.id AND m.deleted_at IS NULL) AS menu_items,
                 (SELECT COUNT(*)::int FROM orders od WHERE od.restaurant_id = r.id) AS orders,
                 (SELECT COUNT(*)::int FROM orders od WHERE od.restaurant_id = r.id AND od.created_at >= now() - interval '30 days') AS orders_30d,

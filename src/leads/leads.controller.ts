@@ -1,3 +1,4 @@
+import { Throttle } from '@nestjs/throttler';
 import { Body, Controller, Post } from '@nestjs/common';
 import { LeadsService } from './leads.service.js';
 import { CreateLeadDto } from './dto/create-lead.dto.js';
@@ -7,6 +8,7 @@ export class LeadsController {
   constructor(private readonly leadsService: LeadsService) {}
 
   @Post()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async createLead(@Body() dto: CreateLeadDto) {
     const lead = await this.leadsService.create(dto);
     return {

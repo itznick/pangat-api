@@ -1,3 +1,4 @@
+import { AuditModule } from '../audit/audit.module.js';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MenuItem } from './entities/menu-item.entity.js';
@@ -10,6 +11,8 @@ import { MenuController } from './menu.controller.js';
 @Module({
   imports: [
     TypeOrmModule.forFeature([MenuItem, MenuCategory, Modifier, Restaurant]),
+    AuditModule,
+    AuditModule,
   ],
   controllers: [MenuController],
   providers: [MenuService],

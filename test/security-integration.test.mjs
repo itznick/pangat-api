@@ -196,9 +196,11 @@ describe('2. P0: Platform Admin Provisioning & Privilege Isolation', () => {
       role: StaffRole.CHEF,
       isPlatformAdmin: false,
     }
+    const qb = (row) => ({ where() { return this }, andWhere() { return this }, getOne: async () => row })
     const mockStaffRepo = {
       findOne: async () => staffEntity,
-      update: async () => { throw new Error('Should not update role') },
+      createQueryBuilder: () => qb(staffEntity),
+      update: async (_id, patch) => { if ('role' in patch || 'isPlatformAdmin' in patch) throw new Error('Should not update role') },
     }
     const mockJwt = { sign: () => 'token' }
     const mockDataSource = {
@@ -339,6 +341,7 @@ describe('4. P1: Order Pricing, Verification & Public Tracking Security', () => 
       findOne: async () => verifiedDish,
     }
     const mockOrderRepo = {
+      findOne: async () => null, // idempotency lookup: no earlier order with this key
       create: (entity) => entity,
       save: async (entity) => entity,
     }
@@ -401,7 +404,7 @@ describe('4. P1: Order Pricing, Verification & Public Tracking Security', () => 
     }
 
     const ordersService = new OrdersService(
-      {},
+      { findOne: async () => null },
       {},
       { findOne: async () => ({ id: 'rest-A1', name: 'Cafe A1' }) },
       { findOne: async () => ({ id: 'tbl-1', tableNumber: 'T01' }) },
@@ -435,7 +438,7 @@ describe('4. P1: Order Pricing, Verification & Public Tracking Security', () => 
     }
 
     const ordersService = new OrdersService(
-      {},
+      { findOne: async () => null },
       {},
       { findOne: async () => ({ id: 'rest-A1', name: 'Cafe A1' }) },
       { findOne: async () => ({ id: 'tbl-1', tableNumber: 'T01' }) },
@@ -504,8 +507,10 @@ describe('5. P2: Password-Reset Neutral Response & Security', () => {
       resetTokenExpiresAt: null,
     }
 
+    const qbFor = (row) => ({ where() { return this }, andWhere() { return this }, getOne: async () => row })
     const mockStaffRepo = {
       findOne: async () => mockStaff,
+      createQueryBuilder: () => qbFor(mockStaff),
       save: async () => mockStaff,
     }
     const mockEmailService = {
@@ -527,8 +532,18 @@ describe('5. P2: Password-Reset Neutral Response & Security', () => {
     assert.equal(response.success, true)
     // Neutral public message preventing enumeration
     assert.match(response.message, /If the email exists, a password reset link has been dispatched/)
-    // Accurate internal delivered status
-    assert.equal(response.delivered, true)
-    assert.equal(response.deliveryProvider, 'sendgrid')
+    // Delivery state must NOT be exposed: it would reveal whether the account exists
+    assert.equal('delivered' in response, false)
+    assert.equal('deliveryProvider' in response, false)
+
+    // ...and an unknown email gets the identical response
+    const unknown = new AuthService(
+      { createQueryBuilder: () => qbFor(null), findOne: async () => null },
+      {},
+      {},
+      mockEmailService,
+      mockConfig,
+    )
+    assert.deepEqual(await unknown.requestPasswordReset('ghost@example.com'), response)
   })
 })

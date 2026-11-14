@@ -1,3 +1,5 @@
+import { Throttle } from '@nestjs/throttler';
+import { OptionalJwtAuthGuard } from '../auth/optional-jwt-auth.guard.js';
 import {
   Controller,
   Get,
@@ -65,6 +67,7 @@ export class OrdersController {
 
   /** Single order lookup (open for diner live tracking with token and staff with JWT) */
   @Get(':id')
+  @UseGuards(OptionalJwtAuthGuard)
   async findOne(
     @Param('id') id: string,
     @Query('token') token?: string,
@@ -76,11 +79,13 @@ export class OrdersController {
 
   /** Diner feedback submission */
   @Post(':id/feedback')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async submitFeedback(
     @Param('id') id: string,
-    @Body() dto: { rating: number; tags?: string[]; comment?: string },
+    @Body() dto: { rating: number; tags?: string[]; comment?: string; token?: string },
+    @Query('token') queryToken?: string,
   ) {
-    const updated = await this.ordersService.submitFeedback(id, dto);
+    const updated = await this.ordersService.submitFeedback(id, dto, dto?.token || queryToken);
     return withMessage(updated, 'Customer feedback recorded successfully');
   }
 
@@ -141,7 +146,7 @@ export class OrdersController {
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER, StaffRole.STEWARD, StaffRole.CASHIER)
   async markPaid(@Param('id') id: string, @Req() req: any) {
-    const updated = await this.ordersService.markPaid(id, req?.user?.restaurantId);
+    const updated = await this.ordersService.markPaid(id, req?.user?.restaurantId, req?.user);
     return withMessage(updated, 'Order marked as paid');
   }
 

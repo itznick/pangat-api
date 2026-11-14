@@ -5,6 +5,7 @@ import { Table } from './entities/table.entity.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
 import { Order } from '../orders/entities/order.entity.js';
 import { TableStatus, OrderStatus } from '../common/enums/index.js';
+import { getOrgAccess, getOrgPlan, subscriptionBlockedError } from '../subscriptions/subscription-access.js';
 import { CreateTableDto } from './dto/create-table.dto.js';
 
 @Injectable()
@@ -65,6 +66,21 @@ export class TablesService {
     });
     if (!restaurant) {
       throw new NotFoundException(`Restaurant with ID '${dto.restaurantId}' not found`);
+    }
+
+    // Plan limit on floor tables per outlet
+    if (restaurant.organizationId && this.dataSource) {
+      const plan = await getOrgPlan(this.dataSource, restaurant.organizationId);
+      const access = await getOrgAccess(this.dataSource, restaurant.organizationId);
+      if (access.blocked) throw subscriptionBlockedError(access.reason || 'Subscription inactive');
+      if (plan && plan.maxTablesPerOutlet !== -1) {
+        const count = await this.tableRepo.count({ where: { restaurantId: restaurant.id } });
+        if (count >= plan.maxTablesPerOutlet) {
+          throw new ForbiddenException(
+            `Plan limit reached (${plan.maxTablesPerOutlet} tables per outlet). Upgrade your plan to add more tables.`,
+          );
+        }
+      }
     }
 
     const cleanNum = dto.tableNumber.trim().toUpperCase();

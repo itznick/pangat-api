@@ -54,6 +54,21 @@ export class AuditService {
     }
   }
 
+  async list(restaurantId: string, q: { entityType?: string; action?: string; page: number; limit: number }) {
+    const limit = Math.min(100, Math.max(1, q.limit || 50));
+    const page = Math.max(1, q.page || 1);
+    const where: any = { restaurantId };
+    if (q.entityType) where.entityType = q.entityType;
+    if (q.action) where.action = q.action;
+    const [items, total] = await this.auditRepo.findAndCount({
+      where,
+      order: { createdAt: 'DESC' },
+      take: limit,
+      skip: (page - 1) * limit,
+    });
+    return { items, total, page, limit };
+  }
+
   async findByEntity(entityType: string, entityId: string, restaurantId?: string): Promise<AuditLog[]> {
     const where: any = { entityType, entityId };
     if (restaurantId) {

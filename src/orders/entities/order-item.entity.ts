@@ -10,6 +10,7 @@ import {
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
+  Index,
 } from 'typeorm';
 import { Order } from './order.entity.js';
 import { decimalTransformer } from '../../common/transformers/decimal.transformer.js';
@@ -19,6 +20,7 @@ export interface SelectedModifierSnapshot {
   price: number;
 }
 
+@Index('idx_order_items_order', ['orderId'])
 @Entity('order_items')
 export class OrderItem {
   @PrimaryGeneratedColumn('uuid')

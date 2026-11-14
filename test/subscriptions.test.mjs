@@ -1,3 +1,4 @@
+process.env.RAZORPAY_WEBHOOK_SECRET = 'test_webhook_secret_key'; // the webhook now refuses to run unsigned
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import * as crypto from 'crypto';

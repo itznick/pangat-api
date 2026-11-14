@@ -10,12 +10,18 @@ import {
 import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
 
+import { JwtService } from '@nestjs/jwt';
+import { DataSource } from 'typeorm';
+import * as crypto from 'crypto';
+import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
+import { Order } from '../orders/entities/order.entity.js';
+import { Staff } from '../auth/entities/staff.entity.js';
+
 @WebSocketGateway({
   cors: {
-    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-      // Allow all connections from mobile phones, local Wi-Fi IP, localhost, or deployment domains
-      callback(null, true);
-    },
+    // Authorization is enforced per room (JWT / tracking token), so the transport accepts any origin
+    // (phones on the local network, tablets, deployment domains).
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => callback(null, true),
     credentials: true,
   },
 })
@@ -27,7 +33,29 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly connectedClients = new Set<string>();
   private readonly outletRooms = new Map<string, Set<string>>();
 
+  constructor(
+    private readonly jwtService: JwtService,
+    private readonly dataSource: DataSource,
+  ) {}
+
+  /** Staff sockets present their JWT in the handshake; diners connect anonymously and prove ownership per order. */
   handleConnection(client: Socket) {
+    const token = (client.handshake?.auth as any)?.token;
+    if (typeof token === 'string' && token) {
+      try {
+        const p: any = this.jwtService.verify(token);
+        client.data.user = {
+          id: p.sub,
+          role: p.role,
+          isPlatformAdmin: Boolean(p.isPlatformAdmin || p.role === 'PLATFORM_SUPER_ADMIN'),
+          organizationId: p.organizationId ?? null,
+          restaurantId: p.restaurantId ?? null,
+          iat: p.iat,
+        };
+      } catch {
+        client.data.user = null; // expired / forged: treated as anonymous
+      }
+    }
     this.connectedClients.add(client.id);
     this.logger.log(`Client connected: ${client.id} (total online: ${this.connectedClients.size})`);
   }
@@ -43,14 +71,35 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.logger.log(`Client disconnected: ${client.id}`);
   }
 
-  @SubscribeMessage('join:kds')
-  handleJoinKds(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: any,
-  ) {
-    const rawSlug = typeof data === 'string' ? data : (data?.restaurantSlug || 'pangat');
-    const slug = rawSlug.trim().toLowerCase();
-    const room = `kds:${slug}`;
+  /** May this socket's user see the live feed of the outlet with this slug? */
+  private async canJoinOutlet(client: Socket, slug: string): Promise<boolean> {
+    const user = client.data?.user;
+    if (!user) return false;
+    if (user.isPlatformAdmin) return true;
+    const outlet = await this.dataSource.getRepository(Restaurant).findOne({ where: { slug } });
+    if (!outlet) return false;
+    if (user.restaurantId && user.restaurantId === outlet.id) return true;
+    return Boolean(user.role === 'SUPER_OWNER' && user.organizationId && user.organizationId === outlet.organizationId);
+  }
+
+  /** Session still valid? (account active and no password change since the token was issued) */
+  private async stillValid(client: Socket): Promise<boolean> {
+    const user = client.data?.user;
+    if (!user) return false;
+    const staff = await this.dataSource.getRepository(Staff).findOne({ where: { id: user.id } });
+    if (!staff || staff.isActive === false) return false;
+    if (staff.passwordChangedAt && user.iat && user.iat < Math.floor(staff.passwordChangedAt.getTime() / 1000)) return false;
+    return true;
+  }
+
+  private async joinOutletRoom(client: Socket, kind: 'kds' | 'admin', data: any) {
+    const rawSlug = typeof data === 'string' ? data : data?.restaurantSlug;
+    const slug = String(rawSlug || '').trim().toLowerCase();
+    if (!slug) return { status: 'denied', reason: 'restaurantSlug required' };
+    if (!(await this.stillValid(client)) || !(await this.canJoinOutlet(client, slug))) {
+      return { status: 'denied', reason: 'unauthorized' };
+    }
+    const room = `${kind}:${slug}`;
     client.join(room);
     if (!this.outletRooms.has(slug)) {
       this.outletRooms.set(slug, new Set());
@@ -60,21 +109,14 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return { status: 'joined', room };
   }
 
+  @SubscribeMessage('join:kds')
+  async handleJoinKds(@ConnectedSocket() client: Socket, @MessageBody() data: any) {
+    return this.joinOutletRoom(client, 'kds', data);
+  }
+
   @SubscribeMessage('join:admin')
-  handleJoinAdmin(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: any,
-  ) {
-    const rawSlug = typeof data === 'string' ? data : (data?.restaurantSlug || 'pangat');
-    const slug = rawSlug.trim().toLowerCase();
-    const room = `admin:${slug}`;
-    client.join(room);
-    if (!this.outletRooms.has(slug)) {
-      this.outletRooms.set(slug, new Set());
-    }
-    this.outletRooms.get(slug)!.add(client.id);
-    this.logger.log(`Client ${client.id} joined ${room}`);
-    return { status: 'joined', room };
+  async handleJoinAdmin(@ConnectedSocket() client: Socket, @MessageBody() data: any) {
+    return this.joinOutletRoom(client, 'admin', data);
   }
 
   getConnectedSocketsCount(): number {
@@ -91,14 +133,34 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return Array.from(this.outletRooms.keys());
   }
 
+  /** Diners need the order's private tracking token; staff of the outlet may also follow any of its orders. */
   @SubscribeMessage('join:order')
-  handleJoinOrder(
+  async handleJoinOrder(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { orderId: string },
+    @MessageBody() data: { orderId: string; token?: string },
   ) {
-    const room = `order:${data.orderId}`;
+    const orderId = String(data?.orderId || '').trim();
+    if (!orderId) return { status: 'denied', reason: 'orderId required' };
+    const order = await this.dataSource.getRepository(Order).findOne({ where: { id: orderId } });
+    if (!order) return { status: 'denied', reason: 'unauthorized' };
+
+    let allowed = false;
+    const given = String(data?.token || '');
+    if (order.trackingToken && given.length === order.trackingToken.length) {
+      allowed = crypto.timingSafeEqual(Buffer.from(given), Buffer.from(order.trackingToken));
+    }
+    if (!allowed && client.data?.user && (await this.stillValid(client))) {
+      const u = client.data.user;
+      if (u.isPlatformAdmin || u.restaurantId === order.restaurantId) {
+        allowed = true;
+      } else if (u.role === 'SUPER_OWNER' && u.organizationId) {
+        const outlet = await this.dataSource.getRepository(Restaurant).findOne({ where: { id: order.restaurantId } });
+        allowed = outlet?.organizationId === u.organizationId;
+      }
+    }
+    if (!allowed) return { status: 'denied', reason: 'unauthorized' };
+    const room = `order:${orderId}`;
     client.join(room);
-    this.logger.log(`Client ${client.id} joined ${room}`);
     return { status: 'joined', room };
   }
 

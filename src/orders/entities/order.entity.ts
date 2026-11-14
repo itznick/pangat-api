@@ -12,6 +12,7 @@ import {
   PrimaryColumn,
   UpdateDateColumn,
   VersionColumn,
+  Index,
 } from 'typeorm';
 import {
   OrderStatus,
@@ -23,6 +24,8 @@ import { Restaurant } from '../../restaurants/entities/restaurant.entity.js';
 import { OrderItem } from './order-item.entity.js';
 import { decimalTransformer } from '../../common/transformers/decimal.transformer.js';
 
+@Index('idx_orders_restaurant_created', ['restaurantId', 'createdAt'])
+@Index('idx_orders_restaurant_status', ['restaurantId', 'orderStatus'])
 @Entity('orders')
 export class Order {
   /** Format: ORD-XXXX — set by service layer before save */
@@ -115,6 +118,9 @@ export class Order {
 
   @Column({ name: 'gst_amount', type: 'decimal', precision: 10, scale: 2, transformer: decimalTransformer })
   gstAmount: number;
+
+  @Column({ name: 'service_charge_amount', type: 'decimal', precision: 10, scale: 2, default: 0, transformer: decimalTransformer })
+  serviceChargeAmount: number;
 
   @Column({ name: 'total_amount', type: 'decimal', precision: 10, scale: 2, transformer: decimalTransformer })
   totalAmount: number;

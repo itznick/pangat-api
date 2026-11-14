@@ -61,6 +61,7 @@ export class OperationsDto {
 export class UpdateSettingsDto {
   @IsOptional()
   @IsString()
+  @MaxLength(120)
   name?: string;
 
   @IsOptional()
@@ -69,6 +70,7 @@ export class UpdateSettingsDto {
 
   @IsOptional()
   @IsString()
+  @Matches(/^[a-zA-Z0-9._-]{2,64}@[a-zA-Z0-9]{2,32}$/, { message: 'Enter a valid UPI ID such as name@bank' })
   upiVpa?: string;
 
   @IsOptional()
@@ -92,6 +94,12 @@ export class UpdateSettingsDto {
   @Min(0)
   @Max(28)
   gstPercentage?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(20)
+  serviceChargePercentage?: number;
 
   @IsOptional()
   @IsBoolean()

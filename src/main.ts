@@ -7,7 +7,7 @@ import { ResponseInterceptor } from './common/interceptors/response.interceptor.
 import { HttpExceptionFilter } from './common/filters/http-exception.filter.js';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   const configService = app.get(ConfigService);
 
   // Security: Helmet headers configured for cross-origin APIs & web sockets
@@ -56,7 +56,8 @@ async function bootstrap() {
       ) {
         return callback(null, true);
       }
-      return callback(null, true);
+      // Unknown origins get no CORS headers (browsers block them); non-browser clients are unaffected
+      return callback(null, false);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],

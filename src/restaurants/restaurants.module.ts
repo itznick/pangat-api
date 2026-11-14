@@ -6,12 +6,16 @@ import { Order } from '../orders/entities/order.entity.js';
 import { RestaurantsService } from './restaurants.service.js';
 import { RestaurantsController } from './restaurants.controller.js';
 import { OperationsColumnBootstrap } from './operations-column.bootstrap.js';
+import { OrdersModule } from '../orders/orders.module.js';
+import { AuditModule } from '../audit/audit.module.js';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module.js';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Restaurant, Staff, Order]),
     SubscriptionsModule,
+    OrdersModule,
+    AuditModule,
   ],
   controllers: [RestaurantsController],
   providers: [RestaurantsService, OperationsColumnBootstrap],

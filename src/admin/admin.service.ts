@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import * as bcrypt from 'bcrypt';
+import { randomInt } from 'crypto';
 import { Staff } from '../auth/entities/staff.entity.js';
 import { Organization } from '../organizations/entities/organization.entity.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
@@ -95,7 +96,7 @@ export class AdminService {
 
     const temporaryPassword =
       dto.password?.trim() ||
-      `Pangat@${Math.floor(1000 + Math.random() * 9000)}`;
+      `Pangat@${randomInt(100000, 999999)}`;
 
     try {
       // 1. Check if email already registered
@@ -457,8 +458,11 @@ export class AdminService {
       );
     }
 
-    const tempPassword = `Pangat#${Math.floor(1000 + Math.random() * 9000)}`;
+    const tempPassword = `Pangat#${randomInt(100000, 999999)}`;
     owner.passwordHash = await bcrypt.hash(tempPassword, 10);
+    owner.passwordChangedAt = new Date(); // signs out the owner's existing sessions
+    owner.failedLoginCount = 0;
+    owner.lockedUntil = null;
     await staffRepo.save(owner);
 
     // Documented in Security Audit: In production, dispatch via transactional email (AWS SES/SendGrid/Resend)

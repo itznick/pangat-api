@@ -13,6 +13,7 @@ import { Table } from '../../tables/entities/table.entity.js';
 import { MenuItem } from '../../menu/entities/menu-item.entity.js';
 import { MenuCategory } from '../../menu/entities/menu-category.entity.js';
 import { Ingredient } from '../../inventory/entities/ingredient.entity.js';
+import { getOrgAccess, subscriptionBlockedError } from '../../subscriptions/subscription-access.js';
 import { Recipe } from '../../inventory/entities/recipe.entity.js';
 
 @Injectable()
@@ -170,6 +171,7 @@ export class TenantGuard implements CanActivate {
     // Verify authorized access to targetRestaurantId:
     // Staff (CHEF, CASHIER, STORE_MANAGER, STEWARD) strictly limited to their assigned restaurant
     if (user.restaurantId && user.restaurantId === targetRestaurantId) {
+      await this.assertSubscriptionAllows(request, user.organizationId ?? null, targetRestaurantId);
       return true;
     }
 
@@ -179,6 +181,7 @@ export class TenantGuard implements CanActivate {
         where: { id: targetRestaurantId },
       });
       if (targetRest && targetRest.organizationId === user.organizationId) {
+        await this.assertSubscriptionAllows(request, targetRest.organizationId, targetRestaurantId);
         return true;
       }
     }
@@ -187,5 +190,26 @@ export class TenantGuard implements CanActivate {
     throw new ForbiddenException(
       'Access denied: You do not have permission to access records for this restaurant',
     );
+  }
+
+  /**
+   * An organization whose trial / billing period (plus grace) has lapsed may still look at its data and finish
+   * orders already in flight, but cannot create or change things until it renews.
+   */
+  private async assertSubscriptionAllows(request: any, organizationId: string | null, restaurantId: string) {
+    const method = String(request.method || 'GET').toUpperCase();
+    if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
+    const path: string = String(request.originalUrl || request.url || '').split('?')[0];
+    // Closing out live service stays possible: status changes, payments, cancellations, refunds, table status
+    if (/\/orders\/[^/]+\/(status|regress-status|mark-paid|cancel|refund)$/.test(path)) return;
+    if (/\/tables\/[^/]+\/status$/.test(path)) return;
+
+    let orgId = organizationId;
+    if (!orgId) {
+      orgId = (await this.dataSource.getRepository(Restaurant).findOne({ where: { id: restaurantId } }))?.organizationId ?? null;
+    }
+    if (!orgId) return;
+    const access = await getOrgAccess(this.dataSource, orgId);
+    if (access.blocked) throw subscriptionBlockedError(access.reason || 'Subscription inactive');
   }
 }

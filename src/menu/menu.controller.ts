@@ -10,6 +10,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { UpdateCategoryDto } from './dto/create-category.dto.js';
 import { MenuService } from './menu.service.js';
 import { UpdateAvailabilityDto } from './dto/update-availability.dto.js';
 import { UpdatePriceDto } from './dto/update-price.dto.js';
@@ -65,7 +66,7 @@ export class MenuController {
     @Body() dto: UpdatePriceDto,
     @Req() req: any,
   ) {
-    const updated = await this.menuService.updatePrice(id, dto.price, req?.user?.restaurantId);
+    const updated = await this.menuService.updatePrice(id, dto.price, req?.user?.restaurantId, req?.user);
     return withMessage(updated, `Item price updated to ₹${dto.price}`);
   }
 
@@ -89,6 +90,24 @@ export class MenuController {
   ) {
     const updated = await this.menuService.updateItem(id, dto, req?.user?.restaurantId);
     return withMessage(updated, 'Menu item updated successfully');
+  }
+
+  /** Delete a dish (soft delete keeps order history): Owners and Managers */
+  @Delete('items/:id')
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
+  async removeItem(@Param('id') id: string, @Req() req: any) {
+    await this.menuService.removeItem(id, req?.user?.restaurantId, req?.user);
+    return withMessage({ id }, 'Menu item deleted successfully');
+  }
+
+  /** Rename / reorder a category: Owners and Managers */
+  @Patch('categories/:id')
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
+  async updateCategory(@Param('id') id: string, @Body() dto: UpdateCategoryDto, @Req() req: any) {
+    const updated = await this.menuService.updateCategory(id, dto, req?.user?.restaurantId);
+    return withMessage(updated, 'Category updated successfully');
   }
 
   /** Create category: Allowed for Owners and Managers */

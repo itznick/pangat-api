@@ -9,6 +9,7 @@ import { getOrderingStatus, resolveOperations } from '../restaurants/operations.
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import * as crypto from 'crypto';
+import { getOrgAccess } from '../subscriptions/subscription-access.js';
 import { Order } from './entities/order.entity.js';
 import { OrderItem, SelectedModifierSnapshot } from './entities/order-item.entity.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
@@ -56,6 +57,13 @@ export class OrdersService {
   ) {}
 
   async create(dto: CreateOrderDto, idempotencyKey: string): Promise<Order> {
+    // Retried request (flaky network, double tap): hand back the order that was already created
+    const already = await this.orderRepo.findOne({ where: { idempotencyKey }, relations: { items: true } });
+    if (already) {
+      const sameOutlet = await this.restaurantRepo.findOne({ where: { id: already.restaurantId } });
+      if (sameOutlet && sameOutlet.slug === dto.restaurantSlug.trim().toLowerCase()) return already;
+      throw new BadRequestException('This idempotency key was already used for a different request');
+    }
     const cleanSlug = dto.restaurantSlug.trim().toLowerCase();
     const restaurant = await this.restaurantRepo.findOne({
       where: [{ slug: cleanSlug }, { slug: dto.restaurantSlug.trim() }],
@@ -67,6 +75,14 @@ export class OrdersService {
 
     if (!dto.items || dto.items.length === 0) {
       throw new BadRequestException('Order must contain at least one item');
+    }
+
+    // A lapsed subscription closes the outlet to new guest orders until the owner renews
+    if (restaurant.organizationId) {
+      const access = await getOrgAccess(this.dataSource, restaurant.organizationId);
+      if (access.blocked) {
+        throw new BadRequestException('This outlet is not taking orders right now. Please ask the staff for help.');
+      }
     }
 
     // Operating rules: pause switch, opening hours, and which order types / payments are offered
@@ -262,12 +278,15 @@ export class OrdersService {
       orderItems.push(orderItem);
     }
 
-    const gstPct = Number(restaurant.gstPercentage || 5);
+    // 0% GST is a legitimate setting (e.g. unregistered outlets): only fall back when the value is missing
+    const gstPct = Number(restaurant.gstPercentage ?? 5);
     const gstAmount = Math.round(subtotal * (gstPct / 100) * 100) / 100;
+    const serviceChargePct = Number(restaurant.serviceChargePercentage ?? 0);
+    const serviceChargeAmount = Math.round(subtotal * (serviceChargePct / 100) * 100) / 100;
 
     // Server-Authoritative Delivery Fee (standard flat delivery fee if delivery order, ₹30 or configured)
     const serverDeliveryFee = orderType === OrderType.DELIVERY ? 30.00 : 0.00;
-    const totalAmount = Math.round((subtotal + gstAmount + serverDeliveryFee) * 100) / 100;
+    const totalAmount = Math.round((subtotal + gstAmount + serviceChargeAmount + serverDeliveryFee) * 100) / 100;
 
     // High-Entropy IDs: Replace enumerable sequential/4-digit IDs with high-entropy tracking token
     const trackingToken = crypto.randomBytes(24).toString('hex');
@@ -293,6 +312,7 @@ export class OrdersService {
       paymentMethod: dto.paymentMethod || (orderType === OrderType.DELIVERY ? PaymentMethod.COD : PaymentMethod.PAY_AT_COUNTER),
       subtotal,
       gstAmount,
+      serviceChargeAmount,
       totalAmount,
       refundAmount: 0.00,
       idempotencyKey,
@@ -312,6 +332,11 @@ export class OrdersService {
         );
       }
     } catch (err) {
+      // A concurrent duplicate of the same request lost the race on the UNIQUE key: return the winner
+      if ((err as any)?.code === '23505' && String((err as any)?.detail || '').includes('idempotency_key')) {
+        const winner = await this.orderRepo.findOne({ where: { idempotencyKey }, relations: { items: true } });
+        if (winner) return winner;
+      }
       // Clean up order so it is not left in a misleading RECEIVED state upon inventory failure
       if (savedOrder && this.orderRepo.delete) {
         try {
@@ -495,6 +520,7 @@ export class OrdersService {
       paymentMethod: order.paymentMethod,
       subtotal: order.subtotal,
       gstAmount: order.gstAmount,
+      serviceChargeAmount: order.serviceChargeAmount,
       totalAmount: order.totalAmount,
       cancellationReason: order.cancellationReason,
       refundAmount: order.refundAmount,
@@ -513,14 +539,30 @@ export class OrdersService {
     };
   }
 
+  /** Diner review. The caller must present the order's private tracking token (the same secret that opens the tracker). */
   async submitFeedback(
     id: string,
     dto: { rating: number; tags?: string[]; comment?: string },
+    token?: string,
+    expectedRestaurantId?: string,
   ): Promise<Order> {
     const order = await this.findOne(id);
+    const given = (token || '').trim();
+    const ok =
+      Boolean(order.trackingToken) &&
+      given.length === order.trackingToken!.length &&
+      crypto.timingSafeEqual(Buffer.from(given), Buffer.from(order.trackingToken!));
+    if (!ok || (expectedRestaurantId && order.restaurantId !== expectedRestaurantId)) {
+      throw new NotFoundException('Order not found'); // non-disclosing
+    }
+    if (order.orderStatus === OrderStatus.CANCELLED) {
+      throw new BadRequestException('Cancelled orders cannot be reviewed');
+    }
+    const rating = Number(dto.rating);
+    if (!Number.isFinite(rating)) throw new BadRequestException('A rating from 1 to 5 is required');
     order.feedback = {
-      rating: Math.min(5, Math.max(1, dto.rating)),
-      tags: Array.isArray(dto.tags) ? dto.tags : [],
+      rating: Math.min(5, Math.max(1, Math.round(rating))),
+      tags: Array.isArray(dto.tags) ? dto.tags.slice(0, 8).map((t) => String(t).slice(0, 40)) : [],
       comment: dto.comment ? String(dto.comment).slice(0, 500) : undefined,
       submittedAt: new Date().toISOString(),
     };
@@ -910,7 +952,12 @@ export class OrdersService {
 
       // Preserve Server Delivery Fee for delivery orders
       const deliveryFee = Number(order.deliveryFee || 0);
-      const totalAmount = Math.round((subtotal + gstAmount + deliveryFee) * 100) / 100;
+      // Keep the service charge the order was priced with at creation (rate changes do not re-price open orders)
+      const serviceChargeRate = Number(order.serviceChargeAmount || 0) > 0 && Number(order.subtotal) > 0
+        ? Number(order.serviceChargeAmount) / Number(order.subtotal)
+        : 0;
+      const serviceChargeAmount = Math.round(subtotal * serviceChargeRate * 100) / 100;
+      const totalAmount = Math.round((subtotal + gstAmount + serviceChargeAmount + deliveryFee) * 100) / 100;
 
       const previousSubtotal = order.subtotal;
       const previousTotal = order.totalAmount;
@@ -932,6 +979,7 @@ export class OrdersService {
 
       order.subtotal = subtotal;
       order.gstAmount = gstAmount;
+      order.serviceChargeAmount = serviceChargeAmount;
       order.totalAmount = totalAmount;
       order.items = newItems;
 
@@ -1040,7 +1088,7 @@ export class OrdersService {
     return saved;
   }
 
-  async markPaid(id: string, authorizedRestaurantId?: string): Promise<Order> {
+  async markPaid(id: string, authorizedRestaurantId?: string, actor?: any): Promise<Order> {
     const order = await this.findOne(id);
     if (authorizedRestaurantId && order.restaurantId !== authorizedRestaurantId) {
       throw new ForbiddenException('Access denied: Order does not belong to authorized restaurant');
@@ -1049,6 +1097,17 @@ export class OrdersService {
     if (order.orderStatus === OrderStatus.CANCELLED) {
       throw new BadRequestException('Cannot mark a CANCELLED order as paid.');
     }
+    // Idempotent: a second tap (or a retry) must not move the settlement time or re-emit events
+    if (order.paymentStatus === PaymentStatus.PAID) {
+      return order;
+    }
+    if (
+      order.paymentStatus === PaymentStatus.REFUNDED ||
+      order.paymentStatus === PaymentStatus.PARTIALLY_REFUNDED ||
+      order.paymentStatus === PaymentStatus.REFUND_PENDING
+    ) {
+      throw new BadRequestException('This order has already been refunded and cannot be marked as paid.');
+    }
 
     let restaurantSlug: string | undefined = order.restaurant?.slug;
     if (!restaurantSlug && order.restaurantId) {
@@ -1056,9 +1115,21 @@ export class OrdersService {
       restaurantSlug = rest?.slug;
     }
 
+    const previous = order.paymentStatus;
     order.paymentStatus = PaymentStatus.PAID;
     order.settledAt = new Date();
     const saved = await this.orderRepo.save(order);
+
+    await this.auditService.record({
+      restaurantId: order.restaurantId,
+      entityType: 'ORDER',
+      entityId: order.id,
+      action: 'PAYMENT_MARKED_PAID',
+      staffId: actor?.id,
+      staffName: actor?.name,
+      staffRole: actor?.role,
+      metadata: { from: previous, method: order.paymentMethod, amount: order.totalAmount },
+    }).catch(() => undefined);
 
     await this.syncTableStatus(order, restaurantSlug);
 

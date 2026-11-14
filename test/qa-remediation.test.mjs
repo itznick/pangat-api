@@ -72,11 +72,15 @@ describe('QA Remediation — Priority 1: Security & Database Safety', () => {
       name: 'Chef Mario',
       email: 'mario@outlet-a.com',
       pinCode: '5555',
+      role: 'CHEF',
+      isActive: true,
       restaurantId: 'rest-A',
       organizationId: 'org-1',
     };
 
     const mockStaffRepo = {
+      find: async ({ where }) => (where.restaurantId === 'rest-A' && where.role === 'CHEF' ? [chefA] : []),
+      update: async () => {},
       findOne: async ({ where }) => {
         if (Array.isArray(where)) {
           for (const w of where) {
@@ -94,7 +98,7 @@ describe('QA Remediation — Priority 1: Security & Database Safety', () => {
     const mockDataSource = {
       getRepository: (entity) => ({
         findOne: async ({ where }) => {
-          const slug = where[0]?.slug;
+          const slug = where?.slug ?? where[0]?.slug;
           if (slug === 'outlet-a') return outletA;
           if (slug === 'outlet-b') return outletB;
           return null;
@@ -114,7 +118,7 @@ describe('QA Remediation — Priority 1: Security & Database Safety', () => {
     await assert.rejects(
       async () => authService.kdsPinLogin({ pinCode: '5555', outletSlug: 'outlet-b' }),
       (err) => {
-        assert.match(err.message, /Invalid station PIN code|Access denied/);
+        assert.match(err.message, /Invalid station PIN|Access denied/);
         return true;
       },
       'Should reject cross-tenant PIN login attempt',
@@ -276,19 +280,15 @@ describe('QA Remediation — Priority 3: Billing & SaaS Entitlements', () => {
     );
 
     // Incoming subscription.activated event WITHOUT payment capture
-    await service.handleRazorpayWebhook(
-      JSON.stringify({ event: 'subscription.activated' }),
-      'dummy-sig',
-      {
-        id: 'evt_act_001',
-        event: 'subscription.activated',
-        payload: {
-          subscription: {
-            entity: { id: 'sub_rzp_123' },
-          },
-        },
-      },
-    );
+    const activated = {
+      id: 'evt_act_001',
+      event: 'subscription.activated',
+      payload: { subscription: { entity: { id: 'sub_rzp_123' } } },
+    };
+    const rawActivated = JSON.stringify(activated);
+    process.env.RAZORPAY_WEBHOOK_SECRET = 'unit_test_secret';
+    const goodSig = (await import('node:crypto')).createHmac('sha256', 'unit_test_secret').update(rawActivated).digest('hex');
+    await service.handleRazorpayWebhook(rawActivated, goodSig, activated);
 
     // Status MUST remain TRIAL, not ACTIVE
     assert.equal(sub.status, SubscriptionStatus.TRIAL, 'Subscription must NOT be marked ACTIVE without verified payment');

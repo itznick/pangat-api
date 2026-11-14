@@ -14,11 +14,12 @@
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
     "lint": "oxlint src/ test/",
-    "test": "jest",
+    "test": "node --test --test-concurrency=1 test/qa-remediation.test.mjs test/inventory.test.mjs test/order-lifecycle.test.mjs test/order-types.test.mjs test/recipes-deductions.test.mjs test/security-integration.test.mjs test/subscriptions.test.mjs",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "test:integration": "node --test --test-concurrency=1 test/integration.e2e.test.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",
@@ -57,6 +58,7 @@
     "jest": "^30.0.0",
     "oxlint": "^1.58.0",
     "prettier": "^3.4.2",
+    "socket.io-client": "^4.8.4",
     "source-map-support": "^0.5.21",
     "supertest": "^7.0.0",
     "ts-jest": "^29.2.5",

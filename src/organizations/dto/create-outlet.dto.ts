@@ -9,16 +9,21 @@ import {
   IsNumber,
   Min,
   Max,
+  MaxLength,
+  Matches,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class CreateOutletDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(120)
   name: string;
 
   @IsString()
   @IsNotEmpty()
+  @MaxLength(80)
+  @Matches(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, { message: 'slug may only contain lowercase letters, numbers and hyphens' })
   slug: string;
 
   @IsString()
@@ -27,6 +32,7 @@ export class CreateOutletDto {
 
   @IsString()
   @IsNotEmpty()
+  @Matches(/^[a-zA-Z0-9._-]{2,64}@[a-zA-Z0-9]{2,32}$/, { message: 'Enter a valid UPI ID such as name@bank' })
   upiVpa: string;
 
   @IsString()

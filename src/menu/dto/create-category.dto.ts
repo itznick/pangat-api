@@ -19,3 +19,15 @@ export class CreateCategoryDto {
   @IsNumber()
   sortOrder?: number;
 }
+
+export class UpdateCategoryDto {
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  name?: string;
+
+  @Type(() => Number)
+  @IsOptional()
+  @IsNumber()
+  sortOrder?: number;
+}

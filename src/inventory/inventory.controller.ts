@@ -2,6 +2,7 @@
 // src/inventory/inventory.controller.ts
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { FeatureGuard, RequireFeature } from '../common/guards/feature.guard.js';
 import {
   Body,
   Controller,
@@ -29,7 +30,8 @@ import { StaffRole } from '../common/enums/index.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
 
 @Controller('inventory')
-@UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+@UseGuards(JwtAuthGuard, RolesGuard, TenantGuard, FeatureGuard)
+@RequireFeature('INVENTORY')
 export class InventoryController {
   constructor(private readonly inventoryService: InventoryService) {}
 

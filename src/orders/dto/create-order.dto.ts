@@ -1,5 +1,8 @@
 import {
+  ArrayMaxSize,
+  ArrayMinSize,
   IsArray,
+  Max,
   IsEnum,
   IsInt,
   IsNotEmpty,
@@ -41,6 +44,7 @@ export class CreateOrderItemDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(99)
   quantity: number;
 
   @IsOptional()
@@ -95,6 +99,8 @@ export class CreateOrderDto {
   customerPhone?: string;
 
   @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(60)
   @ValidateNested({ each: true })
   @Type(() => CreateOrderItemDto)
   items: CreateOrderItemDto[];

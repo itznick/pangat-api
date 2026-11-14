@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { resolveJwtSecret } from '../common/security/secrets.js';
 import { Staff } from './entities/staff.entity.js';
 import { Organization } from '../organizations/entities/organization.entity.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
@@ -29,7 +30,7 @@ import { EmailDeliveryService } from '../common/services/email-delivery.service.
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
-        secret: config.get<string>('JWT_SECRET') || 'super_secret_pangat_jwt_key_2026',
+        secret: resolveJwtSecret(config.get<string>('JWT_SECRET')),
         signOptions: {
           expiresIn: (config.get<string>('JWT_EXPIRATION') || '7d') as any,
         },

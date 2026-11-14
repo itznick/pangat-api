@@ -4,6 +4,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { resolveJwtSecret } from '../common/security/secrets.js';
 import { Staff } from './entities/staff.entity.js';
 
 export interface JwtPayload {
@@ -13,6 +14,7 @@ export interface JwtPayload {
   isPlatformAdmin?: boolean;
   organizationId: string | null;
   restaurantId: string | null;
+  iat?: number;
 }
 
 @Injectable()
@@ -25,7 +27,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
-      secretOrKey: configService.get<string>('JWT_SECRET') || 'super_secret_pangat_jwt_key_2026',
+      secretOrKey: resolveJwtSecret(configService.get<string>('JWT_SECRET')),
     });
   }
 
@@ -33,6 +35,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     const staff = await this.staffRepo.findOne({ where: { id: payload.sub } });
     if (!staff) {
       throw new UnauthorizedException('User account no longer exists');
+    }
+    if (staff.isActive === false) {
+      throw new UnauthorizedException('This account has been deactivated');
+    }
+    // A password change / reset invalidates every token issued before it
+    if (staff.passwordChangedAt && payload.iat && payload.iat < Math.floor(staff.passwordChangedAt.getTime() / 1000)) {
+      throw new UnauthorizedException('Session expired. Please sign in again.');
     }
     return {
       id: staff.id,

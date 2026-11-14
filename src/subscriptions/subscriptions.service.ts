@@ -9,10 +9,12 @@ import {
   NotFoundException,
   OnModuleInit,
   UnauthorizedException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import * as crypto from 'crypto';
+import { invalidateOrgAccess } from './subscription-access.js';
 import { SubscriptionPlan } from './entities/subscription-plan.entity.js';
 import { OrganizationSubscription } from './entities/organization-subscription.entity.js';
 import { SubscriptionInvoice } from './entities/subscription-invoice.entity.js';
@@ -329,16 +331,19 @@ export class SubscriptionsService implements OnModuleInit {
    * Idempotent event processing prevents duplicate billing or charge records.
    */
   async handleRazorpayWebhook(rawBody: string, signature: string, eventPayload: any) {
-    const secret = process.env.RAZORPAY_WEBHOOK_SECRET || 'test_webhook_secret_key';
+    // The webhook can grant paid access, so it is NEVER accepted unsigned, in any environment.
+    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    if (!secret) {
+      this.logger.error('RAZORPAY_WEBHOOK_SECRET is not configured: rejecting webhook');
+      throw new ServiceUnavailableException('Webhook receiver is not configured');
+    }
 
-    // Verify HMAC-SHA256 signature
-    const expectedSignature = crypto
-      .createHmac('sha256', secret)
-      .update(rawBody)
-      .digest('hex');
-
-    if (signature !== expectedSignature && process.env.NODE_ENV === 'production') {
-      this.logger.warn(`Invalid Razorpay webhook signature: ${signature}`);
+    // Verify HMAC-SHA256 over the exact bytes Razorpay sent, using a constant-time comparison
+    const expectedSignature = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+    const given = Buffer.from(String(signature || ''), 'utf8');
+    const want = Buffer.from(expectedSignature, 'utf8');
+    if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) {
+      this.logger.warn('Rejected Razorpay webhook with an invalid signature');
       throw new UnauthorizedException('Invalid Razorpay webhook signature');
     }
 
@@ -536,6 +541,97 @@ export class SubscriptionsService implements OnModuleInit {
     }
 
     return { status: 'processed', eventId, event };
+  }
+
+  // ── Manual billing & self-service ───────────────────────────────────────────
+
+  /** Platform operator puts an organization on a plan for N months (offline / invoice billing). */
+  async adminAssignPlan(
+    organizationId: string,
+    dto: { planId?: string; planCode?: string; months: number; note?: string },
+    actor: { id?: string; email?: string },
+  ) {
+    const org = await this.orgRepo.findOne({ where: { id: organizationId } });
+    if (!org) throw new NotFoundException(`Organization '${organizationId}' not found`);
+    const plan = dto.planId
+      ? await this.planRepo.findOne({ where: { id: dto.planId } })
+      : await this.planRepo.findOne({ where: { code: dto.planCode } });
+    if (!plan) throw new NotFoundException('Plan not found');
+    if (!plan.isActive) throw new BadRequestException('That plan is not active');
+
+    const now = new Date();
+    let sub = await this.subRepo.findOne({ where: { organizationId }, order: { createdAt: 'DESC' } });
+    // extend from the current end when the org is still paid-up, else from now
+    const startFrom = sub && sub.status === SubscriptionStatus.ACTIVE && new Date(sub.currentPeriodEnd) > now && sub.planId === plan.id
+      ? new Date(sub.currentPeriodEnd)
+      : now;
+    const end = new Date(startFrom);
+    end.setMonth(end.getMonth() + dto.months);
+
+    if (!sub) {
+      sub = this.subRepo.create({ organizationId, planId: plan.id });
+    }
+    sub.planId = plan.id;
+    sub.status = SubscriptionStatus.ACTIVE;
+    sub.currentPeriodStart = startFrom === now ? now : sub.currentPeriodStart;
+    sub.currentPeriodEnd = end;
+    sub.trialEndsAt = null;
+    sub.gracePeriodEndsAt = null;
+    sub.cancelAtPeriodEnd = false;
+    const saved = await this.subRepo.save(sub);
+    invalidateOrgAccess(organizationId);
+
+    await this.recordAudit(
+      organizationId,
+      'PLAN_ASSIGNED_BY_ADMIN',
+      `ADMIN:${actor?.email || actor?.id || 'unknown'}`,
+      dto.note || `Assigned ${plan.name} for ${dto.months} month(s)`,
+      undefined,
+      { planCode: plan.code, months: dto.months, periodEnd: end },
+    );
+    return { ...saved, plan };
+  }
+
+  /** Owner: stop renewal at the end of the paid period (access continues until then). */
+  async setCancelAtPeriodEnd(organizationId: string, cancel: boolean, actor: { email?: string }) {
+    await this.getOrganizationSubscription(organizationId); // makes sure a (trial) subscription exists
+    const sub = await this.entitlementService.getEffectiveSubscription(organizationId);
+    if (!sub) throw new NotFoundException('No subscription found');
+    if (sub.status === SubscriptionStatus.EXPIRED || sub.status === SubscriptionStatus.HALTED) {
+      throw new BadRequestException('This subscription has already ended. Choose a plan to restart.');
+    }
+    if (sub.status === SubscriptionStatus.TRIAL && cancel) {
+      throw new BadRequestException('A free trial just ends on its own date; there is nothing to cancel.');
+    }
+    sub.cancelAtPeriodEnd = cancel;
+    const saved = await this.subRepo.save(sub);
+    invalidateOrgAccess(organizationId);
+    await this.recordAudit(
+      organizationId,
+      cancel ? 'CANCEL_AT_PERIOD_END' : 'CANCELLATION_REVERTED',
+      `OWNER:${actor?.email || 'unknown'}`,
+      cancel ? 'Owner turned off renewal' : 'Owner kept the plan renewing',
+    );
+    return saved;
+  }
+
+  /** Owner asks for a plan change; platform operators see it in the audit trail and follow up. */
+  async requestPlanChange(organizationId: string, planCode: string, message: string | undefined, actor: { email?: string }) {
+    const plan = await this.planRepo.findOne({ where: { code: planCode, isActive: true } });
+    if (!plan) throw new NotFoundException('Plan not found');
+    await this.recordAudit(
+      organizationId,
+      'PLAN_CHANGE_REQUESTED',
+      `OWNER:${actor?.email || 'unknown'}`,
+      message?.slice(0, 500) || `Requested ${plan.name}`,
+      undefined,
+      { requestedPlanCode: plan.code },
+    );
+    return { requested: true, plan: plan.name };
+  }
+
+  async listAuditForOrganization(organizationId: string, take = 30) {
+    return this.auditRepo.find({ where: { organizationId }, order: { createdAt: 'DESC' }, take });
   }
 
   private async recordAudit(

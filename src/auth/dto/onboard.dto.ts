@@ -14,6 +14,7 @@ import {
   Max,
   ValidateNested,
   ValidateIf,
+  Matches,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -50,7 +51,7 @@ export class OnboardDto {
   email: string;
 
   @IsString()
-  @MinLength(4)
+  @MinLength(8, { message: 'Password must be at least 8 characters' })
   password: string;
 
   // Step 2: Outlet Details
@@ -114,5 +115,6 @@ export class OnboardDto {
 
   @IsString()
   @IsOptional()
+  @Matches(/^\d{4,6}$/, { message: 'Kitchen PIN must be 4 to 6 digits' })
   kitchenPin?: string;
 }

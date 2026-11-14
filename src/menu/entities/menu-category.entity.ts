@@ -9,10 +9,12 @@ import {
   OneToMany,
   PrimaryGeneratedColumn,
   JoinColumn,
+  Index,
 } from 'typeorm';
 import { Restaurant } from '../../restaurants/entities/restaurant.entity.js';
 import { MenuItem } from './menu-item.entity.js';
 
+@Index('idx_menu_categories_restaurant', ['restaurantId'])
 @Entity('menu_categories')
 export class MenuCategory {
   @PrimaryGeneratedColumn('uuid')

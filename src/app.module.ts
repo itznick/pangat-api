@@ -4,6 +4,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller.js';
+import { ReportsModule } from './reports/reports.module.js';
+import { MigrationRunner } from './common/migrations/migration-runner.service.js';
 import { AppService } from './app.service.js';
 import { AuthModule } from './auth/auth.module.js';
 import { OrganizationsModule } from './organizations/organizations.module.js';
@@ -26,12 +28,16 @@ import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
     }),
 
     // Rate limiting: 120 requests / 60 seconds per IP
-    ThrottlerModule.forRoot([
-      {
-        ttl: 60000,
-        limit: 120,
-      },
-    ]),
+    ThrottlerModule.forRoot({
+      throttlers: [
+        {
+          ttl: 60000,
+          limit: 120,
+        },
+      ],
+      // Only for automated test runs against a throwaway database; never set in production
+      skipIf: () => process.env.THROTTLE_DISABLED === 'true',
+    }),
 
     // PostgreSQL connection via Neon
     TypeOrmModule.forRootAsync({
@@ -83,10 +89,12 @@ import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
     AuditModule,
     InventoryModule,
     SubscriptionsModule,
+    ReportsModule,
   ],
   controllers: [AppController],
   providers: [
     AppService,
+    MigrationRunner,
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,

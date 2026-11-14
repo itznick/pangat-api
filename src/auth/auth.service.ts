@@ -4,6 +4,8 @@ import {
   BadRequestException,
   NotFoundException,
   Logger,
+  HttpException,
+  HttpStatus,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -21,6 +23,7 @@ import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
 import { Table } from '../tables/entities/table.entity.js';
 import { MenuCategory } from '../menu/entities/menu-category.entity.js';
 import { MenuItem } from '../menu/entities/menu-item.entity.js';
+import { AttemptLimiter } from '../common/security/attempt-limiter.js';
 import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 
 @Injectable()
@@ -104,29 +107,51 @@ export class AuthService {
     };
   }
 
-  async login(loginDto: LoginDto) {
-    const { email, password, pinCode } = loginDto;
-    let staff: Staff | null = null;
+  /** Failed password attempts before the account is locked, and for how long. */
+  private static readonly MAX_FAILED_LOGINS = 5;
+  private static readonly LOCK_MINUTES = 15;
+  /** Per outlet+client limiter for kitchen PIN guessing (4-6 digit PINs are brute-forceable without it). */
+  private readonly pinLimiter = new AttemptLimiter(5, 15 * 60_000, 15 * 60_000);
+  private readonly pinOutletLimiter = new AttemptLimiter(40, 15 * 60_000, 15 * 60_000);
+  /** Constant-cost dummy hash so unknown emails take as long as wrong passwords (no user enumeration by timing). */
+  private static readonly DUMMY_HASH = bcrypt.hashSync('pangat-dummy-password', 10);
 
-    if (pinCode) {
-      staff = await this.staffRepo.findOne({
-        where: { pinCode },
-      });
-      if (!staff) {
-        throw new UnauthorizedException('Invalid station PIN code');
-      }
-    } else if (email && password) {
-      staff = await this.staffRepo.findOne({ where: { email } });
-      if (!staff) {
-        throw new UnauthorizedException('Invalid email or password');
-      }
-      const isMatch = await bcrypt.compare(password, staff.passwordHash);
-      if (!isMatch) {
-        throw new UnauthorizedException('Invalid email or password');
-      }
-    } else {
-      throw new BadRequestException('Please provide either email/password or a station PIN');
+  async login(loginDto: LoginDto) {
+    const { email, password } = loginDto;
+    if (!email || !password) {
+      throw new BadRequestException('Please provide your email and password');
     }
+    const cleanEmail = email.trim().toLowerCase();
+    const staff = await this.staffRepo
+      .createQueryBuilder('s')
+      .where('LOWER(s.email) = :email', { email: cleanEmail })
+      .getOne();
+
+    if (!staff) {
+      await bcrypt.compare(password, AuthService.DUMMY_HASH);
+      throw new UnauthorizedException('Invalid email or password');
+    }
+    if (staff.isActive === false) {
+      throw new UnauthorizedException('This account has been deactivated. Contact your outlet owner.');
+    }
+    if (staff.lockedUntil && staff.lockedUntil.getTime() > Date.now()) {
+      const mins = Math.ceil((staff.lockedUntil.getTime() - Date.now()) / 60_000);
+      throw new HttpException(
+        `Too many failed attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'} or reset your password.`,
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+    const isMatch = await bcrypt.compare(password, staff.passwordHash);
+    if (!isMatch) {
+      const failed = (staff.failedLoginCount || 0) + 1;
+      const lock = failed >= AuthService.MAX_FAILED_LOGINS;
+      await this.staffRepo.update(staff.id, {
+        failedLoginCount: lock ? 0 : failed,
+        lockedUntil: lock ? new Date(Date.now() + AuthService.LOCK_MINUTES * 60_000) : null,
+      });
+      throw new UnauthorizedException('Invalid email or password');
+    }
+    await this.staffRepo.update(staff.id, { failedLoginCount: 0, lockedUntil: null, lastLoginAt: new Date() });
 
     let organization: Organization | null = null;
     let outlets: Restaurant[] = [];
@@ -220,102 +245,153 @@ export class AuthService {
     };
   }
 
-  async kdsPinLogin(dto: { pinCode: string; outletSlug?: string; station?: string }) {
-    const { pinCode, outletSlug } = dto;
-    const cleanPin = (pinCode || '').trim();
+  /**
+   * Kitchen station sign-in. A station PIN belongs to ONE outlet's kitchen (CHEF) account:
+   *  - the outlet slug is mandatory (a PIN is never matched across tenants),
+   *  - only CHEF accounts can sign in this way (a manager's / owner's PIN can never open a privileged session),
+   *  - PINs are stored hashed (legacy plain-text PINs are upgraded on the first successful sign-in),
+   *  - repeated failures from one client, or against one outlet, are locked out.
+   */
+  async kdsPinLogin(dto: { pinCode: string; outletSlug?: string; station?: string }, clientIp = 'unknown') {
+    const cleanPin = (dto.pinCode || '').trim();
+    const cleanSlug = (dto.outletSlug || '').trim().toLowerCase();
 
-    if (!cleanPin || cleanPin.length < 4) {
-      throw new BadRequestException('Please enter a valid 4-digit station PIN');
+    if (!/^\d{4,6}$/.test(cleanPin)) {
+      throw new BadRequestException('Enter your 4 to 6 digit station PIN');
+    }
+    if (!cleanSlug) {
+      throw new BadRequestException('Outlet slug is required for kitchen sign-in');
     }
 
-    let outlet: Restaurant | null = null;
-    if (outletSlug) {
-      const cleanSlug = outletSlug.trim().toLowerCase();
-      outlet = await this.dataSource.getRepository(Restaurant).findOne({
-        where: [{ slug: cleanSlug }, { slug: outletSlug.trim() }],
-      });
-      if (!outlet) {
-        throw new NotFoundException(`Outlet with slug '${outletSlug}' not found`);
-      }
-    }
-
-    // Attempt scoped lookup first if target outlet is specified to disambiguate identical PINs
-    let staff: Staff | null = null;
-    if (outlet) {
-      const conditions: Array<{ pinCode: string; restaurantId?: string; organizationId?: string }> = [
-        { pinCode: cleanPin, restaurantId: outlet.id },
-      ];
-      if (outlet.organizationId) {
-        conditions.push({ pinCode: cleanPin, organizationId: outlet.organizationId });
-      }
-      staff = await this.staffRepo.findOne({
-        where: conditions,
-      });
-    }
-
-    if (!staff) {
-      staff = await this.staffRepo.findOne({
-        where: { pinCode: cleanPin },
-      });
-    }
-
-    if (!staff) {
-      // Reject unregistered PIN codes safely instead of generating synthetic non-UUID sessions
-      throw new UnauthorizedException(
-        'Invalid station PIN code. Please ensure your kitchen staff account or station PIN is registered.',
+    const clientKey = `${cleanSlug}|${clientIp}`;
+    const wait = Math.max(this.pinLimiter.retryAfterSeconds(clientKey), this.pinOutletLimiter.retryAfterSeconds(cleanSlug));
+    if (wait > 0) {
+      throw new HttpException(
+        `Too many wrong PIN attempts. Try again in ${Math.ceil(wait / 60)} minute(s).`,
+        HttpStatus.TOO_MANY_REQUESTS,
       );
     }
 
-    // Strict Tenant Validation: Ensure staff belongs to the specified outlet or parent organization
-    if (outlet) {
-      const belongsToOutlet =
-        staff.restaurantId === outlet.id ||
-        (Boolean(staff.organizationId) && staff.organizationId === outlet.organizationId);
-      if (!belongsToOutlet) {
-        throw new UnauthorizedException(
-          'Access denied: Station PIN is not registered for this outlet',
-        );
+    const outlet = await this.dataSource.getRepository(Restaurant).findOne({ where: { slug: cleanSlug } });
+    const stations = outlet
+      ? await this.staffRepo.find({
+          where: { restaurantId: outlet.id, role: StaffRole.CHEF },
+        })
+      : [];
+
+    let matched: Staff | null = null;
+    for (const st of stations) {
+      if (st.isActive === false) continue;
+      if (st.pinHash) {
+        if (await bcrypt.compare(cleanPin, st.pinHash)) {
+          matched = st;
+          break;
+        }
+      } else if (st.pinCode) {
+        // Legacy plain-text PIN: compare in constant time, then upgrade to a hash
+        const a = Buffer.from(st.pinCode);
+        const b = Buffer.from(cleanPin);
+        if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+          matched = st;
+          break;
+        }
       }
     }
+    if (!stations.length) {
+      await bcrypt.compare(cleanPin, AuthService.DUMMY_HASH); // keep timing similar when the outlet has no station
+    }
 
-    if (!outlet && staff.restaurantId) {
-      outlet = await this.dataSource.getRepository(Restaurant).findOne({
-        where: { id: staff.restaurantId },
-      });
+    if (!matched || !outlet) {
+      this.pinLimiter.fail(clientKey);
+      this.pinOutletLimiter.fail(cleanSlug);
+      throw new UnauthorizedException('Invalid station PIN for this outlet');
     }
-    if (!outlet && staff.organizationId) {
-      outlet = await this.dataSource.getRepository(Restaurant).findOne({
-        where: { organizationId: staff.organizationId },
-        order: { createdAt: 'ASC' },
-      });
+    this.pinLimiter.succeed(clientKey);
+
+    if (!matched.pinHash) {
+      await this.staffRepo.update(matched.id, { pinHash: await bcrypt.hash(cleanPin, 10), pinCode: null });
     }
+    await this.staffRepo.update(matched.id, { lastLoginAt: new Date() });
 
     const payload = {
-      sub: staff.id,
-      email: staff.email,
+      sub: matched.id,
+      email: matched.email,
       role: StaffRole.CHEF,
       isPlatformAdmin: false,
-      organizationId: staff.organizationId,
-      restaurantId: outlet ? outlet.id : staff.restaurantId,
+      organizationId: matched.organizationId,
+      restaurantId: outlet.id,
     };
 
     return {
-      accessToken: this.jwtService.sign(payload),
+      accessToken: this.jwtService.sign(payload, { expiresIn: '16h' }),
       user: {
-        id: staff.id,
-        name: staff.name,
-        email: staff.email,
+        id: matched.id,
+        name: matched.name,
+        email: matched.email,
         role: StaffRole.CHEF,
         isPlatformAdmin: false,
-        organizationId: staff.organizationId,
-        restaurantId: outlet ? outlet.id : staff.restaurantId,
-        restaurantSlug: outlet?.slug || null,
+        organizationId: matched.organizationId,
+        restaurantId: outlet.id,
+        restaurantSlug: outlet.slug,
         organizationName: null,
       },
       organization: null,
-      outlets: outlet ? [outlet] : [],
+      outlets: [outlet],
       outlet,
     };
+  }
+
+  /** Current user profile (fresh from the database, never from the token). */
+  async me(userId: string) {
+    const staff = await this.staffRepo.findOne({ where: { id: userId } });
+    if (!staff) throw new UnauthorizedException('User account no longer exists');
+    return {
+      id: staff.id,
+      name: staff.name,
+      email: staff.email,
+      phone: staff.phone,
+      role: staff.role,
+      organizationId: staff.organizationId,
+      restaurantId: staff.restaurantId,
+      lastLoginAt: staff.lastLoginAt,
+    };
+  }
+
+  /** Update own name / phone. */
+  async updateProfile(userId: string, dto: { name?: string; phone?: string }) {
+    const staff = await this.staffRepo.findOne({ where: { id: userId } });
+    if (!staff) throw new UnauthorizedException('User account no longer exists');
+    if (dto.name !== undefined) staff.name = dto.name.trim().slice(0, 120) || staff.name;
+    if (dto.phone !== undefined) staff.phone = dto.phone.trim().slice(0, 30) || null;
+    await this.staffRepo.save(staff);
+    return this.me(userId);
+  }
+
+  /** Change own password (requires the current one). Signs out every other session. */
+  async changePassword(userId: string, currentPassword: string, newPassword: string) {
+    const staff = await this.staffRepo.findOne({ where: { id: userId } });
+    if (!staff) throw new UnauthorizedException('User account no longer exists');
+    if (!(await bcrypt.compare(currentPassword, staff.passwordHash))) {
+      throw new BadRequestException('Current password is incorrect');
+    }
+    if (currentPassword === newPassword) {
+      throw new BadRequestException('Choose a new password that differs from the current one');
+    }
+    staff.passwordHash = await bcrypt.hash(newPassword, 10);
+    staff.passwordChangedAt = new Date();
+    staff.failedLoginCount = 0;
+    staff.lockedUntil = null;
+    await this.staffRepo.save(staff);
+    // fresh token so the caller stays signed in on this device
+    const payload = {
+      sub: staff.id,
+      email: staff.email,
+      role: staff.role,
+      isPlatformAdmin: Boolean(staff.isPlatformAdmin || staff.role === StaffRole.PLATFORM_SUPER_ADMIN),
+      organizationId: staff.organizationId,
+      restaurantId: staff.restaurantId,
+    };
+    return { accessToken: this.jwtService.sign(payload), message: 'Password updated. Other devices were signed out.' };
   }
 
   /**
@@ -328,10 +404,16 @@ export class AuthService {
     await queryRunner.startTransaction();
 
     try {
-      // 1. Check if email already registered
-      const existingStaff = await queryRunner.manager.findOne(Staff, {
-        where: { email: dto.email },
-      });
+      dto.email = dto.email.trim().toLowerCase();
+      dto.slug = dto.slug.trim().toLowerCase();
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(dto.slug)) {
+        throw new BadRequestException('Outlet slug may only contain lowercase letters, numbers and hyphens');
+      }
+      // 1. Check if email already registered (case-insensitive)
+      const existingStaff = await queryRunner.manager
+        .createQueryBuilder(Staff, 's')
+        .where('LOWER(s.email) = :email', { email: dto.email })
+        .getOne();
       if (existingStaff) {
         throw new BadRequestException('A user with this email address already exists');
       }
@@ -533,19 +615,47 @@ export class AuthService {
         menuItemsCount = items.length;
       }
 
-      // 8. Optional Store Manager or Kitchen PIN
+      // 8. Optional Store Manager
       if (dto.teamMode === 'with_team' && dto.storeManager?.email) {
-        const mgrPasswordHash = await bcrypt.hash(dto.storeManager.password || 'pangat123', 10);
+        const mgrEmail = dto.storeManager.email.trim().toLowerCase();
+        if (!dto.storeManager.password || dto.storeManager.password.length < 8) {
+          throw new BadRequestException('Store manager needs a password of at least 8 characters');
+        }
+        const clash = await queryRunner.manager
+          .createQueryBuilder(Staff, 's')
+          .where('LOWER(s.email) = :email', { email: mgrEmail })
+          .getOne();
+        if (clash) {
+          throw new BadRequestException('A user with the store manager email already exists');
+        }
         const mgr = queryRunner.manager.create(Staff, {
           name: dto.storeManager.name || 'Store Manager',
-          email: dto.storeManager.email,
-          passwordHash: mgrPasswordHash,
+          email: mgrEmail,
+          passwordHash: await bcrypt.hash(dto.storeManager.password, 10),
           role: StaffRole.STORE_MANAGER,
           organizationId: savedOrg.id,
           restaurantId: savedOutlet.id,
-          pinCode: dto.kitchenPin || '1234',
         });
         await queryRunner.manager.save(Staff, mgr);
+      }
+
+      // 9. Kitchen station account (CHEF) owning the kitchen PIN, whatever the team mode
+      if (dto.kitchenPin) {
+        if (!/^\d{4,6}$/.test(dto.kitchenPin)) {
+          throw new BadRequestException('Kitchen PIN must be 4 to 6 digits');
+        }
+        await queryRunner.manager.save(
+          Staff,
+          queryRunner.manager.create(Staff, {
+            name: 'Kitchen Station',
+            email: `kitchen.${savedOutlet.slug}@stations.pangat.app`,
+            passwordHash: await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 10), // not usable for password login
+            role: StaffRole.CHEF,
+            organizationId: savedOrg.id,
+            restaurantId: savedOutlet.id,
+            pinHash: await bcrypt.hash(dto.kitchenPin, 10),
+          }),
+        );
       }
 
       // Commit transaction cleanly
@@ -590,9 +700,13 @@ export class AuthService {
    * Dispatches via configured transactional email provider if available.
    * Returns a neutral response to prevent account enumeration.
    */
-  async requestPasswordReset(email: string): Promise<{ success: boolean; message: string; deliveryProvider?: string; delivered?: boolean }> {
+  async requestPasswordReset(email: string): Promise<{ success: boolean; message: string }> {
     const cleanEmail = (email || '').trim().toLowerCase();
-    const staff = await this.staffRepo.findOne({ where: { email: cleanEmail } });
+    const staff = await this.staffRepo
+      .createQueryBuilder('s')
+      .where('LOWER(s.email) = :email', { email: cleanEmail })
+      .andWhere('s.is_active = true')
+      .getOne();
 
     let deliveryProvider = 'none';
 
@@ -643,11 +757,11 @@ export class AuthService {
     }
 
     // Accurate and neutral public response preventing account enumeration
+    // Identical response whether or not the account exists (the provider/delivery state would leak that)
+    void deliveryProvider;
     return {
       success: true,
       message: 'If the email exists, a password reset link has been dispatched.',
-      deliveryProvider,
-      delivered: deliveryProvider !== 'none',
     };
   }
 
@@ -676,6 +790,9 @@ export class AuthService {
     }
 
     staff.passwordHash = await bcrypt.hash(newPassword, 10);
+    staff.passwordChangedAt = new Date(); // signs out every existing session
+    staff.failedLoginCount = 0;
+    staff.lockedUntil = null;
     // Invalidate token immediately to prevent reuse
     staff.resetTokenHash = null;
     staff.resetTokenExpiresAt = null;

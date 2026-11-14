@@ -2,6 +2,7 @@
 // src/inventory/inventory.service.ts
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { EventsGateway } from '../events/events.gateway.js';
 import {
   BadRequestException,
   ConflictException,
@@ -9,6 +10,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
@@ -46,12 +48,103 @@ export class InventoryService {
     private readonly menuItemRepo: Repository<MenuItem>,
     private readonly auditService: AuditService,
     private readonly dataSource: DataSource,
+    @Optional()
+    private readonly eventsGateway?: EventsGateway,
   ) {}
 
   /**
    * Create an ingredient with optional opening stock in a single transaction.
    */
-  async createIngredient(
+  async createIngredient(...args: Parameters<InventoryService['_createIngredient']>): ReturnType<InventoryService['_createIngredient']> {
+    const result = await this._createIngredient(...args);
+    await this.syncDishAvailability(args[0] as string);
+    return result;
+  }
+
+  async updateIngredient(...args: Parameters<InventoryService['_updateIngredient']>): ReturnType<InventoryService['_updateIngredient']> {
+    const result = await this._updateIngredient(...args);
+    await this.syncDishAvailability(args[1] as string);
+    return result;
+  }
+
+  async adjustStock(...args: Parameters<InventoryService['_adjustStock']>): ReturnType<InventoryService['_adjustStock']> {
+    const result = await this._adjustStock(...args);
+    await this.syncDishAvailability(args[1] as string);
+    return result;
+  }
+
+  async receiveStock(...args: Parameters<InventoryService['_receiveStock']>): ReturnType<InventoryService['_receiveStock']> {
+    const result = await this._receiveStock(...args);
+    await this.syncDishAvailability(args[0] as string);
+    return result;
+  }
+
+  async deductInventoryForOrder(...args: Parameters<InventoryService['_deductInventoryForOrder']>): ReturnType<InventoryService['_deductInventoryForOrder']> {
+    const result = await this._deductInventoryForOrder(...args);
+    await this.syncDishAvailability(args[0] as string);
+    return result;
+  }
+
+  async reverseInventoryForCancelledOrder(...args: Parameters<InventoryService['_reverseInventoryForCancelledOrder']>): ReturnType<InventoryService['_reverseInventoryForCancelledOrder']> {
+    const result = await this._reverseInventoryForCancelledOrder(...args);
+    await this.syncDishAvailability(args[0] as string);
+    return result;
+  }
+
+  async adjustInventoryForOrderEdit(...args: Parameters<InventoryService['_adjustInventoryForOrderEdit']>): ReturnType<InventoryService['_adjustInventoryForOrderEdit']> {
+    const result = await this._adjustInventoryForOrderEdit(...args);
+    await this.syncDishAvailability(args[0] as string);
+    return result;
+  }
+
+  /**
+   * ERP link between stock and the menu: a dish whose recipe can no longer be made from the stock on hand is
+   * marked sold out automatically (and flagged `autoDisabled`); when stock returns it is switched back on.
+   * Dishes a manager hid by hand are never touched.
+   */
+  async syncDishAvailability(restaurantId: string): Promise<void> {
+    if (!restaurantId) return;
+    try {
+      const slug = (await this.restaurantRepo.findOne({ where: { id: restaurantId } }))?.slug || '';
+      const recipes = await this.recipeRepo.find({
+        where: { restaurantId, isActive: true },
+        relations: { ingredients: { ingredient: true }, menuItem: true },
+      });
+      for (const r of recipes) {
+        const item = r.menuItem;
+        if (!item || item.deletedAt) continue;
+        const canMake = (r.ingredients || []).every((ri) => {
+          const ing = ri.ingredient;
+          if (!ing) return true;
+          const need = Number(ri.quantity) * this.getUnitConversionFactor(ri.unit, ing.unit);
+          return Number(ing.currentStock) + 1e-9 >= need;
+        });
+        if (!canMake && item.isAvailable) {
+          item.isAvailable = false;
+          item.autoDisabled = true;
+          await this.menuItemRepo.save(item);
+          this.eventsGateway?.emitMenuAvailability(slug, { id: item.id, name: item.name, isAvailable: false, auto: true });
+          await this.auditService.record({
+            restaurantId, entityType: 'MENU_ITEM', entityId: item.id, action: 'AUTO_SOLD_OUT',
+            reason: 'An ingredient ran below the recipe quantity', metadata: { name: item.name },
+          }).catch(() => undefined);
+        } else if (canMake && !item.isAvailable && item.autoDisabled) {
+          item.isAvailable = true;
+          item.autoDisabled = false;
+          await this.menuItemRepo.save(item);
+          this.eventsGateway?.emitMenuAvailability(slug, { id: item.id, name: item.name, isAvailable: true, auto: true });
+          await this.auditService.record({
+            restaurantId, entityType: 'MENU_ITEM', entityId: item.id, action: 'AUTO_RESTOCKED',
+            reason: 'Stock is back above the recipe quantity', metadata: { name: item.name },
+          }).catch(() => undefined);
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`Dish availability sync failed: ${(err as Error).message}`);
+    }
+  }
+
+  private async _createIngredient(
     restaurantId: string,
     dto: CreateIngredientDto,
     actor?: any,
@@ -169,7 +262,7 @@ export class InventoryService {
   /**
    * Update ingredient metadata (minimum stock, cost, unit, name).
    */
-  async updateIngredient(
+  private async _updateIngredient(
     id: string,
     restaurantId: string,
     dto: UpdateIngredientDto,
@@ -214,7 +307,7 @@ export class InventoryService {
   /**
    * Manual Stock Adjustment with atomic row-level lock and idempotency.
    */
-  async adjustStock(
+  private async _adjustStock(
     id: string,
     restaurantId: string,
     dto: AdjustStockDto,
@@ -302,7 +395,7 @@ export class InventoryService {
   /**
    * Batch receive stock from supplier delivery.
    */
-  async receiveStock(
+  private async _receiveStock(
     restaurantId: string,
     dto: ReceiveStockDto,
     actor?: any,
@@ -666,7 +759,7 @@ export class InventoryService {
    * Deducts ingredients when order enters RECEIVED.
    * Row-level write locks prevent overselling across concurrent orders.
    */
-  async deductInventoryForOrder(
+  private async _deductInventoryForOrder(
     restaurantId: string,
     orderId: string,
     orderItems: Array<{ menuItemId: string; quantity: number; name?: string }>,
@@ -831,7 +924,7 @@ export class InventoryService {
    * Reverse stock exactly once if an order is cancelled before PREPARING.
    * If cancelled after PREPARING starts, no automatic stock restoration is performed.
    */
-  async reverseInventoryForCancelledOrder(
+  private async _reverseInventoryForCancelledOrder(
     restaurantId: string,
     orderId: string,
     actor?: any,
@@ -929,7 +1022,7 @@ export class InventoryService {
    * delta > 0 -> deducts additional required ingredients
    * delta < 0 -> restores unneeded ingredients
    */
-  async adjustInventoryForOrderEdit(
+  private async _adjustInventoryForOrderEdit(
     restaurantId: string,
     orderId: string,
     previousItems: Array<{ menuItemId: string; quantity: number; name?: string }>,

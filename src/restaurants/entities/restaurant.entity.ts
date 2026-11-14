@@ -69,6 +69,10 @@ export class Restaurant {
   @Column({ name: 'gst_percentage', type: 'decimal', precision: 5, scale: 2, default: 5, transformer: decimalTransformer })
   gstPercentage: number;
 
+  /** Service charge % on subtotal (0 = none) */
+  @Column({ name: 'service_charge_percentage', type: 'decimal', precision: 5, scale: 2, default: 0, transformer: decimalTransformer })
+  serviceChargePercentage: number;
+
   @Column({ name: 'is_veg_only', default: false })
   isVegOnly: boolean;
 

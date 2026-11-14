@@ -5,18 +5,21 @@
 import {
   Column,
   CreateDateColumn,
+  DeleteDateColumn,
   Entity,
   JoinColumn,
   ManyToOne,
   OneToMany,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
+  Index,
 } from 'typeorm';
 import { Restaurant } from '../../restaurants/entities/restaurant.entity.js';
 import { MenuCategory } from './menu-category.entity.js';
 import { Modifier } from './modifier.entity.js';
 import { decimalTransformer } from '../../common/transformers/decimal.transformer.js';
 
+@Index('idx_menu_items_category', ['categoryId'])
 @Entity('menu_items')
 export class MenuItem {
   @PrimaryGeneratedColumn('uuid')
@@ -29,8 +32,8 @@ export class MenuItem {
   @JoinColumn({ name: 'restaurant_id' })
   restaurant: Restaurant;
 
-  @Column({ name: 'category_id' })
-  categoryId: string;
+  @Column({ name: 'category_id', type: 'uuid', nullable: true })
+  categoryId: string | null;
 
   @ManyToOne(() => MenuCategory, (c) => c.items, { onDelete: 'SET NULL', nullable: true })
   @JoinColumn({ name: 'category_id' })
@@ -62,6 +65,13 @@ export class MenuItem {
 
   @OneToMany(() => Modifier, (m) => m.menuItem, { cascade: true, eager: true })
   modifiers: Modifier[];
+
+  /** True when the dish was switched off by inventory (ingredient ran out) and may switch itself back on */
+  @Column({ name: 'auto_disabled', type: 'boolean', default: false })
+  autoDisabled: boolean;
+
+  @DeleteDateColumn({ name: 'deleted_at', type: 'timestamp with time zone', nullable: true })
+  deletedAt: Date | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

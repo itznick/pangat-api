@@ -10,10 +10,12 @@ import {
   ManyToOne,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
+  Index,
 } from 'typeorm';
 import { TableStatus } from '../../common/enums/index.js';
 import { Restaurant } from '../../restaurants/entities/restaurant.entity.js';
 
+@Index('idx_tables_restaurant', ['restaurantId'])
 @Entity('tables')
 export class Table {
   @PrimaryGeneratedColumn('uuid')

@@ -1,4 +1,6 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { EventsGateway } from '../events/events.gateway.js';
+import { AuditService } from '../audit/audit.service.js';
+import { Optional, Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { getOrderingStatus, resolveOperations } from '../restaurants/operations.js';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -21,6 +23,9 @@ export class MenuService {
     private readonly modifierRepo: Repository<Modifier>,
     @InjectRepository(Restaurant)
     private readonly restaurantRepo: Repository<Restaurant>,
+    private readonly auditService: AuditService,
+    @Optional()
+    private readonly eventsGateway?: EventsGateway,
   ) {}
 
   async getPublicMenu(restaurantSlug: string) {
@@ -50,6 +55,7 @@ export class MenuService {
         slug: restaurant.slug,
         upiVpa: restaurant.upiVpa,
         gstPercentage: Number(restaurant.gstPercentage),
+        serviceChargePercentage: Number(restaurant.serviceChargePercentage ?? 0),
         isVegOnly: restaurant.isVegOnly,
         operations: resolveOperations(restaurant.operations),
         ordering: getOrderingStatus(restaurant.operations),
@@ -81,9 +87,12 @@ export class MenuService {
   }
 
   async getAllItems(restaurantId?: string) {
-    const where = restaurantId ? { restaurantId } : {};
+    if (!restaurantId) {
+      // Never list every tenant's menu: callers must say which outlet they mean
+      throw new BadRequestException('restaurantId is required');
+    }
     return this.menuItemRepo.find({
-      where,
+      where: { restaurantId },
       relations: { category: true, modifiers: true },
       order: { name: 'ASC' },
     });
@@ -98,10 +107,14 @@ export class MenuService {
       throw new ForbiddenException('Access denied: Menu item does not belong to authorized restaurant');
     }
     item.isAvailable = isAvailable;
-    return this.menuItemRepo.save(item);
+    item.autoDisabled = false; // a manual choice always wins over the automatic one
+    const saved = await this.menuItemRepo.save(item);
+    const outlet = await this.restaurantRepo.findOne({ where: { id: item.restaurantId } });
+    if (outlet) this.eventsGateway?.emitMenuAvailability(outlet.slug, { id: item.id, name: item.name, isAvailable, auto: false });
+    return saved;
   }
 
-  async updatePrice(id: string, price: number, authorizedRestaurantId?: string) {
+  async updatePrice(id: string, price: number, authorizedRestaurantId?: string, actor?: any) {
     const item = await this.menuItemRepo.findOne({ where: { id } });
     if (!item) {
       throw new NotFoundException(`Menu item '${id}' not found`);
@@ -109,8 +122,56 @@ export class MenuService {
     if (authorizedRestaurantId && item.restaurantId !== authorizedRestaurantId) {
       throw new ForbiddenException('Access denied: Menu item does not belong to authorized restaurant');
     }
+    const previous = Number(item.price);
     item.price = price;
-    return this.menuItemRepo.save(item);
+    const saved = await this.menuItemRepo.save(item);
+    await this.audit(item.restaurantId, 'MENU_ITEM', item.id, 'PRICE_CHANGED', actor, { name: item.name, from: previous, to: price });
+    return saved;
+  }
+
+  private async audit(restaurantId: string, entityType: string, entityId: string, action: string, actor: any, metadata: Record<string, any>) {
+    try {
+      await this.auditService.record({
+        restaurantId, entityType, entityId, action,
+        staffId: actor?.id, staffName: actor?.name, staffRole: actor?.role, metadata,
+      });
+    } catch {
+      /* auditing must never block menu edits */
+    }
+  }
+
+  /** The category must exist and belong to the same outlet as the dish (no cross-tenant attachment). */
+  private async assertCategory(categoryId: string, restaurantId: string) {
+    const category = await this.categoryRepo.findOne({ where: { id: categoryId } });
+    if (!category || category.restaurantId !== restaurantId) {
+      throw new BadRequestException('Choose a category from this outlet');
+    }
+  }
+
+  /** Soft delete: the dish disappears from menus but past orders and recipes keep their history. */
+  async removeItem(id: string, authorizedRestaurantId: string | undefined, actor?: any) {
+    const item = await this.menuItemRepo.findOne({ where: { id } });
+    if (!item) throw new NotFoundException(`Menu item '${id}' not found`);
+    if (authorizedRestaurantId && item.restaurantId !== authorizedRestaurantId) {
+      throw new ForbiddenException('Access denied: Menu item does not belong to authorized restaurant');
+    }
+    await this.menuItemRepo.softRemove(item);
+    await this.audit(item.restaurantId, 'MENU_ITEM', item.id, 'ITEM_DELETED', actor, { name: item.name });
+  }
+
+  async updateCategory(id: string, dto: { name?: string; sortOrder?: number }, authorizedRestaurantId?: string) {
+    const category = await this.categoryRepo.findOne({ where: { id } });
+    if (!category) throw new NotFoundException(`Category '${id}' not found`);
+    if (authorizedRestaurantId && category.restaurantId !== authorizedRestaurantId) {
+      throw new ForbiddenException('Access denied: Category does not belong to authorized restaurant');
+    }
+    if (dto.name !== undefined) {
+      const name = dto.name.trim();
+      if (!name) throw new BadRequestException('Category name cannot be empty');
+      category.name = name;
+    }
+    if (dto.sortOrder !== undefined) category.sortOrder = dto.sortOrder;
+    return this.categoryRepo.save(category);
   }
 
   async createCategory(dto: CreateCategoryDto) {
@@ -165,8 +226,10 @@ export class MenuService {
       throw new NotFoundException('Restaurant not found for menu item');
     }
 
+    await this.assertCategory(dto.categoryId, restaurant.id);
+
     const item = this.menuItemRepo.create({
-      name: dto.name,
+      name: dto.name.trim(),
       description: dto.description || '',
       price: dto.price,
       categoryId: dto.categoryId,
@@ -210,10 +273,16 @@ export class MenuService {
     if (dto.name !== undefined) item.name = dto.name;
     if (dto.description !== undefined) item.description = dto.description;
     if (dto.price !== undefined) item.price = dto.price;
-    if (dto.categoryId !== undefined) item.categoryId = dto.categoryId;
+    if (dto.categoryId !== undefined) {
+      await this.assertCategory(dto.categoryId, item.restaurantId);
+      item.categoryId = dto.categoryId;
+    }
     if (dto.isVeg !== undefined) item.isVeg = dto.isVeg;
     if (dto.imageUrl !== undefined) item.imageUrl = dto.imageUrl;
-    if (dto.isAvailable !== undefined) item.isAvailable = dto.isAvailable;
+    if (dto.isAvailable !== undefined) {
+      item.isAvailable = dto.isAvailable;
+      item.autoDisabled = false;
+    }
 
     await this.menuItemRepo.save(item);
 

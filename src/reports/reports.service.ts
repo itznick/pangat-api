@@ -57,7 +57,11 @@ export class ReportsService {
         COALESCE(SUM(o.service_charge_amount) FILTER (WHERE o.payment_status IN ('PAID','PARTIALLY_REFUNDED')),0)::float AS service_charge,
         COALESCE(SUM(o.total_amount) FILTER (WHERE o.payment_status = 'PENDING'),0)::float AS outstanding,
         COUNT(*) FILTER (WHERE o.payment_status = 'PENDING')::int AS pending_orders,
-        COALESCE(AVG(EXTRACT(EPOCH FROM (o.ready_at - o.created_at))/60) FILTER (WHERE o.ready_at IS NOT NULL),0)::float AS avg_ready_minutes
+        -- kitchen time: started cooking -> ready. Waiting before the kitchen picked it up is reported separately.
+        COALESCE(AVG(EXTRACT(EPOCH FROM (o.ready_at - COALESCE(o.preparing_at, o.created_at)))/60)
+                 FILTER (WHERE o.ready_at IS NOT NULL AND o.ready_at >= COALESCE(o.preparing_at, o.created_at)),0)::float AS avg_kitchen_minutes,
+        COALESCE(AVG(EXTRACT(EPOCH FROM (o.preparing_at - o.created_at))/60)
+                 FILTER (WHERE o.preparing_at IS NOT NULL AND o.preparing_at >= o.created_at),0)::float AS avg_wait_minutes
       FROM orders o WHERE ${base}`);
 
     const daily = await q(`
@@ -109,7 +113,8 @@ export class ReportsService {
         serviceCharge: round2(totals.service_charge),
         outstanding: round2(totals.outstanding),
         averageOrderValue: totals.paid_orders ? round2(totals.gross_sales / totals.paid_orders) : 0,
-        avgReadyMinutes: round1(totals.avg_ready_minutes),
+        avgKitchenMinutes: round1(totals.avg_kitchen_minutes),
+        avgWaitMinutes: round1(totals.avg_wait_minutes),
       },
       cancelled: { orders: cancelled.orders, refunded: round2(cancelled.refunded) },
       daily: fillDays(from, to, daily),

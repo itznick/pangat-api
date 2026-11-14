@@ -40,24 +40,34 @@ async function bootstrap() {
     new Set([...configuredOrigins, ...defaultOrigins]),
   );
 
+  // FRONTEND_URL is the allow-list. When it is not configured we stay open (and say so in the log) rather than
+  // locking every browser out of the API; once it is set, only those origins (plus *.netlify.app etc.) get through.
+  const originsConfigured = Boolean(process.env.FRONTEND_URL || configService.get<string>('FRONTEND_URL'));
+  if (!originsConfigured) {
+    console.warn('⚠️  FRONTEND_URL is not set: CORS accepts any origin. Set it to your web app URL(s), comma-separated.');
+  }
   app.enableCors({
     origin: (
       origin: string | undefined,
       callback: (err: Error | null, allow?: boolean) => void,
     ) => {
-      // Allow requests with no origin (e.g. curl, Render health checks, server-to-server)
+      // Requests with no origin (curl, server-to-server, health checks)
       if (!origin) return callback(null, true);
-      if (
+      if (!originsConfigured) return callback(null, true);
+      const host = (() => {
+        try {
+          return new URL(origin).hostname;
+        } catch {
+          return '';
+        }
+      })();
+      const ok =
         allowedOrigins.includes('*') ||
         allowedOrigins.includes(origin) ||
-        origin.endsWith('.onrender.com') ||
-        origin.endsWith('.netlify.app') ||
-        origin.endsWith('.vercel.app')
-      ) {
-        return callback(null, true);
-      }
-      // Unknown origins get no CORS headers (browsers block them); non-browser clients are unaffected
-      return callback(null, false);
+        host.endsWith('.onrender.com') ||
+        host.endsWith('.netlify.app') ||
+        host.endsWith('.vercel.app');
+      return callback(null, ok);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],

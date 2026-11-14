@@ -2,7 +2,7 @@
 -- Migration 011: repair - re-assert the additive schema of migrations 001 and 009.
 -- Some databases recorded 009 as applied (or were baselined by hand) without actually having its columns, which made every
 -- query on staff / restaurants fail with "column ... does not exist". Everything here is idempotent (IF NOT EXISTS / guarded)
--- and additive: a database that is already correct is left unchanged. Data-moving steps of 009 are intentionally not repeated.
+-- and additive: a database that is already correct is left unchanged. The kitchen-station PIN move from 009 is repeated too: it is guarded (NOT EXISTS) so it only acts on databases where it never ran.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 -- from 001
@@ -21,6 +21,23 @@ ALTER TABLE staff ADD COLUMN IF NOT EXISTS password_changed_at timestamptz;
 ALTER TABLE staff ADD COLUMN IF NOT EXISTS failed_login_count integer NOT NULL DEFAULT 0;
 ALTER TABLE staff ADD COLUMN IF NOT EXISTS locked_until timestamptz;
 ALTER TABLE staff ADD COLUMN IF NOT EXISTS last_login_at timestamptz;
+
+-- Station PINs: historically a kitchen PIN was stored in clear on a manager account and matched across tenants.
+-- Move each such PIN onto a dedicated per-outlet CHEF "Kitchen Station" account (so existing kitchen tablets keep
+-- working) and clear it from the manager. The clear-text value is hashed on the station's next successful sign-in.
+INSERT INTO staff (name, email, password_hash, role, organization_id, restaurant_id, pin_code)
+SELECT DISTINCT ON (r.id)
+       'Kitchen Station',
+       'kitchen.' || r.slug || '@stations.pangat.app',
+       '!unusable-' || md5(random()::text || r.id::text),   -- not a valid bcrypt hash: password login impossible
+       'CHEF', r.organization_id, r.id, s.pin_code
+FROM staff s
+JOIN restaurants r ON r.id = s.restaurant_id
+WHERE s.pin_code IS NOT NULL AND s.role <> 'CHEF'
+  AND NOT EXISTS (SELECT 1 FROM staff st WHERE st.restaurant_id = r.id AND st.role = 'CHEF' AND st.pin_code IS NOT NULL)
+  AND NOT EXISTS (SELECT 1 FROM staff st WHERE lower(st.email) = lower('kitchen.' || r.slug || '@stations.pangat.app'))
+ORDER BY r.id, s.created_at;
+UPDATE staff SET pin_code = NULL WHERE pin_code IS NOT NULL AND role <> 'CHEF';
 
 -- Service charge (percentage of subtotal, 0 = none) per outlet, snapshot per order
 ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS service_charge_percentage numeric(5,2) NOT NULL DEFAULT 0;

@@ -105,6 +105,14 @@ export class SubscriptionPlan {
   @Column({ type: 'simple-array', default: '' })
   features: string[];
 
+  /** Length of the free trial offered on this plan, in days */
+  @Column({ name: 'trial_days', type: 'int', default: 14 })
+  trialDays: number;
+
+  /** Hidden plans are only assignable by platform admins */
+  @Column({ name: 'is_public', type: 'boolean', default: true })
+  isPublic: boolean;
+
   @Column({ name: 'razorpay_plan_id', type: 'varchar', length: 100, nullable: true })
   razorpayPlanId: string | null;
 

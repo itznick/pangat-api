@@ -8,6 +8,7 @@ import {
   IsInt,
   IsNumber,
   IsOptional,
+  IsBoolean,
   IsString,
   Min,
 } from 'class-validator';
@@ -65,4 +66,13 @@ export class CreatePlanDto {
   @IsOptional()
   @IsString()
   razorpayPlanId?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  trialDays?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  isPublic?: boolean;
 }

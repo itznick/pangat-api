@@ -25,6 +25,11 @@ import { MenuCategory } from '../menu/entities/menu-category.entity.js';
 import { MenuItem } from '../menu/entities/menu-item.entity.js';
 import { AttemptLimiter } from '../common/security/attempt-limiter.js';
 import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
+import { ensureTrial } from '../subscriptions/subscription-access.js';
+import { recordLoginEvent, LoginMeta } from '../platform/login-events.js';
+import { resolvePlatformPermissions } from '../platform/permissions.js';
+import { accountBlockedError, getOrgLifecycle, maintenanceError } from '../platform/org-status.js';
+import { getSetting, isMaintenanceActive } from '../platform/settings.service.js';
 
 @Injectable()
 export class AuthService {
@@ -108,15 +113,19 @@ export class AuthService {
   }
 
   /** Failed password attempts before the account is locked, and for how long. */
-  private static readonly MAX_FAILED_LOGINS = 5;
-  private static readonly LOCK_MINUTES = 15;
+  private static get MAX_FAILED_LOGINS() {
+    return Number(getSetting<number>('security.maxFailedLogins') ?? 5);
+  }
+  private static get LOCK_MINUTES() {
+    return Number(getSetting<number>('security.lockoutMinutes') ?? 15);
+  }
   /** Per outlet+client limiter for kitchen PIN guessing (4-6 digit PINs are brute-forceable without it). */
   private readonly pinLimiter = new AttemptLimiter(5, 15 * 60_000, 15 * 60_000);
   private readonly pinOutletLimiter = new AttemptLimiter(40, 15 * 60_000, 15 * 60_000);
   /** Constant-cost dummy hash so unknown emails take as long as wrong passwords (no user enumeration by timing). */
   private static readonly DUMMY_HASH = bcrypt.hashSync('pangat-dummy-password', 10);
 
-  async login(loginDto: LoginDto) {
+  async login(loginDto: LoginDto, meta: LoginMeta = {}) {
     const { email, password } = loginDto;
     if (!email || !password) {
       throw new BadRequestException('Please provide your email and password');
@@ -129,12 +138,18 @@ export class AuthService {
 
     if (!staff) {
       await bcrypt.compare(password, AuthService.DUMMY_HASH);
+      await recordLoginEvent(this.dataSource, { email: cleanEmail, success: false, reason: 'UNKNOWN_EMAIL' }, meta);
       throw new UnauthorizedException('Invalid email or password');
     }
+    const staffIsAdmin = Boolean(staff.role === StaffRole.PLATFORM_SUPER_ADMIN || staff.isPlatformAdmin);
+    const logFail = (reason: string) =>
+      recordLoginEvent(this.dataSource, { staffId: staff.id, email: cleanEmail, success: false, reason, isPlatformAdmin: staffIsAdmin, organizationId: staff.organizationId, name: staff.name, role: staff.platformRole || staff.role }, meta);
     if (staff.isActive === false) {
+      await logFail('DEACTIVATED');
       throw new UnauthorizedException('This account has been deactivated. Contact your outlet owner.');
     }
     if (staff.lockedUntil && staff.lockedUntil.getTime() > Date.now()) {
+      await logFail('LOCKED');
       const mins = Math.ceil((staff.lockedUntil.getTime() - Date.now()) / 60_000);
       throw new HttpException(
         `Too many failed attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'} or reset your password.`,
@@ -143,6 +158,7 @@ export class AuthService {
     }
     const isMatch = await bcrypt.compare(password, staff.passwordHash);
     if (!isMatch) {
+      await logFail('WRONG_PASSWORD');
       const failed = (staff.failedLoginCount || 0) + 1;
       const lock = failed >= AuthService.MAX_FAILED_LOGINS;
       await this.staffRepo.update(staff.id, {
@@ -151,7 +167,26 @@ export class AuthService {
       });
       throw new UnauthorizedException('Invalid email or password');
     }
+    // Platform controls: a suspended restaurant or maintenance mode stops restaurant users here; platform admins are exempt
+    if (!staffIsAdmin) {
+      if (isMaintenanceActive()) {
+        await logFail('MAINTENANCE');
+        throw maintenanceError(String(getSetting('operations.maintenanceMessage') || 'Pangat is under maintenance.'));
+      }
+      let lifeOrg = staff.organizationId;
+      if (!lifeOrg && staff.restaurantId) {
+        lifeOrg = (await this.dataSource.query('SELECT organization_id FROM restaurants WHERE id = $1', [staff.restaurantId]))[0]?.organization_id ?? null;
+      }
+      if (lifeOrg) {
+        const life = await getOrgLifecycle(this.dataSource, lifeOrg);
+        if (life.status !== 'ACTIVE') {
+          await logFail(`ACCOUNT_${life.status}`);
+          throw accountBlockedError(life.status);
+        }
+      }
+    }
     await this.staffRepo.update(staff.id, { failedLoginCount: 0, lockedUntil: null, lastLoginAt: new Date() });
+    await recordLoginEvent(this.dataSource, { staffId: staff.id, email: cleanEmail, success: true, isPlatformAdmin: staffIsAdmin, organizationId: staff.organizationId, name: staff.name, role: staff.platformRole || staff.role }, meta);
 
     let organization: Organization | null = null;
     let outlets: Restaurant[] = [];
@@ -235,6 +270,8 @@ export class AuthService {
         email: staff.email,
         role: staff.role,
         isPlatformAdmin,
+        platformRole: isPlatformAdmin ? staff.platformRole || 'OWNER' : null,
+        platformPermissions: isPlatformAdmin ? resolvePlatformPermissions(staff.platformRole, staff.platformPermissions) : [],
         organizationId: staff.organizationId,
         restaurantId: staff.restaurantId,
         restaurantSlug: outlets[0]?.slug || null,
@@ -351,6 +388,10 @@ export class AuthService {
       email: staff.email,
       phone: staff.phone,
       role: staff.role,
+      isPlatformAdmin: Boolean(staff.isPlatformAdmin || staff.role === StaffRole.PLATFORM_SUPER_ADMIN),
+      platformRole: staff.isPlatformAdmin || staff.role === StaffRole.PLATFORM_SUPER_ADMIN ? staff.platformRole || 'OWNER' : null,
+      platformPermissions:
+        staff.isPlatformAdmin || staff.role === StaffRole.PLATFORM_SUPER_ADMIN ? resolvePlatformPermissions(staff.platformRole, staff.platformPermissions) : [],
       organizationId: staff.organizationId,
       restaurantId: staff.restaurantId,
       lastLoginAt: staff.lastLoginAt,
@@ -399,6 +440,12 @@ export class AuthService {
    * Organization -> Super Owner -> Restaurant Outlet -> Batch Tables -> Starter Menu Preset -> (Optional Store Manager)
    */
   async onboard(dto: OnboardDto) {
+    if (getSetting<boolean>('general.selfSignupEnabled') === false) {
+      throw new HttpException(
+        { message: 'New restaurant sign-ups are currently closed. Please contact the Pangat team to get set up.', code: 'SIGNUP_CLOSED' },
+        HttpStatus.FORBIDDEN,
+      );
+    }
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
@@ -660,6 +707,10 @@ export class AuthService {
 
       // Commit transaction cleanly
       await queryRunner.commitTransaction();
+      await ensureTrial(this.dataSource, savedOrg.id).catch(() => undefined);
+      await this.dataSource
+        .query(`INSERT INTO platform_events (type, severity, title, detail, organization_id) VALUES ('NEW_RESTAURANT','INFO',$1,'Self-service sign-up',$2)`, [`New restaurant: ${savedOrg.name}`, savedOrg.id])
+        .catch(() => undefined);
 
       // Sign JWT session token
       const payload = {

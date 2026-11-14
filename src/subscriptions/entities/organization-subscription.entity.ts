@@ -65,6 +65,19 @@ export class OrganizationSubscription {
   @Column({ name: 'cancel_at_period_end', type: 'boolean', default: false })
   cancelAtPeriodEnd: boolean;
 
+  /** GATEWAY (paid through Razorpay) | MANUAL (granted by a platform admin) | TRIAL */
+  @Column({ type: 'varchar', length: 20, default: 'GATEWAY' })
+  source: string;
+
+  @Column({ name: 'assigned_by', type: 'varchar', length: 120, nullable: true })
+  assignedBy: string | null;
+
+  @Column({ name: 'cancelled_at', type: 'timestamptz', nullable: true })
+  cancelledAt: Date | null;
+
+  @Column({ name: 'cancel_reason', type: 'text', nullable: true })
+  cancelReason: string | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

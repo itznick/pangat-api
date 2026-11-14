@@ -9,6 +9,7 @@ import { getOrderingStatus, resolveOperations } from '../restaurants/operations.
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import * as crypto from 'crypto';
+import { getSetting } from '../platform/settings.service.js';
 import { getOrgAccess } from '../subscriptions/subscription-access.js';
 import { Order } from './entities/order.entity.js';
 import { OrderItem, SelectedModifierSnapshot } from './entities/order-item.entity.js';
@@ -77,6 +78,10 @@ export class OrdersService {
       throw new BadRequestException('Order must contain at least one item');
     }
 
+    // Platform-wide switch (incident response) and per-restaurant feature access
+    if (getSetting<boolean>('general.publicOrderingEnabled') === false) {
+      throw new BadRequestException('Ordering is temporarily unavailable. Please ask the staff for help.');
+    }
     // A lapsed subscription closes the outlet to new guest orders until the owner renews
     if (restaurant.organizationId) {
       const access = await getOrgAccess(this.dataSource, restaurant.organizationId);

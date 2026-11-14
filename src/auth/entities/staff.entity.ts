@@ -45,6 +45,14 @@ export class Staff {
   @Column({ name: 'is_platform_admin', type: 'boolean', default: false })
   isPlatformAdmin: boolean;
 
+  /** Platform admin role (OWNER, ADMIN, FINANCE, SUPPORT, ANALYST). Null on a platform admin means OWNER (legacy). */
+  @Column({ name: 'platform_role', type: 'varchar', length: 30, nullable: true })
+  platformRole: string | null;
+
+  /** Optional explicit permission list that overrides the role defaults */
+  @Column({ name: 'platform_permissions', type: 'jsonb', nullable: true })
+  platformPermissions: string[] | null;
+
   /** Multi-tenant Organization context */
   @Column({ name: 'organization_id', type: 'uuid', nullable: true })
   organizationId: string | null;

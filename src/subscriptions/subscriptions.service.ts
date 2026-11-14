@@ -8,6 +8,7 @@ import {
   Logger,
   NotFoundException,
   OnModuleInit,
+  Optional,
   UnauthorizedException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -30,6 +31,8 @@ import {
 } from '../common/enums/index.js';
 import { EntitlementService } from './entitlement.service.js';
 import { DEFAULT_PLANS } from './default-plans.js';
+import { getSetting } from '../platform/settings.service.js';
+import { PlatformEventsService } from '../platform/events.service.js';
 
 @Injectable()
 export class SubscriptionsService implements OnModuleInit {
@@ -48,6 +51,7 @@ export class SubscriptionsService implements OnModuleInit {
     private readonly orgRepo: Repository<Organization>,
     private readonly entitlementService: EntitlementService,
     private readonly dataSource: DataSource,
+    @Optional() private readonly platformEvents?: PlatformEventsService,
   ) {}
 
   /** Make sure the plan catalogue exists on every boot, however the schema was created. */
@@ -102,7 +106,7 @@ export class SubscriptionsService implements OnModuleInit {
     basePaise: number,
     taxPercentage = 18.00,
     buyerStateCode?: string | null,
-    supplierStateCode = '27',
+    supplierStateCode: string = String(getSetting('billing.supplierStateCode') || '27'),
   ) {
     const isIntraState = !buyerStateCode || buyerStateCode === supplierStateCode;
     let cgstPaise = 0;
@@ -196,13 +200,15 @@ export class SubscriptionsService implements OnModuleInit {
       billingInterval: dto.billingInterval,
       basePrice,
       basePricePaise: basePaise,
-      taxPercentage: Number(dto.taxPercentage ?? 18.00),
+      taxPercentage: Number(dto.taxPercentage ?? getSetting('billing.gstPercentage') ?? 18.0),
+      trialDays: dto.trialDays ?? Number(getSetting('subscription.defaultTrialDays') ?? 14),
+      isPublic: dto.isPublic ?? true,
       maxOutlets: dto.maxOutlets ?? 1,
       maxTablesPerOutlet: dto.maxTablesPerOutlet ?? 10,
       maxStaffPerOutlet: dto.maxStaffPerOutlet ?? 5,
       features: dto.features || [SubscriptionFeature.QR_ORDERING, SubscriptionFeature.KDS],
       razorpayPlanId: dto.razorpayPlanId?.trim() || null,
-      sacCode: dto.sacCode?.trim() || null,
+      sacCode: dto.sacCode?.trim() || String(getSetting('billing.sacCode') || '') || null,
       isActive: true,
     });
 
@@ -230,6 +236,8 @@ export class SubscriptionsService implements OnModuleInit {
     if (dto.features !== undefined) plan.features = dto.features;
     if (dto.razorpayPlanId !== undefined) plan.razorpayPlanId = dto.razorpayPlanId?.trim() || null;
     if (dto.isActive !== undefined) plan.isActive = dto.isActive;
+    if (dto.trialDays !== undefined) plan.trialDays = dto.trialDays;
+    if (dto.isPublic !== undefined) plan.isPublic = dto.isPublic;
 
     return this.planRepo.save(plan);
   }
@@ -248,7 +256,7 @@ export class SubscriptionsService implements OnModuleInit {
 
     // If new organization has no subscription, initialize 14-day TRIAL on Growth plan
     if (!sub) {
-      sub = await this.startTrial(organizationId, 'GROWTH');
+      sub = await this.startTrial(organizationId, String(getSetting('subscription.defaultTrialPlanCode') || 'GROWTH'));
     }
 
     const invoices = await this.invoiceRepo.find({
@@ -281,7 +289,7 @@ export class SubscriptionsService implements OnModuleInit {
   /**
    * Provision or reset a 14-day trial subscription.
    */
-  async startTrial(organizationId: string, planCode = 'GROWTH'): Promise<OrganizationSubscription> {
+  async startTrial(organizationId: string, planCode = 'GROWTH', trialDaysOverride?: number, source = 'TRIAL', actor?: string): Promise<OrganizationSubscription> {
     let plan = await this.planRepo.findOne({ where: { code: planCode, isActive: true } });
     if (!plan) {
       // Self-heal an empty or partially seeded catalogue, then fall back to the cheapest monthly plan
@@ -298,7 +306,8 @@ export class SubscriptionsService implements OnModuleInit {
     }
 
     const now = new Date();
-    const trialEnd = new Date(now.getTime() + 14 * 86_400_000);
+    const trialDays = trialDaysOverride ?? Number(plan.trialDays ?? getSetting('subscription.defaultTrialDays') ?? 14);
+    const trialEnd = new Date(now.getTime() + trialDays * 86_400_000);
 
     const sub = this.subRepo.create({
       organizationId,
@@ -309,16 +318,19 @@ export class SubscriptionsService implements OnModuleInit {
       trialEndsAt: trialEnd,
       gracePeriodEndsAt: null,
       cancelAtPeriodEnd: false,
+      source,
+      assignedBy: actor ?? null,
     });
 
     const saved = await this.subRepo.save(sub);
+    invalidateOrgAccess(organizationId);
 
     await this.auditRepo.save(
       this.auditRepo.create({
         organizationId,
         action: 'TRIAL_STARTED',
         actor: 'SYSTEM',
-        reason: `Started 14-day free trial on ${plan.name}`,
+        reason: `Started ${trialDays}-day free trial on ${plan.name}`,
         metadata: { planId: plan.id, planCode: plan.code, trialEndsAt: trialEnd },
       }),
     );
@@ -331,10 +343,12 @@ export class SubscriptionsService implements OnModuleInit {
    * Idempotent event processing prevents duplicate billing or charge records.
    */
   async handleRazorpayWebhook(rawBody: string, signature: string, eventPayload: any) {
+    const started = Date.now();
     // The webhook can grant paid access, so it is NEVER accepted unsigned, in any environment.
-    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    const secret = String(getSetting('gateway.razorpayWebhookSecret') || process.env.RAZORPAY_WEBHOOK_SECRET || '');
     if (!secret) {
-      this.logger.error('RAZORPAY_WEBHOOK_SECRET is not configured: rejecting webhook');
+      this.logger.error('Razorpay webhook secret is not configured: rejecting webhook');
+      await this.recordWebhook(eventPayload, 'REJECTED', { error: 'Webhook secret is not configured', signatureValid: null, http: 503, ms: Date.now() - started });
       throw new ServiceUnavailableException('Webhook receiver is not configured');
     }
 
@@ -344,9 +358,50 @@ export class SubscriptionsService implements OnModuleInit {
     const want = Buffer.from(expectedSignature, 'utf8');
     if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) {
       this.logger.warn('Rejected Razorpay webhook with an invalid signature');
+      await this.recordWebhook(eventPayload, 'REJECTED', { error: 'Invalid signature', signatureValid: false, http: 401, ms: Date.now() - started });
+      await this.platformEvents?.emit('WEBHOOK_FAILURE', 'WARNING', 'Webhook rejected: invalid signature', 'A request to the payment webhook failed signature verification.');
       throw new UnauthorizedException('Invalid Razorpay webhook signature');
     }
 
+    try {
+      const result: any = await this.processVerifiedWebhook(eventPayload);
+      const st = String(result?.status || '');
+      const status = st.startsWith('duplicate') ? 'DUPLICATE' : st === 'processed' ? 'PROCESSED' : 'IGNORED';
+      await this.recordWebhook(eventPayload, status, { signatureValid: true, http: 200, ms: Date.now() - started, organizationId: result?.organizationId, note: st });
+      return result;
+    } catch (err) {
+      const e = err as Error;
+      await this.recordWebhook(eventPayload, 'FAILED', { error: e.message, signatureValid: true, http: (err as any)?.status || 500, ms: Date.now() - started });
+      await this.platformEvents?.emit('WEBHOOK_FAILURE', 'CRITICAL', `Webhook processing failed: ${eventPayload?.event || 'unknown event'}`, e.message);
+      throw err;
+    }
+  }
+
+  /** Ledger row for every webhook delivery (never stores the raw body, only identifiers). */
+  private async recordWebhook(
+    payload: any,
+    status: string,
+    x: { error?: string; signatureValid: boolean | null; http: number; ms: number; organizationId?: string | null; note?: string },
+  ) {
+    try {
+      const pay = payload?.payload?.payment?.entity;
+      await this.dataSource.query(
+        `INSERT INTO webhook_events (provider, event_id, event_type, status, http_status, error, organization_id, payment_id, signature_valid, summary, processing_ms)
+         VALUES ('razorpay',$1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)`,
+        [
+          String(payload?.id || payload?.event_id || '').slice(0, 150) || null,
+          String(payload?.event || '').slice(0, 100) || null,
+          status, x.http, x.error ? x.error.slice(0, 500) : null, x.organizationId ?? null,
+          pay?.id ? String(pay.id).slice(0, 100) : null, x.signatureValid,
+          JSON.stringify({ note: x.note ?? null, amount: pay?.amount ?? null, currency: pay?.currency ?? null, method: pay?.method ?? null }), x.ms,
+        ],
+      );
+    } catch (e) {
+      this.logger.warn(`Could not write webhook ledger row: ${(e as Error).message}`);
+    }
+  }
+
+  private async processVerifiedWebhook(eventPayload: any) {
     const event = eventPayload?.event;
     const eventId = eventPayload?.id || eventPayload?.event_id || `evt-${Date.now()}`;
     const contains = eventPayload?.payload;
@@ -370,9 +425,10 @@ export class SubscriptionsService implements OnModuleInit {
     const paymentEntity = contains?.payment?.entity;
     const invoiceEntity = contains?.invoice?.entity;
 
-    const rzpSubId = subEntity?.id || invoiceEntity?.subscription_id;
+    const refundEntity = contains?.refund?.entity;
+    const rzpSubId = subEntity?.id || invoiceEntity?.subscription_id || paymentEntity?.subscription_id;
 
-    if (!rzpSubId && !paymentEntity) {
+    if (!rzpSubId && !paymentEntity && !refundEntity) {
       return { status: 'ignored_unrelated_event', event };
     }
 
@@ -382,11 +438,17 @@ export class SubscriptionsService implements OnModuleInit {
       relations: { plan: true },
     }) : null;
 
-    if (!sub && subEntity?.notes?.organizationId) {
+    const noteOrg = subEntity?.notes?.organizationId || paymentEntity?.notes?.organizationId;
+    if (!sub && noteOrg) {
       sub = await this.subRepo.findOne({
-        where: { organizationId: subEntity.notes.organizationId },
+        where: { organizationId: noteOrg },
         relations: { plan: true },
+        order: { createdAt: 'DESC' },
       });
+    }
+    if (!sub && refundEntity?.payment_id) {
+      const inv = await this.invoiceRepo.findOne({ where: { razorpayPaymentId: refundEntity.payment_id } });
+      if (inv) sub = await this.subRepo.findOne({ where: { id: inv.subscriptionId }, relations: { plan: true } });
     }
 
     if (!sub) {
@@ -397,6 +459,53 @@ export class SubscriptionsService implements OnModuleInit {
     const organizationId = sub.organizationId;
 
     switch (event) {
+      case 'payment.failed': {
+        const paymentId = paymentEntity?.id || null;
+        const reason = String(paymentEntity?.error_description || paymentEntity?.error_reason || 'Payment failed at the gateway').slice(0, 300);
+        if (paymentId && (await this.invoiceRepo.findOne({ where: { razorpayPaymentId: paymentId } }))) {
+          return { status: 'duplicate_payment_ignored', organizationId };
+        }
+        const basePaise = Number(sub.plan.basePricePaise) || Math.round(Number(sub.plan.basePrice) * 100);
+        const taxRate = Number(sub.plan.taxPercentage || 18.0);
+        const taxes = this.calculateTaxes(basePaise, taxRate, paymentEntity?.notes?.stateCode || null);
+        await this.invoiceRepo.save(
+          this.invoiceRepo.create({
+            organizationId,
+            subscriptionId: sub.id,
+            invoiceNumber: this.nextInvoiceNumber(),
+            billingPeriodStart: sub.currentPeriodStart,
+            billingPeriodEnd: sub.currentPeriodEnd,
+            baseAmount: taxes.baseRupees,
+            taxPercentage: taxRate,
+            taxAmount: taxes.taxRupees,
+            totalAmount: Math.round(Number(paymentEntity?.amount || taxes.totalPaise)) / 100,
+            baseAmountPaise: taxes.basePaise,
+            taxAmountPaise: taxes.taxPaise,
+            totalAmountPaise: Math.round(Number(paymentEntity?.amount || taxes.totalPaise)),
+            status: SubscriptionInvoiceStatus.FAILED,
+            razorpayPaymentId: paymentId,
+            paymentMethod: paymentEntity?.method || null,
+            failureReason: reason,
+          }),
+        );
+        await this.recordAudit(organizationId, 'PAYMENT_FAILED', 'RAZORPAY_WEBHOOK', reason, eventId, { paymentId });
+        await this.platformEvents?.emit('PAYMENT_FAILED', 'WARNING', 'Subscription payment failed', reason, { organizationId, entityType: 'payment', entityId: paymentId || undefined });
+        break;
+      }
+
+      case 'refund.processed': {
+        const paymentId = refundEntity?.payment_id || paymentEntity?.id;
+        const inv = paymentId ? await this.invoiceRepo.findOne({ where: { razorpayPaymentId: paymentId } }) : null;
+        if (!inv) return { status: 'refund_invoice_not_found', paymentId };
+        const refunded = Math.min(Number(inv.totalAmountPaise), Number(inv.refundedAmountPaise || 0) + Number(refundEntity?.amount || 0));
+        inv.refundedAmountPaise = refunded;
+        inv.refundedAt = new Date();
+        if (refunded >= Number(inv.totalAmountPaise)) inv.status = SubscriptionInvoiceStatus.REFUNDED;
+        await this.invoiceRepo.save(inv);
+        await this.recordAudit(organizationId, 'PAYMENT_REFUNDED', 'RAZORPAY_WEBHOOK', `Refund of ₹${Number(refundEntity?.amount || 0) / 100} confirmed by gateway`, eventId, { paymentId });
+        break;
+      }
+
       case 'subscription.authenticated':
         // Rule: Mandate authenticated only; never activate paid subscription without payment capture
         await this.recordAudit(organizationId, 'MANDATE_AUTHENTICATED', 'RAZORPAY_WEBHOOK', 'Mandate authenticated by customer. Awaiting payment capture.', eventId, { rzpSubId });
@@ -464,7 +573,7 @@ export class SubscriptionsService implements OnModuleInit {
         const buyerGstin = subEntity?.notes?.buyerGstin || paymentEntity?.notes?.buyerGstin || null;
 
         const taxes = this.calculateTaxes(basePaise, taxRate, buyerState);
-        const invoiceNumber = `PANGAT-INV-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        const invoiceNumber = this.nextInvoiceNumber();
 
         const invoice = this.invoiceRepo.create({
           organizationId,
@@ -487,6 +596,7 @@ export class SubscriptionsService implements OnModuleInit {
           status: SubscriptionInvoiceStatus.PAID,
           razorpayPaymentId: paymentId,
           razorpayInvoiceId: invoiceEntity?.id || null,
+          paymentMethod: paymentEntity?.method || null,
           paidAt: new Date(),
         });
 
@@ -512,7 +622,7 @@ export class SubscriptionsService implements OnModuleInit {
       case 'subscription.pending': {
         // Payment failed or renewal attempt pending -> enter GRACE_PERIOD
         sub.status = SubscriptionStatus.GRACE_PERIOD;
-        sub.gracePeriodEndsAt = new Date(Date.now() + 7 * 86_400_000);
+        sub.gracePeriodEndsAt = new Date(Date.now() + Number(getSetting<number>('subscription.gracePeriodDays') ?? 7) * 86_400_000);
         await this.subRepo.save(sub);
 
         await this.recordAudit(organizationId, 'PAYMENT_FAILED', 'RAZORPAY_WEBHOOK', 'Payment attempt failed. Entered 7-day grace period.', eventId, { rzpSubId });
@@ -530,6 +640,7 @@ export class SubscriptionsService implements OnModuleInit {
 
       case 'subscription.cancelled': {
         sub.status = SubscriptionStatus.CANCELLED;
+        sub.cancelledAt = new Date();
         await this.subRepo.save(sub);
 
         await this.recordAudit(organizationId, 'SUBSCRIPTION_CANCELLED', 'RAZORPAY_WEBHOOK', 'Subscription cancelled', eventId, { rzpSubId });
@@ -540,7 +651,13 @@ export class SubscriptionsService implements OnModuleInit {
         this.logger.debug(`Unhandled webhook event: ${event}`);
     }
 
-    return { status: 'processed', eventId, event };
+    invalidateOrgAccess(organizationId);
+    return { status: 'processed', eventId, event, organizationId };
+  }
+
+  private nextInvoiceNumber(): string {
+    const prefix = String(getSetting('billing.invoicePrefix') || 'PANGAT-INV');
+    return `${prefix}-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
   }
 
   // ── Manual billing & self-service ───────────────────────────────────────────
@@ -578,6 +695,8 @@ export class SubscriptionsService implements OnModuleInit {
     sub.trialEndsAt = null;
     sub.gracePeriodEndsAt = null;
     sub.cancelAtPeriodEnd = false;
+    sub.source = 'MANUAL';
+    sub.assignedBy = actor?.email || null;
     const saved = await this.subRepo.save(sub);
     invalidateOrgAccess(organizationId);
 

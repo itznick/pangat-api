@@ -152,6 +152,21 @@ export class SubscriptionInvoice {
   @Column({ name: 'razorpay_invoice_id', type: 'varchar', length: 100, nullable: true })
   razorpayInvoiceId: string | null;
 
+  @Column({ type: 'varchar', length: 30, default: 'razorpay' })
+  gateway: string;
+
+  @Column({ name: 'payment_method', type: 'varchar', length: 30, nullable: true })
+  paymentMethod: string | null;
+
+  @Column({ name: 'failure_reason', type: 'text', nullable: true })
+  failureReason: string | null;
+
+  @Column({ name: 'refunded_amount_paise', type: 'bigint', default: 0, transformer: decimalTransformer })
+  refundedAmountPaise: number;
+
+  @Column({ name: 'refunded_at', type: 'timestamptz', nullable: true })
+  refundedAt: Date | null;
+
   @Column({ name: 'paid_at', type: 'timestamptz', nullable: true })
   paidAt: Date | null;
 

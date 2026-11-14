@@ -217,6 +217,14 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.logger.log(`Emitted order:updated for order #${orderId}`);
   }
 
+  /** A dish was switched on/off (by hand, or automatically because an ingredient ran out / came back). */
+  emitMenuAvailability(restaurantSlug: string, payload: { id: string; name: string; isAvailable: boolean; auto: boolean }) {
+    const slug = (restaurantSlug || '').trim().toLowerCase();
+    if (!slug) return;
+    this.server?.to(`kds:${slug}`).emit('menu:availability', payload);
+    this.server?.to(`admin:${slug}`).emit('menu:availability', payload);
+  }
+
   emitTableStatus(restaurantSlug: string, table: any) {
     const cleanSlug = (restaurantSlug || 'pangat').trim().toLowerCase();
     const adminRoom = `admin:${cleanSlug}`;

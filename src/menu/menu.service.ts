@@ -1,5 +1,6 @@
+import { EventsGateway } from '../events/events.gateway.js';
 import { AuditService } from '../audit/audit.service.js';
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { Optional, Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { getOrderingStatus, resolveOperations } from '../restaurants/operations.js';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -23,6 +24,8 @@ export class MenuService {
     @InjectRepository(Restaurant)
     private readonly restaurantRepo: Repository<Restaurant>,
     private readonly auditService: AuditService,
+    @Optional()
+    private readonly eventsGateway?: EventsGateway,
   ) {}
 
   async getPublicMenu(restaurantSlug: string) {
@@ -52,6 +55,7 @@ export class MenuService {
         slug: restaurant.slug,
         upiVpa: restaurant.upiVpa,
         gstPercentage: Number(restaurant.gstPercentage),
+        serviceChargePercentage: Number(restaurant.serviceChargePercentage ?? 0),
         isVegOnly: restaurant.isVegOnly,
         operations: resolveOperations(restaurant.operations),
         ordering: getOrderingStatus(restaurant.operations),
@@ -104,7 +108,10 @@ export class MenuService {
     }
     item.isAvailable = isAvailable;
     item.autoDisabled = false; // a manual choice always wins over the automatic one
-    return this.menuItemRepo.save(item);
+    const saved = await this.menuItemRepo.save(item);
+    const outlet = await this.restaurantRepo.findOne({ where: { id: item.restaurantId } });
+    if (outlet) this.eventsGateway?.emitMenuAvailability(outlet.slug, { id: item.id, name: item.name, isAvailable, auto: false });
+    return saved;
   }
 
   async updatePrice(id: string, price: number, authorizedRestaurantId?: string, actor?: any) {

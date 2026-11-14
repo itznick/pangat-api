@@ -1,25 +1,42 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Pangat API
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+NestJS + TypeORM + PostgreSQL backend for the Pangat restaurant ERP (orders, kitchen display, tables, menu,
+inventory & recipes, staff, subscriptions, reports, audit trail).
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Run
+
+```bash
+npm install
+cp .env.example .env   # set DATABASE_URL and JWT_SECRET
+npm run build && node dist/main      # or: npm run start:dev
+```
+
+## Database
+
+* Production runs with `synchronize: false`. Numbered SQL files in `src/migrations` are the schema.
+  Files `009` and later are applied **automatically on boot** (idempotent, additive, one transaction per file,
+  advisory-locked, recorded in `schema_migrations`). Set `AUTO_MIGRATE=false` to run them yourself.
+* Down scripts (`*.down.sql`) never drop columns that may hold data.
+
+## Tests
+
+```bash
+npm test                    # unit tests (no database needed)
+# live integration tests: start the API against a throwaway database first
+THROTTLE_DISABLED=true PLATFORM_BOOTSTRAP_SECRET=bootstrapsecret1234567 RAZORPAY_WEBHOOK_SECRET=whsec_test_123 \
+  DATABASE_URL=postgres://... node dist/main &
+npm run test:integration
+```
+
+## Security model (summary)
+
+* JWT sessions; deactivated accounts and password changes invalidate existing tokens immediately.
+* Brute-force lockout on passwords (5 tries / 15 min) and on kitchen PINs (per outlet + client).
+* Every staff route passes `JwtAuthGuard` -> `RolesGuard` -> `TenantGuard` (resource-derived tenant check).
+* WebSocket rooms require a JWT (staff) or the order's private tracking token (guests).
+* Subscription state gates writes and plan features (`402`); see `subscriptions/subscription-access.ts`.
+
+---
 
 ## Description
 

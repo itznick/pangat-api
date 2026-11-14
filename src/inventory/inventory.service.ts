@@ -2,6 +2,7 @@
 // src/inventory/inventory.service.ts
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { EventsGateway } from '../events/events.gateway.js';
 import {
   BadRequestException,
   ConflictException,
@@ -9,6 +10,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
@@ -46,6 +48,8 @@ export class InventoryService {
     private readonly menuItemRepo: Repository<MenuItem>,
     private readonly auditService: AuditService,
     private readonly dataSource: DataSource,
+    @Optional()
+    private readonly eventsGateway?: EventsGateway,
   ) {}
 
   /**
@@ -101,6 +105,7 @@ export class InventoryService {
   async syncDishAvailability(restaurantId: string): Promise<void> {
     if (!restaurantId) return;
     try {
+      const slug = (await this.restaurantRepo.findOne({ where: { id: restaurantId } }))?.slug || '';
       const recipes = await this.recipeRepo.find({
         where: { restaurantId, isActive: true },
         relations: { ingredients: { ingredient: true }, menuItem: true },
@@ -118,6 +123,7 @@ export class InventoryService {
           item.isAvailable = false;
           item.autoDisabled = true;
           await this.menuItemRepo.save(item);
+          this.eventsGateway?.emitMenuAvailability(slug, { id: item.id, name: item.name, isAvailable: false, auto: true });
           await this.auditService.record({
             restaurantId, entityType: 'MENU_ITEM', entityId: item.id, action: 'AUTO_SOLD_OUT',
             reason: 'An ingredient ran below the recipe quantity', metadata: { name: item.name },
@@ -126,6 +132,7 @@ export class InventoryService {
           item.isAvailable = true;
           item.autoDisabled = false;
           await this.menuItemRepo.save(item);
+          this.eventsGateway?.emitMenuAvailability(slug, { id: item.id, name: item.name, isAvailable: true, auto: true });
           await this.auditService.record({
             restaurantId, entityType: 'MENU_ITEM', entityId: item.id, action: 'AUTO_RESTOCKED',
             reason: 'Stock is back above the recipe quantity', metadata: { name: item.name },

@@ -42,12 +42,22 @@ export class AdminService {
         leadRepo.count({ where: { status: LeadStatus.NEW } }),
       ]);
 
+    // GMV = money actually taken: paid orders that were not cancelled, net of refunds
     const gmvResult = await orderRepo
       .createQueryBuilder('order')
-      .select('SUM(order.total_amount)', 'gmv')
+      .select('SUM(order.total_amount - order.refund_amount)', 'gmv')
+      .where("order.payment_status IN ('PAID','PARTIALLY_REFUNDED')")
+      .andWhere("order.order_status <> 'CANCELLED'")
       .getRawOne();
 
     const systemGmv = Number(gmvResult?.gmv || 0);
+
+    let database = 'CONNECTED';
+    try {
+      await this.dataSource.query('SELECT 1');
+    } catch {
+      database = 'UNREACHABLE';
+    }
 
     return {
       totalOrganizations,
@@ -58,9 +68,9 @@ export class AdminService {
       totalLeads,
       newLeads,
       systemHealth: {
-        status: 'HEALTHY',
-        database: 'CONNECTED',
-        gateway: 'ONLINE',
+        status: database === 'CONNECTED' ? 'HEALTHY' : 'DEGRADED',
+        database,
+        gateway: process.env.RAZORPAY_WEBHOOK_SECRET ? 'ONLINE' : 'NOT_CONFIGURED',
         uptimeSeconds: Math.floor(process.uptime()),
         timestamp: new Date().toISOString(),
       },
@@ -377,64 +387,80 @@ export class AdminService {
       relations: { restaurants: true },
       order: { createdAt: 'DESC' },
     });
+    if (orgs.length === 0) return [];
 
-    const staffRepo = this.dataSource.getRepository(Staff);
-    const orderRepo = this.dataSource.getRepository(Order);
+    const orgIds = orgs.map((o) => o.id);
 
-    const result = await Promise.all(
-      orgs.map(async (org) => {
-        const owner = org.ownerId
-          ? await staffRepo.findOne({ where: { id: org.ownerId } })
-          : await staffRepo.findOne({
-              where: { organizationId: org.id, role: StaffRole.SUPER_OWNER },
-            });
+    // One query per concern for ALL organizations (was several queries per organization)
+    const [owners, gmvRows, subs] = await Promise.all([
+      this.dataSource
+        .getRepository(Staff)
+        .createQueryBuilder('s')
+        .where('s.organization_id IN (:...orgIds)', { orgIds })
+        .andWhere('s.role = :role', { role: StaffRole.SUPER_OWNER })
+        .getMany(),
+      this.dataSource.query(
+        `SELECT r.organization_id AS org_id,
+                COUNT(o.id)::int AS orders,
+                COALESCE(SUM(o.total_amount - o.refund_amount) FILTER (
+                  WHERE o.payment_status IN ('PAID','PARTIALLY_REFUNDED') AND o.order_status <> 'CANCELLED'), 0)::float AS gmv
+         FROM restaurants r LEFT JOIN orders o ON o.restaurant_id = r.id
+         WHERE r.organization_id = ANY($1) GROUP BY r.organization_id`,
+        [orgIds],
+      ),
+      this.dataSource.query(
+        `SELECT DISTINCT ON (s.organization_id) s.organization_id AS org_id, s.status, s.current_period_end,
+                s.cancel_at_period_end, p.code AS plan_code, p.name AS plan_name
+         FROM organization_subscriptions s JOIN subscription_plans p ON p.id = s.plan_id
+         WHERE s.organization_id = ANY($1)
+         ORDER BY s.organization_id, s.created_at DESC`,
+        [orgIds],
+      ),
+    ]);
+    const ownerByOrg = new Map(owners.map((o) => [o.organizationId, o]));
+    const gmvByOrg = new Map<string, { orders: number; gmv: number }>(gmvRows.map((r: any) => [r.org_id, r]));
+    const subByOrg = new Map<string, any>(subs.map((r: any) => [r.org_id, r]));
 
-        const outlets = org.restaurants || [];
-        const outletIds = outlets.map((o) => o.id);
-        let orgGmv = 0;
-        let totalOrders = 0;
-
-        if (outletIds.length > 0) {
-          const gmvRes = await orderRepo
-            .createQueryBuilder('order')
-            .select('SUM(order.total_amount)', 'gmv')
-            .addSelect('COUNT(order.id)', 'count')
-            .where('order.restaurant_id IN (:...outletIds)', { outletIds })
-            .getRawOne();
-          orgGmv = Number(gmvRes?.gmv || 0);
-          totalOrders = Number(gmvRes?.count || 0);
-        }
-
-        const activeOutlets = outlets.filter((o) => o.isActive).length;
-
-        return {
-          id: org.id,
-          name: org.name,
-          createdAt: org.createdAt,
-          owner: {
-            id: owner?.id || null,
-            name: owner?.name || 'Unassigned',
-            email: owner?.email || '—',
-            phone: outlets[0]?.phone || '—',
-          },
-          outletsCount: outlets.length,
-          activeOutletsCount: activeOutlets,
-          outlets: outlets.map((o) => ({
-            id: o.id,
-            name: o.name,
-            slug: o.slug,
-            branchArea: o.branchArea,
-            isActive: o.isActive,
-            upiVpa: o.upiVpa,
-          })),
-          totalGmv: orgGmv,
-          totalOrders,
-          status: activeOutlets > 0 ? 'ACTIVE' : 'INACTIVE',
-        };
-      }),
-    );
-
-    return result;
+    return orgs.map((org) => {
+      const owner = ownerByOrg.get(org.id);
+      const outlets = org.restaurants || [];
+      const activeOutlets = outlets.filter((o) => o.isActive).length;
+      const stats = gmvByOrg.get(org.id);
+      const sub = subByOrg.get(org.id);
+      return {
+        id: org.id,
+        name: org.name,
+        createdAt: org.createdAt,
+        owner: {
+          id: owner?.id || null,
+          name: owner?.name || 'Unassigned',
+          email: owner?.email || '—',
+          phone: outlets[0]?.phone || '—',
+        },
+        outletsCount: outlets.length,
+        activeOutletsCount: activeOutlets,
+        outlets: outlets.map((o) => ({
+          id: o.id,
+          name: o.name,
+          slug: o.slug,
+          branchArea: o.branchArea,
+          isActive: o.isActive,
+          upiVpa: o.upiVpa,
+        })),
+        totalGmv: Number(stats?.gmv || 0),
+        totalOrders: Number(stats?.orders || 0),
+        status: activeOutlets > 0 ? 'ACTIVE' : 'INACTIVE',
+        subscription: sub
+          ? {
+              status: sub.status,
+              planCode: sub.plan_code,
+              planName: sub.plan_name,
+              periodEnd: sub.current_period_end,
+              cancelAtPeriodEnd: sub.cancel_at_period_end,
+            }
+          : null,
+      };
+    });
   }
 
   async resetOrganizationPassword(orgId: string) {
@@ -479,48 +505,39 @@ export class AdminService {
 
   async getOutlets() {
     const restRepo = this.dataSource.getRepository(Restaurant);
-    const tableRepo = this.dataSource.getRepository(Table);
-    const orderRepo = this.dataSource.getRepository(Order);
-
     const outlets = await restRepo.find({
       relations: { organization: true },
       order: { createdAt: 'DESC' },
     });
+    if (outlets.length === 0) return [];
+    const ids = outlets.map((o) => o.id);
 
-    const result = await Promise.all(
-      outlets.map(async (outlet) => {
-        const [tablesCount, activeOrdersCount] = await Promise.all([
-          tableRepo.count({ where: { restaurantId: outlet.id } }),
-          orderRepo.count({
-            where: {
-              restaurantId: outlet.id,
-              orderStatus: OrderStatus.PREPARING,
-            },
-          }),
-        ]);
+    const [tableRows, activeRows] = await Promise.all([
+      this.dataSource.query('SELECT restaurant_id, COUNT(*)::int AS n FROM tables WHERE restaurant_id = ANY($1) GROUP BY restaurant_id', [ids]),
+      this.dataSource.query(
+        "SELECT restaurant_id, COUNT(*)::int AS n FROM orders WHERE restaurant_id = ANY($1) AND order_status = 'PREPARING' GROUP BY restaurant_id",
+        [ids],
+      ),
+    ]);
+    const tables = new Map<string, number>(tableRows.map((r: any) => [r.restaurant_id, r.n]));
+    const active = new Map<string, number>(activeRows.map((r: any) => [r.restaurant_id, r.n]));
 
-        const isOnline = this.eventsGateway.isOutletOnline(outlet.slug);
-
-        return {
-          id: outlet.id,
-          name: outlet.name,
-          slug: outlet.slug,
-          branchArea: outlet.branchArea || '—',
-          phone: outlet.phone || '—',
-          email: outlet.email || '—',
-          upiVpa: outlet.upiVpa,
-          gstPercentage: outlet.gstPercentage,
-          isActive: outlet.isActive,
-          organizationId: outlet.organizationId,
-          organizationName: outlet.organization?.name || 'Unassigned',
-          tablesCount,
-          activeOrdersCount,
-          isOnline,
-        };
-      }),
-    );
-
-    return result;
+    return outlets.map((outlet) => ({
+      id: outlet.id,
+      name: outlet.name,
+      slug: outlet.slug,
+      branchArea: outlet.branchArea || '—',
+      phone: outlet.phone || '—',
+      email: outlet.email || '—',
+      upiVpa: outlet.upiVpa,
+      gstPercentage: outlet.gstPercentage,
+      isActive: outlet.isActive,
+      organizationId: outlet.organizationId,
+      organizationName: outlet.organization?.name || 'Unassigned',
+      tablesCount: tables.get(outlet.id) ?? 0,
+      activeOrdersCount: active.get(outlet.id) ?? 0,
+      isOnline: this.eventsGateway.isOutletOnline(outlet.slug),
+    }));
   }
 
   async getSystemHealth() {

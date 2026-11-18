@@ -22,6 +22,7 @@ import { RolesGuard } from '../common/guards/roles.guard.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { StaffRole } from '../common/enums/index.js';
+import { publicMenuCache } from '../common/cache/ttl-cache.js';
 
 @Controller('menu')
 export class MenuController {
@@ -30,7 +31,8 @@ export class MenuController {
   /** Public endpoint for diners scanning QR codes */
   @Get('public/:restaurantSlug')
   async getPublicMenu(@Param('restaurantSlug') restaurantSlug: string) {
-    const data = await this.menuService.getPublicMenu(restaurantSlug);
+    // 3 s cache + coalescing: a burst of QR scans costs one database read. Any write clears it (see main.ts).
+    const data = await publicMenuCache.wrap(restaurantSlug, () => this.menuService.getPublicMenu(restaurantSlug));
     return withMessage(data, 'Public menu retrieved successfully');
   }
 

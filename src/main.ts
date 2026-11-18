@@ -2,9 +2,12 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import helmet from 'helmet';
+import compression from 'compression';
 import { AppModule } from './app.module.js';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor.js';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter.js';
+import { buildCorsPolicy } from './common/security/cors.js';
+import { publicMenuCache } from './common/cache/ttl-cache.js';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { rawBody: true });
@@ -17,58 +20,36 @@ async function bootstrap() {
     }),
   );
 
+  // gzip/br-less clients are unaffected; everyone else gets compressed JSON (orders/report lists shrink ~10x)
+  app.use(compression());
+
+  // Any completed write invalidates the public menu cache so diners never see data older than the last change
+  app.use((req: any, res: any, next: any) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') res.on('finish', () => publicMenuCache.clear());
+    next();
+  });
+
   // Global API Prefix: /api/v1/... (excluding public root & health checks for uptime monitors/Render)
   app.setGlobalPrefix('api/v1', {
     exclude: ['health', 'api/v1/health', ''],
   });
 
-  // Dynamic CORS configuration supporting comma-separated frontend URLs
-  const rawFrontendUrl =
-    process.env.FRONTEND_URL ||
-    configService.get<string>('FRONTEND_URL') ||
-    'http://localhost:5173';
-  const configuredOrigins = rawFrontendUrl
-    .split(',')
-    .map((url) => url.trim())
-    .filter(Boolean);
-  const defaultOrigins = [
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-    'http://localhost:3000',
-  ];
-  const allowedOrigins = Array.from(
-    new Set([...configuredOrigins, ...defaultOrigins]),
-  );
-
-  // FRONTEND_URL is the allow-list. When it is not configured we stay open (and say so in the log) rather than
-  // locking every browser out of the API; once it is set, only those origins (plus *.netlify.app etc.) get through.
-  const originsConfigured = Boolean(process.env.FRONTEND_URL || configService.get<string>('FRONTEND_URL'));
-  if (!originsConfigured) {
-    console.warn('⚠️  FRONTEND_URL is not set: CORS accepts any origin. Set it to your web app URL(s), comma-separated.');
+  // CORS: only the web app origin(s) in FRONTEND_URL (see common/security/cors.ts for the exact rules)
+  const cors = buildCorsPolicy({
+    FRONTEND_URL: process.env.FRONTEND_URL || configService.get<string>('FRONTEND_URL'),
+    CORS_ALLOWED_SUFFIXES: process.env.CORS_ALLOWED_SUFFIXES || configService.get<string>('CORS_ALLOWED_SUFFIXES'),
+    NODE_ENV: process.env.NODE_ENV,
+  });
+  if (cors.unconfigured) {
+    console.warn(
+      cors.production
+        ? '⚠️  FRONTEND_URL is not set: browsers on other origins are BLOCKED. Set it to your web app URL(s), comma-separated.'
+        : '⚠️  FRONTEND_URL is not set: CORS accepts any origin (development only).',
+    );
   }
   app.enableCors({
-    origin: (
-      origin: string | undefined,
-      callback: (err: Error | null, allow?: boolean) => void,
-    ) => {
-      // Requests with no origin (curl, server-to-server, health checks)
-      if (!origin) return callback(null, true);
-      if (!originsConfigured) return callback(null, true);
-      const host = (() => {
-        try {
-          return new URL(origin).hostname;
-        } catch {
-          return '';
-        }
-      })();
-      const ok =
-        allowedOrigins.includes('*') ||
-        allowedOrigins.includes(origin) ||
-        host.endsWith('.onrender.com') ||
-        host.endsWith('.netlify.app') ||
-        host.endsWith('.vercel.app');
-      return callback(null, ok);
-    },
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) =>
+      callback(null, cors.isAllowed(origin)),
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Idempotency-Key'],

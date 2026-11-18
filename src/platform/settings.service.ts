@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, OnModuleDestroy, OnModuleInit 
 import { DataSource } from 'typeorm';
 import * as crypto from 'crypto';
 import { SETTINGS, SETTING_BY_KEY, SETTING_GROUPS, SettingDef } from './settings.registry.js';
+import { resolveSettingsKey } from '../common/security/secrets.js';
 
 type Cache = Map<string, unknown>;
 let cache: Cache = new Map();
@@ -15,7 +16,7 @@ export function getSetting<T = unknown>(key: string): T {
 export const settingsLoaded = () => loaded;
 
 function cryptoKey(): Buffer {
-  const base = process.env.PLATFORM_SETTINGS_KEY || process.env.JWT_SECRET || 'dev_only_insecure_jwt_secret_change_me';
+  const base = resolveSettingsKey();
   return crypto.scryptSync(base, 'pangat-platform-settings', 32);
 }
 export function encryptSecret(plain: string): string {

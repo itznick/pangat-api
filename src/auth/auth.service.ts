@@ -6,12 +6,16 @@ import {
   Logger,
   HttpException,
   HttpStatus,
+  ForbiddenException,
+  ConflictException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, MoreThan } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
+import { createHash, timingSafeEqual } from 'crypto';
+import { BCRYPT_COST } from '../common/security/passwords.js';
 import { ConfigService } from '@nestjs/config';
 import { Staff } from './entities/staff.entity.js';
 import { LoginDto } from './dto/login.dto.js';
@@ -44,17 +48,30 @@ export class AuthService {
     private readonly configService: ConfigService,
   ) {}
 
+  /** Constant-time comparison so the bootstrap secret cannot be recovered by timing guesses. */
+  private static safeEqual(a: string, b: string): boolean {
+    const ha = createHash('sha256').update(a).digest();
+    const hb = createHash('sha256').update(b).digest();
+    return timingSafeEqual(ha, hb);
+  }
+
+  /**
+   * First-run provisioning of a platform administrator.
+   *
+   *  - The bootstrap secret only works while NO platform administrator exists. After that, administrators are managed
+   *    from Users & access (RBAC, audited); the secret can no longer mint or alter accounts.
+   *  - It never touches an existing account: a restaurant user is never promoted and nobody's password is overwritten.
+   *  - Recovery when every administrator is locked out: set PLATFORM_BOOTSTRAP_ALLOW_RESET=true for one restart to let
+   *    the secret reset the password of an EXISTING platform administrator (sessions are signed out), then unset it.
+   */
   async setupPlatformAdmin(
     dto: SetupSuperAdminDto,
     caller?: { role?: string; isPlatformAdmin?: boolean },
     bootstrapSecret?: string,
   ) {
-    const configuredSecret = this.configService.get<string>('PLATFORM_BOOTSTRAP_SECRET');
+    const configuredSecret = (this.configService.get<string>('PLATFORM_BOOTSTRAP_SECRET') ?? '').trim();
     const isTrustedBootstrap = Boolean(
-      configuredSecret &&
-        configuredSecret.trim().length >= 16 &&
-        bootstrapSecret &&
-        bootstrapSecret.trim() === configuredSecret.trim(),
+      configuredSecret.length >= 16 && bootstrapSecret && AuthService.safeEqual(bootstrapSecret.trim(), configuredSecret),
     );
 
     const isAuthorizedAdmin = Boolean(
@@ -70,24 +87,39 @@ export class AuthService {
     const { name, email, password, phone } = dto;
     const cleanEmail = email.trim().toLowerCase();
 
-    const passwordHash = await bcrypt.hash(password, 10);
     const existing = await this.staffRepo.findOne({ where: { email: cleanEmail } });
 
+    // Secret-only callers are limited to first-run setup (or the explicit, opt-in recovery below).
+    if (!isAuthorizedAdmin) {
+      const adminCount = await this.staffRepo.count({ where: { isPlatformAdmin: true } });
+      if (adminCount > 0) {
+        const recovery = process.env.PLATFORM_BOOTSTRAP_ALLOW_RESET === 'true';
+        if (!(recovery && existing?.isPlatformAdmin)) {
+          this.logger.warn(`Rejected bootstrap request for ${cleanEmail}: a platform administrator already exists`);
+          throw new ForbiddenException(
+            'The platform is already set up. Manage administrators from Users & access in the control centre.',
+          );
+        }
+      }
+    }
+
+    const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
+
     if (existing) {
-      existing.name = name.trim();
+      // Never convert or overwrite a restaurant account. Only a platform admin can be reset, and only in recovery mode.
+      if (!existing.isPlatformAdmin) {
+        throw new ConflictException('That email already belongs to a restaurant account and cannot be used for a platform administrator');
+      }
+      if (isAuthorizedAdmin || process.env.PLATFORM_BOOTSTRAP_ALLOW_RESET !== 'true') {
+        throw new ConflictException('A platform administrator with that email already exists');
+      }
       existing.passwordHash = passwordHash;
-      existing.role = StaffRole.PLATFORM_SUPER_ADMIN;
-      existing.isPlatformAdmin = true;
-      if (phone) existing.phone = phone.trim();
+      existing.passwordChangedAt = new Date(); // signs out every existing session
+      existing.failedLoginCount = 0;
+      existing.lockedUntil = null;
       const updated = await this.staffRepo.save(existing);
-      return {
-        id: updated.id,
-        name: updated.name,
-        email: updated.email,
-        role: updated.role,
-        isPlatformAdmin: updated.isPlatformAdmin,
-        action: 'UPDATED',
-      };
+      this.logger.warn(`Platform administrator ${updated.email} was reset through the bootstrap recovery path`);
+      return { id: updated.id, name: updated.name, email: updated.email, role: updated.role, isPlatformAdmin: updated.isPlatformAdmin, action: 'RESET' };
     }
 
     const admin = this.staffRepo.create({
@@ -112,6 +144,11 @@ export class AuthService {
     };
   }
 
+  /** Invalidate every token issued so far for this staff member. */
+  async revokeSessions(staffId: string) {
+    await this.staffRepo.update({ id: staffId }, { passwordChangedAt: new Date() });
+  }
+
   /** Failed password attempts before the account is locked, and for how long. */
   private static get MAX_FAILED_LOGINS() {
     return Number(getSetting<number>('security.maxFailedLogins') ?? 5);
@@ -123,7 +160,7 @@ export class AuthService {
   private readonly pinLimiter = new AttemptLimiter(5, 15 * 60_000, 15 * 60_000);
   private readonly pinOutletLimiter = new AttemptLimiter(40, 15 * 60_000, 15 * 60_000);
   /** Constant-cost dummy hash so unknown emails take as long as wrong passwords (no user enumeration by timing). */
-  private static readonly DUMMY_HASH = bcrypt.hashSync('pangat-dummy-password', 10);
+  private static readonly DUMMY_HASH = bcrypt.hashSync('pangat-dummy-password', BCRYPT_COST);
 
   async login(loginDto: LoginDto, meta: LoginMeta = {}) {
     const { email, password } = loginDto;
@@ -346,7 +383,7 @@ export class AuthService {
     this.pinLimiter.succeed(clientKey);
 
     if (!matched.pinHash) {
-      await this.staffRepo.update(matched.id, { pinHash: await bcrypt.hash(cleanPin, 10), pinCode: null });
+      await this.staffRepo.update(matched.id, { pinHash: await bcrypt.hash(cleanPin, BCRYPT_COST), pinCode: null });
     }
     await this.staffRepo.update(matched.id, { lastLoginAt: new Date() });
 
@@ -418,7 +455,7 @@ export class AuthService {
     if (currentPassword === newPassword) {
       throw new BadRequestException('Choose a new password that differs from the current one');
     }
-    staff.passwordHash = await bcrypt.hash(newPassword, 10);
+    staff.passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
     staff.passwordChangedAt = new Date();
     staff.failedLoginCount = 0;
     staff.lockedUntil = null;
@@ -480,7 +517,7 @@ export class AuthService {
       const savedOrg = await queryRunner.manager.save(Organization, org);
 
       // 4. Create Super Owner Staff (Public onboarding creates only restaurant SUPER_OWNER, never platform admins)
-      const passwordHash = await bcrypt.hash(dto.password, 10);
+      const passwordHash = await bcrypt.hash(dto.password, BCRYPT_COST);
       const superOwner = queryRunner.manager.create(Staff, {
         name: dto.ownerFullName,
         email: dto.email,
@@ -678,7 +715,7 @@ export class AuthService {
         const mgr = queryRunner.manager.create(Staff, {
           name: dto.storeManager.name || 'Store Manager',
           email: mgrEmail,
-          passwordHash: await bcrypt.hash(dto.storeManager.password, 10),
+          passwordHash: await bcrypt.hash(dto.storeManager.password, BCRYPT_COST),
           role: StaffRole.STORE_MANAGER,
           organizationId: savedOrg.id,
           restaurantId: savedOutlet.id,
@@ -696,11 +733,11 @@ export class AuthService {
           queryRunner.manager.create(Staff, {
             name: 'Kitchen Station',
             email: `kitchen.${savedOutlet.slug}@stations.pangat.app`,
-            passwordHash: await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 10), // not usable for password login
+            passwordHash: await bcrypt.hash(crypto.randomBytes(24).toString('hex'), BCRYPT_COST), // not usable for password login
             role: StaffRole.CHEF,
             organizationId: savedOrg.id,
             restaurantId: savedOutlet.id,
-            pinHash: await bcrypt.hash(dto.kitchenPin, 10),
+            pinHash: await bcrypt.hash(dto.kitchenPin, BCRYPT_COST),
           }),
         );
       }
@@ -840,7 +877,7 @@ export class AuthService {
       throw new BadRequestException('Invalid or expired password reset token');
     }
 
-    staff.passwordHash = await bcrypt.hash(newPassword, 10);
+    staff.passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
     staff.passwordChangedAt = new Date(); // signs out every existing session
     staff.failedLoginCount = 0;
     staff.lockedUntil = null;

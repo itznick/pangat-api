@@ -32,7 +32,7 @@ import { EmailDeliveryService } from '../common/services/email-delivery.service.
       useFactory: (config: ConfigService) => ({
         secret: resolveJwtSecret(config.get<string>('JWT_SECRET')),
         signOptions: {
-          expiresIn: (config.get<string>('JWT_EXPIRATION') || '7d') as any,
+          expiresIn: (config.get<string>('JWT_EXPIRATION') || '24h') as any,
         },
       }),
     }),

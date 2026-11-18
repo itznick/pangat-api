@@ -49,6 +49,7 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('setup-super-admin')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @HttpCode(HttpStatus.CREATED)
   async setupSuperAdmin(
     @Body() dto: SetupSuperAdminDto,
@@ -60,6 +61,7 @@ export class AuthController {
   }
 
   @Post('setup-platform-admin')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @HttpCode(HttpStatus.CREATED)
   async setupPlatformAdmin(
     @Body() dto: SetupSuperAdminDto,
@@ -68,6 +70,15 @@ export class AuthController {
   ) {
     const result = await this.authService.setupPlatformAdmin(dto, req?.user, bootstrapSecret);
     return withMessage(result, 'Platform super admin provisioned successfully');
+  }
+
+  /** Sign this account out of every device: tokens issued before now stop working (same mechanism as a password change). */
+  @Post('logout-all')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async logoutAll(@Req() req: any) {
+    await this.authService.revokeSessions(req.user.id);
+    return withMessage({ revoked: true }, 'Signed out of all devices');
   }
 
   @Post('login')

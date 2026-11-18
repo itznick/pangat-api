@@ -86,6 +86,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   async login(@Body() loginDto: LoginDto, @Req() req: any) {
     const result = await this.authService.login(loginDto, clientMeta(req));
+    if ('otpRequired' in result) return withMessage(result, String((result as { message?: string }).message));
     return withMessage(result, 'Authentication successful');
   }
 
@@ -110,6 +111,14 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   async resetPassword(@Body() dto: ResetPasswordDto) {
     const result = await this.authService.resetPassword(dto.token, dto.newPassword);
+    return withMessage(result, result.message);
+  }
+
+  @Post('signup-otp')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @HttpCode(HttpStatus.OK)
+  async signupOtp(@Body() dto: RequestPasswordResetDto) {
+    const result = await this.authService.requestSignupOtp(dto.email);
     return withMessage(result, result.message);
   }
 

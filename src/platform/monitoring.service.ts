@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import * as os from 'os';
 import { EventsGateway } from '../events/events.gateway.js';
 import { getSetting } from './settings.service.js';
+import { resolveEmailProvider } from '../common/services/email-delivery.service.js';
 
 // ── request metrics (in memory, per process) ─────────────────────────────────
 interface Sample { t: number; ms: number; status: number }
@@ -159,7 +160,8 @@ export class MonitoringService {
     ]);
 
     const razorpayConfigured = Boolean(getSetting('gateway.razorpayWebhookSecret') || process.env.RAZORPAY_WEBHOOK_SECRET);
-    const emailConfigured = Boolean(getSetting('email.sendgridApiKey') || process.env.SENDGRID_API_KEY);
+    const emailProvider = resolveEmailProvider();
+    const emailConfigured = emailProvider !== null;
     const api = this.metrics.snapshot();
     const problems: string[] = [];
     if (!probe.ok) problems.push('Database unreachable');
@@ -206,9 +208,9 @@ export class MonitoringService {
           last7Days: Object.fromEntries(hooks7.map((h: any) => [h.status, h.n])),
         },
         {
-          key: 'email', name: 'Transactional email (SendGrid)', configured: emailConfigured,
+          key: 'email', name: `Transactional email (${emailProvider?.provider ?? 'not configured'})`, configured: emailConfigured,
           status: !emailConfigured ? 'NOT_CONFIGURED' : mail[0].failed > mail[0].delivered && mail[0].failed > 0 ? 'DEGRADED' : 'OK',
-          detail: emailConfigured ? 'API key present.' : 'No API key: email notifications are recorded as skipped. In-app notifications still work.',
+          detail: emailConfigured ? `Sending through ${emailProvider!.provider}.` : 'No API key: email notifications are recorded as skipped. In-app notifications still work.',
           lastEventAt: mail[0].last_delivered, delivered7d: mail[0].delivered, failed7d: mail[0].failed, skipped7d: mail[0].skipped,
         },
         { key: 'realtime', name: 'Realtime (Socket.IO)', configured: true, status: 'OK', detail: `${this.gateway.getConnectedSocketsCount()} client(s) connected across ${this.gateway.getActiveOutletSlugs().length} outlet room(s).` },

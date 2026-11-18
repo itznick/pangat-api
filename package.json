@@ -14,10 +14,10 @@
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
     "lint": "oxlint src/ test/",
-    "test": "node --test --test-concurrency=1 test/qa-remediation.test.mjs test/inventory.test.mjs test/order-lifecycle.test.mjs test/order-types.test.mjs test/recipes-deductions.test.mjs test/security-integration.test.mjs test/hardening.test.mjs test/cache.test.mjs test/subscriptions.test.mjs",
+    "test": "node --test --test-concurrency=1 test/qa-remediation.test.mjs test/inventory.test.mjs test/order-lifecycle.test.mjs test/order-types.test.mjs test/recipes-deductions.test.mjs test/security-integration.test.mjs test/hardening.test.mjs test/cache.test.mjs test/subscriptions.test.mjs test/otp-email.test.mjs",
     "test:integration": "node --test --test-concurrency=1 test/integration.e2e.test.mjs",
     "test:platform": "node --test --test-concurrency=1 test/platform-control.e2e.test.mjs",
-    "test:unit": "node --test test/security-integration.test.mjs test/hardening.test.mjs test/cache.test.mjs",
+    "test:unit": "node --test test/otp-email.test.mjs test/security-integration.test.mjs test/hardening.test.mjs test/cache.test.mjs",
     "test:cov": "node --test --experimental-test-coverage test/security-integration.test.mjs test/hardening.test.mjs test/cache.test.mjs"
   },
   "dependencies": {
@@ -36,6 +36,7 @@
     "class-validator": "^0.15.1",
     "compression": "^1.8.2",
     "helmet": "^8.3.0",
+    "nodemailer": "^10.6.0",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "pg": "^8.23.1",
@@ -53,6 +54,7 @@
     "@types/compression": "^1.8.1",
     "@types/express": "^5.0.0",
     "@types/node": "^24.0.0",
+    "@types/nodemailer": "^8.0.2",
     "@types/passport-jwt": "^4.0.1",
     "oxlint": "^1.58.0",
     "prettier": "^3.4.2",

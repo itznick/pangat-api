@@ -1,9 +1,8 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
-import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
+import { EmailDeliveryService, isEmailConfigured } from '../common/services/email-delivery.service.js';
 import { AuditActor, PlatformAuditService } from './audit.service.js';
 import { escapeHtml } from './events.service.js';
-import { getSetting } from './settings.service.js';
 
 /** TypeORM returns [rows, count] for UPDATE ... RETURNING on Postgres; INSERT returns rows directly. */
 const firstRow = (r: any) => (Array.isArray(r?.[0]) ? r[0][0] : r?.[0]);
@@ -37,7 +36,7 @@ export class CommsService {
   ) {}
 
   emailConfigured(): boolean {
-    return Boolean(getSetting('email.sendgridApiKey') || process.env.SENDGRID_API_KEY);
+    return isEmailConfigured();
   }
 
   private loginUrl(): string {

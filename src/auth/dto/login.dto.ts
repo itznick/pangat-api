@@ -15,4 +15,9 @@ export class LoginDto {
   @IsString()
   @IsOptional()
   restaurantSlug?: string;
+
+  /** 6-digit email code; only used when platform-admin sign-in codes are switched on */
+  @IsString()
+  @IsOptional()
+  otp?: string;
 }

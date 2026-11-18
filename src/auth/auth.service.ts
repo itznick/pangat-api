@@ -29,6 +29,7 @@ import { MenuCategory } from '../menu/entities/menu-category.entity.js';
 import { MenuItem } from '../menu/entities/menu-item.entity.js';
 import { AttemptLimiter } from '../common/security/attempt-limiter.js';
 import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
+import { OtpService } from '../common/services/otp.service.js';
 import { ensureTrial } from '../subscriptions/subscription-access.js';
 import { recordLoginEvent, LoginMeta } from '../platform/login-events.js';
 import { resolvePlatformPermissions } from '../platform/permissions.js';
@@ -46,6 +47,7 @@ export class AuthService {
     private readonly dataSource: DataSource,
     private readonly emailDeliveryService: EmailDeliveryService,
     private readonly configService: ConfigService,
+    private readonly otpService: OtpService,
   ) {}
 
   /** Constant-time comparison so the bootstrap secret cannot be recovered by timing guesses. */
@@ -220,6 +222,20 @@ export class AuthService {
           await logFail(`ACCOUNT_${life.status}`);
           throw accountBlockedError(life.status);
         }
+      }
+    }
+    // Second factor for platform admins (opt-in). Only enforced while a code can really be delivered, so a missing
+    // email provider can never lock every administrator out; the setting's help text says so.
+    if (staffIsAdmin && getSetting<boolean>('security.adminLoginOtp') === true) {
+      if (!this.otpService.canDeliver()) {
+        this.logger.warn('security.adminLoginOtp is on but no email provider is configured: sign-in code skipped');
+      } else if (!loginDto.otp) {
+        const sent = await this.otpService.issue('LOGIN', staff.email, staff.name);
+        if (!sent) throw new HttpException('We could not email your sign-in code. Try again shortly.', HttpStatus.SERVICE_UNAVAILABLE);
+        return { otpRequired: true as const, message: 'We emailed you a 6-digit code. Enter it to finish signing in.' };
+      } else if (!(await this.otpService.verify('LOGIN', staff.email, loginDto.otp))) {
+        await logFail('WRONG_OTP');
+        throw new UnauthorizedException('That code is wrong or has expired. Request a new one.');
       }
     }
     await this.staffRepo.update(staff.id, { failedLoginCount: 0, lockedUntil: null, lastLoginAt: new Date() });
@@ -472,6 +488,23 @@ export class AuthService {
     return { accessToken: this.jwtService.sign(payload), message: 'Password updated. Other devices were signed out.' };
   }
 
+  /** Email verification on self-service sign-up: opt-in, and only enforced while a code can be delivered. */
+  signupOtpRequired(): boolean {
+    return getSetting<boolean>('security.signupEmailOtp') === true && this.otpService.canDeliver();
+  }
+
+  /** Public: email a verification code to someone about to sign up. Neutral response so it cannot be used to probe accounts. */
+  async requestSignupOtp(email: string): Promise<{ required: boolean; message: string }> {
+    const clean = (email || '').trim().toLowerCase();
+    if (!this.signupOtpRequired()) return { required: false, message: 'Email verification is not required.' };
+    const exists = await this.staffRepo.createQueryBuilder('s').where('LOWER(s.email) = :email', { email: clean }).getOne();
+    if (!exists) {
+      const sent = await this.otpService.issue('SIGNUP', clean);
+      if (!sent) throw new HttpException('We could not send the code right now. Try again shortly.', HttpStatus.SERVICE_UNAVAILABLE);
+    }
+    return { required: true, message: 'If that email can be used for a new account, a 6-digit code is on its way.' };
+  }
+
   /**
    * Programmatically provisions an entire multi-tenant hierarchy in a single QueryRunner transaction:
    * Organization -> Super Owner -> Restaurant Outlet -> Batch Tables -> Starter Menu Preset -> (Optional Store Manager)
@@ -482,6 +515,12 @@ export class AuthService {
         { message: 'New restaurant sign-ups are currently closed. Please contact the Pangat team to get set up.', code: 'SIGNUP_CLOSED' },
         HttpStatus.FORBIDDEN,
       );
+    }
+    if (this.signupOtpRequired()) {
+      if (!dto.emailOtp) throw new HttpException({ message: 'Enter the 6-digit code we emailed you to verify your email.', code: 'EMAIL_OTP_REQUIRED' }, HttpStatus.BAD_REQUEST);
+      if (!(await this.otpService.verify('SIGNUP', dto.email, dto.emailOtp))) {
+        throw new HttpException({ message: 'That code is wrong or has expired. Request a new one.', code: 'EMAIL_OTP_INVALID' }, HttpStatus.BAD_REQUEST);
+      }
     }
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();

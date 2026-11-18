@@ -47,6 +47,13 @@ export const SETTINGS: SettingDef[] = [
 
   { key: 'email.fromEmail', group: 'email', label: 'From address', type: 'email', default: null },
   { key: 'email.fromName', group: 'email', label: 'From name', type: 'string', default: 'Pangat Hospitality' },
+  { key: 'email.provider', group: 'email', label: 'Provider', type: 'string', default: null, help: 'smtp, brevo, resend or sendgrid. Leave empty to use the first provider that has an API key (EMAIL_PROVIDER env var also works).' },
+  { key: 'email.smtpHost', group: 'email', label: 'SMTP host', type: 'string', default: null, help: 'e.g. smtp-relay.brevo.com or smtp.gmail.com. Works with any mailbox that offers SMTP.' },
+  { key: 'email.smtpPort', group: 'email', label: 'SMTP port', type: 'number', default: null, min: 1, max: 65535, help: '587 (STARTTLS, the default) or 465 (SSL).' },
+  { key: 'email.smtpUser', group: 'email', label: 'SMTP username', type: 'string', default: null },
+  { key: 'email.smtpPass', group: 'email', label: 'SMTP password', type: 'string', secret: true, default: null },
+  { key: 'email.brevoApiKey', group: 'email', label: 'Brevo API key', type: 'string', secret: true, default: null, help: 'Free plan: 300 emails/day. Verify your sender address in Brevo first.' },
+  { key: 'email.resendApiKey', group: 'email', label: 'Resend API key', type: 'string', secret: true, default: null, help: 'Free plan: 100 emails/day. Needs a verified sending domain.' },
   { key: 'email.sendgridApiKey', group: 'email', label: 'SendGrid API key', type: 'string', secret: true, default: null },
 
   { key: 'notifications.alertEmails', group: 'notifications', label: 'Alert recipients', type: 'text', default: null, help: 'Comma-separated emails that receive critical platform alerts.' },
@@ -65,6 +72,8 @@ export const SETTINGS: SettingDef[] = [
   { key: 'operations.maintenanceEnd', group: 'operations', label: 'Scheduled window end', type: 'datetime', default: null },
 
   { key: 'security.maxFailedLogins', group: 'security', label: 'Failed sign-ins before lockout', type: 'number', default: 5, min: 3, max: 20 },
+  { key: 'security.adminLoginOtp', group: 'security', label: 'Email code for platform admin sign-in', type: 'boolean', default: false, help: 'Platform admins must also enter a 6-digit code emailed to them. Only enforced while an email provider is configured, so a missing provider can never lock everyone out.' },
+  { key: 'security.signupEmailOtp', group: 'security', label: 'Verify email on self-service sign-up', type: 'boolean', default: false, help: 'New restaurants must confirm their owner email with a 6-digit code before the account is created. Only enforced while an email provider is configured.' },
   { key: 'security.lockoutMinutes', group: 'security', label: 'Lockout duration (minutes)', type: 'number', default: 15, min: 1, max: 1440 },
 ];
 

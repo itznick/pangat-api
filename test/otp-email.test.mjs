@@ -181,6 +181,14 @@ describe('AuthService: admin sign-in code and sign-up verification', async () =>
     const owner = build({ isAdmin: false })
     assert.equal((await owner.svc.login(creds)).accessToken, 'jwt'); assert.equal(owner.log.issued, 0)
   })
+  it('break-glass env var skips the admin code so a broken mailbox cannot lock everyone out', async () => {
+    await setSettings({ 'security.adminLoginOtp': true })
+    process.env.ADMIN_LOGIN_OTP_DISABLED = 'true'
+    try {
+      const { svc, log } = build()
+      assert.equal((await svc.login(creds)).accessToken, 'jwt'); assert.equal(log.issued, 0)
+    } finally { delete process.env.ADMIN_LOGIN_OTP_DISABLED }
+  })
   it('sign-up: requires a code only when the setting is on and mail can be delivered', async () => {
     const dto = { email: 'new@cafe.in' }
     await setSettings({ 'security.signupEmailOtp': true })

@@ -227,7 +227,10 @@ export class AuthService {
     // Second factor for platform admins (opt-in). Only enforced while a code can really be delivered, so a missing
     // email provider can never lock every administrator out; the setting's help text says so.
     if (staffIsAdmin && getSetting<boolean>('security.adminLoginOtp') === true) {
-      if (!this.otpService.canDeliver()) {
+      if (process.env.ADMIN_LOGIN_OTP_DISABLED === 'true') {
+        // Break-glass for when the mail provider is down or the admin's email is not a real inbox
+        this.logger.warn('ADMIN_LOGIN_OTP_DISABLED=true: platform admin sign-in code is being skipped');
+      } else if (!this.otpService.canDeliver()) {
         this.logger.warn('security.adminLoginOtp is on but no email provider is configured: sign-in code skipped');
       } else if (!loginDto.otp) {
         const sent = await this.otpService.issue('LOGIN', staff.email, staff.name);

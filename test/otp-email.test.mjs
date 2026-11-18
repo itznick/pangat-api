@@ -92,7 +92,7 @@ describe('OtpService', () => {
 })
 
 describe('email provider selection and transport', () => {
-  const KEYS = ['BREVO_API_KEY', 'RESEND_API_KEY', 'SENDGRID_API_KEY', 'EMAIL_PROVIDER']
+  const KEYS = ['SMTP_HOST', 'OTP_SMTP_HOST', 'OTP_SMTP_PORT', 'OTP_SMTP_USER', 'OTP_SMTP_PASS', 'BREVO_API_KEY', 'RESEND_API_KEY', 'SENDGRID_API_KEY', 'EMAIL_PROVIDER']
   beforeEach(() => KEYS.forEach((k) => delete process.env[k]))
 
   it('is unconfigured with no keys, prefers a free provider in auto mode, and honours EMAIL_PROVIDER', () => {
@@ -191,5 +191,58 @@ describe('AuthService: admin sign-in code and sign-up verification', async () =>
     assert.equal(build({ deliverable: false }).svc.signupOtpRequired(), false)
     await setSettings({})
     assert.equal(build().svc.signupOtpRequired(), false)
+  })
+})
+
+describe('SMTP provider', async () => {
+  const net = await import('node:net')
+  const ENV = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'OTP_SMTP_HOST', 'OTP_SMTP_PORT', 'OTP_SMTP_USER', 'OTP_SMTP_PASS', 'OTP_FROM_EMAIL', 'BREVO_API_KEY', 'EMAIL_PROVIDER']
+  beforeEach(() => ENV.forEach((k) => delete process.env[k]))
+
+  it('reads SMTP_* and the OTP_SMTP_* aliases, and wins over API-key providers in auto mode', () => {
+    process.env.BREVO_API_KEY = 'b'
+    process.env.OTP_SMTP_HOST = 'smtp.example.com'; process.env.OTP_SMTP_PORT = '2525'; process.env.OTP_SMTP_USER = 'u'; process.env.OTP_SMTP_PASS = 'p'
+    const c = resolveEmailProvider()
+    assert.equal(c.provider, 'smtp')
+    assert.deepEqual(c.smtp, { host: 'smtp.example.com', port: 2525, user: 'u', pass: 'p' })
+    process.env.EMAIL_PROVIDER = 'brevo'; assert.equal(resolveEmailProvider().provider, 'brevo')
+    delete process.env.OTP_SMTP_HOST; process.env.EMAIL_PROVIDER = 'smtp'; assert.equal(resolveEmailProvider(), null)
+  })
+
+  it('really delivers through an SMTP server (AUTH PLAIN, From/To/Subject/body intact)', async () => {
+    let transcript = ''
+    const server = net.createServer((sock) => {
+      let inData = false
+      sock.write('220 test ESMTP\r\n')
+      sock.on('data', (buf) => {
+        for (const line of buf.toString().split('\r\n').filter((l) => l !== '' || inData)) {
+          transcript += line + '\n'
+          if (inData) { if (line === '.') { inData = false; sock.write('250 2.0.0 queued as ABC\r\n') } continue }
+          const u = line.toUpperCase()
+          if (u.startsWith('EHLO')) sock.write('250-test\r\n250 AUTH PLAIN LOGIN\r\n')
+          else if (u.startsWith('AUTH')) sock.write('235 ok\r\n')
+          else if (u === 'DATA') { inData = true; sock.write('354 go\r\n') }
+          else if (u === 'QUIT') { sock.write('221 bye\r\n'); sock.end() }
+          else sock.write('250 ok\r\n')
+        }
+      })
+    })
+    await new Promise((r) => server.listen(0, '127.0.0.1', r))
+    try {
+      process.env.SMTP_HOST = '127.0.0.1'; process.env.SMTP_PORT = String(server.address().port)
+      process.env.SMTP_USER = 'user'; process.env.SMTP_PASS = 'pass'; process.env.OTP_FROM_EMAIL = 'no-reply@pangat.test'
+      const svc = new EmailDeliveryService({ get: () => undefined })
+      const r = await svc.sendTransactionalEmail({ to: 'owner@cafe.in', subject: 'Your code', htmlContent: '<b>123456</b>', textContent: 'Code: 123456' })
+      assert.equal(r.delivered, true); assert.equal(r.provider, 'smtp')
+      assert.match(transcript, /MAIL FROM:<no-reply@pangat.test>/i)
+      assert.match(transcript, /RCPT TO:<owner@cafe.in>/i)
+      assert.match(transcript, /Subject: Your code/i)
+    } finally { server.close() }
+  })
+
+  it('reports a clean failure when the SMTP server is unreachable', async () => {
+    process.env.SMTP_HOST = '127.0.0.1'; process.env.SMTP_PORT = '1'
+    const r = await new EmailDeliveryService({ get: () => undefined }).sendTransactionalEmail({ to: 'a@b.com', subject: 's', htmlContent: 'x' })
+    assert.equal(r.delivered, false); assert.equal(r.provider, 'smtp'); assert.ok(r.error)
   })
 })

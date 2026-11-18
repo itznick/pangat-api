@@ -47,7 +47,11 @@ export const SETTINGS: SettingDef[] = [
 
   { key: 'email.fromEmail', group: 'email', label: 'From address', type: 'email', default: null },
   { key: 'email.fromName', group: 'email', label: 'From name', type: 'string', default: 'Pangat Hospitality' },
-  { key: 'email.provider', group: 'email', label: 'Provider', type: 'string', default: null, help: 'brevo, resend or sendgrid. Leave empty to use the first provider that has an API key (EMAIL_PROVIDER env var also works).' },
+  { key: 'email.provider', group: 'email', label: 'Provider', type: 'string', default: null, help: 'smtp, brevo, resend or sendgrid. Leave empty to use the first provider that has an API key (EMAIL_PROVIDER env var also works).' },
+  { key: 'email.smtpHost', group: 'email', label: 'SMTP host', type: 'string', default: null, help: 'e.g. smtp-relay.brevo.com or smtp.gmail.com. Works with any mailbox that offers SMTP.' },
+  { key: 'email.smtpPort', group: 'email', label: 'SMTP port', type: 'number', default: null, min: 1, max: 65535, help: '587 (STARTTLS, the default) or 465 (SSL).' },
+  { key: 'email.smtpUser', group: 'email', label: 'SMTP username', type: 'string', default: null },
+  { key: 'email.smtpPass', group: 'email', label: 'SMTP password', type: 'string', secret: true, default: null },
   { key: 'email.brevoApiKey', group: 'email', label: 'Brevo API key', type: 'string', secret: true, default: null, help: 'Free plan: 300 emails/day. Verify your sender address in Brevo first.' },
   { key: 'email.resendApiKey', group: 'email', label: 'Resend API key', type: 'string', secret: true, default: null, help: 'Free plan: 100 emails/day. Needs a verified sending domain.' },
   { key: 'email.sendgridApiKey', group: 'email', label: 'SendGrid API key', type: 'string', secret: true, default: null },

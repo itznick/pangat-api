@@ -28,6 +28,14 @@ THROTTLE_DISABLED=true PLATFORM_BOOTSTRAP_SECRET=bootstrapsecret1234567 RAZORPAY
 npm run test:integration
 ```
 
+## Email & OTP
+
+* Mail goes out through a plain HTTPS API: **Brevo** (free 300/day), **Resend** (free 100/day) or SendGrid. See `.env.example`.
+* One-time codes are emailed (6 digits, 10 min, 5 guesses, 1/min resend, 5/hour), stored only as an HMAC (`otp_codes`, migration 012).
+* Both uses are opt-in under Super Admin > Settings > Security and are only enforced while an email provider is configured:
+  `security.adminLoginOtp` (platform admins enter a code after their password) and `security.signupEmailOtp`
+  (`POST /auth/signup-otp`, then `emailOtp` on `POST /auth/onboard`).
+
 ## Security model (summary)
 
 * JWT sessions; deactivated accounts and password changes invalidate existing tokens immediately.

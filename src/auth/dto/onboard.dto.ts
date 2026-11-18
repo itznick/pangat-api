@@ -54,6 +54,11 @@ export class OnboardDto {
   @MinLength(8, { message: 'Password must be at least 8 characters' })
   password: string;
 
+  /** 6-digit code emailed by POST /auth/signup-otp; required only when email verification on sign-up is switched on */
+  @IsString()
+  @IsOptional()
+  emailOtp?: string;
+
   // Step 2: Outlet Details
   @IsString()
   @IsNotEmpty()

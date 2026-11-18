@@ -72,6 +72,15 @@ export class AuthController {
     return withMessage(result, 'Platform super admin provisioned successfully');
   }
 
+  /** Sign this account out of every device: tokens issued before now stop working (same mechanism as a password change). */
+  @Post('logout-all')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async logoutAll(@Req() req: any) {
+    await this.authService.revokeSessions(req.user.id);
+    return withMessage({ revoked: true }, 'Signed out of all devices');
+  }
+
   @Post('login')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @HttpCode(HttpStatus.OK)

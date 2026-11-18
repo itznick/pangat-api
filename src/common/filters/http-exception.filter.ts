@@ -23,8 +23,12 @@ export class HttpExceptionFilter implements ExceptionFilter {
     const res    = ctx.getResponse<Response>();
     const req    = ctx.getRequest<Request>();
 
-    const status =
-      exception instanceof HttpException
+    // Errors raised by the body parser (oversized / malformed JSON) are client errors carrying their own 4xx status
+    const parserStatus = !(exception instanceof HttpException) ? (exception as any)?.status ?? (exception as any)?.statusCode : undefined;
+    const clientParserError = typeof parserStatus === 'number' && parserStatus >= 400 && parserStatus < 500 && Boolean((exception as any)?.expose ?? (exception as any)?.type);
+    const status = clientParserError
+      ? parserStatus
+      : exception instanceof HttpException
         ? exception.getStatus()
         : HttpStatus.INTERNAL_SERVER_ERROR;
 
@@ -32,7 +36,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
       exception instanceof HttpException ? exception.getResponse() : null;
 
     // Unexpected errors (database, runtime) are logged here and never echoed to the client
-    if (!(exception instanceof HttpException)) {
+    if (!(exception instanceof HttpException) && !clientParserError) {
       this.logger.error(
         `${req.method} ${req.url} -> ${(exception as Error)?.message}`,
         (exception as Error)?.stack,
@@ -52,7 +56,14 @@ export class HttpExceptionFilter implements ExceptionFilter {
                 ? (exRes as any).message ?? 'Request failed'
                 : String(exRes ?? 'Request failed'),
             ]
-        : ['Internal server error'];
+        : clientParserError
+          ? [parserStatus === 413 ? 'Request body is too large' : 'Malformed request body']
+          : ['Internal server error'];
+
+    // Nest wraps JSON syntax errors as a plain 400 whose message is the raw parser text: replace it with a generic one
+    if (status === 400 && messages.some((m) => /JSON|Unexpected token|Expected (property name|double-quoted|','|'\})/i.test(String(m)) && /position|line \d+ column/i.test(String(m)))) {
+      messages.splice(0, messages.length, 'Malformed request body');
+    }
 
     const code = exRes && typeof exRes === 'object' ? (exRes as any).code : undefined;
 

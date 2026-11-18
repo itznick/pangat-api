@@ -1,4 +1,5 @@
-import { Module } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
+import { resolveDbSsl } from './common/security/db-ssl.js';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
@@ -50,25 +51,24 @@ import { PlatformModule } from './platform/platform.module.js';
           config.get<string>('DATABASE_URL') ||
           process.env.DATABASE_URL ||
           '';
-        const isNeonOrCloud =
-          isProd ||
-          dbUrl.includes('neon.tech') ||
-          dbUrl.includes('sslmode=require');
+        const { ssl, warning } = resolveDbSsl({
+          NODE_ENV: process.env.NODE_ENV,
+          DATABASE_URL: dbUrl,
+          DATABASE_CA: process.env.DATABASE_CA,
+          DATABASE_SSL_REJECT_UNAUTHORIZED: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED,
+        });
+        if (warning) new Logger('Database').warn(warning);
 
         return {
           type: 'postgres',
           url: dbUrl,
           autoLoadEntities: true,
-          synchronize: !isProd, // Disabled in production: SQL migrations (001-007) are the authoritative schema mechanism
-          ssl: isNeonOrCloud
-            ? { rejectUnauthorized: false }
-            : false,
+          synchronize: !isProd, // Disabled in production: the numbered SQL files in src/migrations are the schema
+          ssl,
           retryAttempts: 10,
           retryDelay: 3000,
           extra: {
-            ssl: isNeonOrCloud
-              ? { rejectUnauthorized: false }
-              : false,
+            ssl,
             max: 15,
             connectionTimeoutMillis: 10000,
             idleTimeoutMillis: 30000,

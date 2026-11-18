@@ -144,6 +144,11 @@ export class AuthService {
     };
   }
 
+  /** Invalidate every token issued so far for this staff member. */
+  async revokeSessions(staffId: string) {
+    await this.staffRepo.update({ id: staffId }, { passwordChangedAt: new Date() });
+  }
+
   /** Failed password attempts before the account is locked, and for how long. */
   private static get MAX_FAILED_LOGINS() {
     return Number(getSetting<number>('security.maxFailedLogins') ?? 5);

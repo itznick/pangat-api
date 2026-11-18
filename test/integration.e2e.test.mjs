@@ -602,3 +602,61 @@ describe('Real-time sockets are tenant-scoped', () => {
     [own, spy, anon].forEach((s) => s.close());
   });
 });
+
+describe('Session revocation & request hardening', () => {
+  it('logout-all signs out every existing token but a fresh login works', async () => {
+    const o = await onboard('lo');
+    const second = await tokenOf(o.email);
+    await new Promise((r) => setTimeout(r, 1100)); // iat has 1s resolution
+    assert.equal((await call('POST', '/auth/logout-all', { token: o.token })).status, 200);
+    await new Promise((r) => setTimeout(r, 1100));
+    assert.equal((await call('GET', '/auth/me', { token: o.token })).status, 401);
+    assert.equal((await call('GET', '/auth/me', { token: second })).status, 401);
+    assert.equal((await call('GET', '/auth/me', { token: await tokenOf(o.email) })).status, 200);
+  });
+
+  it('logout-all needs a valid token', async () => {
+    assert.equal((await call('POST', '/auth/logout-all')).status, 401);
+  });
+
+  it('oversized and malformed bodies are client errors (413 / 400), never 500', async () => {
+    const big = await call('POST', '/auth/login', { raw: JSON.stringify({ email: 'a@b.co', password: 'x'.repeat(2_000_000) }) });
+    assert.equal(big.status, 413);
+    const bad = await call('POST', '/auth/login', { raw: '{bad json' });
+    assert.equal(bad.status, 400);
+    assert.ok(!JSON.stringify(bad.body).includes('position'));
+  });
+
+  it('a stolen bootstrap secret cannot take over an existing account', async () => {
+    const o = await onboard('bs');
+    const r = await call('POST', '/auth/setup-super-admin', { headers: { 'x-bootstrap-secret': BOOT }, body: { name: 'Evil', email: o.email, password: 'Attacker-pass-9' } });
+    assert.ok([403, 409].includes(r.status), `got ${r.status}`);
+    assert.equal((await login(o.email, 'Attacker-pass-9')).status, 401);
+    assert.equal((await login(o.email, PW)).status, 200);
+  });
+});
+
+describe('Public menu cache & compression', () => {
+  it('responses are gzip-compressed for clients that accept it', async () => {
+    const r = await fetch(`${API}/menu/public/${A.slug}`, { headers: { 'accept-encoding': 'gzip' } });
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get('content-encoding'), 'gzip');
+  });
+
+  it('a menu change is visible in the public menu immediately (cache is cleared by writes)', async () => {
+    const before = await menuOf(A.slug);
+    const item = before.items[0];
+    await menuOf(A.slug); // warm the cache
+    const off = await call('PATCH', `/menu/items/${item.id}/availability`, { token: A.token, body: { isAvailable: false } });
+    assert.equal(off.status, 200, JSON.stringify(off.body));
+    const after = await menuOf(A.slug);
+    assert.equal(after.items.find((i) => i.id === item.id).isAvailable, false, 'stale cached menu served after a write');
+    await call('PATCH', `/menu/items/${item.id}/availability`, { token: A.token, body: { isAvailable: true } });
+    assert.equal((await menuOf(A.slug)).items.find((i) => i.id === item.id).isAvailable, true);
+  });
+
+  it('concurrent public menu reads all succeed with identical content', async () => {
+    const rs = await Promise.all(Array.from({ length: 25 }, () => menuOf(A.slug)));
+    assert.ok(rs.every((m) => JSON.stringify(m.items.map((i) => i.id)) === JSON.stringify(rs[0].items.map((i) => i.id))));
+  });
+});

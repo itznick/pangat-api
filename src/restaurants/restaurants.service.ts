@@ -18,6 +18,7 @@ import { UpdateSettingsDto } from './dto/update-settings.dto.js';
 import { CreateStaffDto } from './dto/create-staff.dto.js';
 import { AuditService } from '../audit/audit.service.js';
 import { EntitlementService } from '../subscriptions/entitlement.service.js';
+import { BCRYPT_COST } from '../common/security/passwords.js';
 
 @Injectable()
 export class RestaurantsService {
@@ -281,7 +282,7 @@ export class RestaurantsService {
     const staff = this.staffRepo.create({
       name: dto.name.trim(),
       email,
-      passwordHash: await bcrypt.hash(dto.password, 10),
+      passwordHash: await bcrypt.hash(dto.password, BCRYPT_COST),
       role: dto.role,
       phone: dto.phone?.trim() || null,
       organizationId: restaurant.organizationId,
@@ -324,7 +325,7 @@ export class RestaurantsService {
   async resetStaffPassword(restaurantId: string, staffId: string) {
     const staff = await this.staffOfOutlet(restaurantId, staffId);
     const temp = `Pg-${randomBytes(6).toString('base64url')}`;
-    staff.passwordHash = await bcrypt.hash(temp, 10);
+    staff.passwordHash = await bcrypt.hash(temp, BCRYPT_COST);
     staff.passwordChangedAt = new Date();
     staff.failedLoginCount = 0;
     staff.lockedUntil = null;
@@ -341,13 +342,13 @@ export class RestaurantsService {
       station = this.staffRepo.create({
         name: 'Kitchen Station',
         email: stationEmail,
-        passwordHash: await bcrypt.hash(randomBytes(24).toString('hex'), 10),
+        passwordHash: await bcrypt.hash(randomBytes(24).toString('hex'), BCRYPT_COST),
         role: StaffRole.CHEF,
         organizationId: restaurant.organizationId,
         restaurantId: restaurant.id,
       });
     }
-    station.pinHash = await bcrypt.hash(pin, 10);
+    station.pinHash = await bcrypt.hash(pin, BCRYPT_COST);
     station.pinCode = null;
     station.isActive = true;
     await this.staffRepo.save(station);

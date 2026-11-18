@@ -19,6 +19,7 @@ import { ProvisionRestaurantDto } from './dto/provision-restaurant.dto.js';
 import { UpdateLeadDto } from '../leads/dto/update-lead.dto.js';
 import { ensureTrial } from '../subscriptions/subscription-access.js';
 import { EventsGateway } from '../events/events.gateway.js';
+import { BCRYPT_COST } from '../common/security/passwords.js';
 
 @Injectable()
 export class AdminService {
@@ -143,7 +144,7 @@ export class AdminService {
       const savedOrg = await queryRunner.manager.save(Organization, org);
 
       // 4. Create Super Owner Staff record
-      const passwordHash = await bcrypt.hash(temporaryPassword, 10);
+      const passwordHash = await bcrypt.hash(temporaryPassword, BCRYPT_COST);
       const superOwner = queryRunner.manager.create(Staff, {
         name: dto.ownerFullName.trim(),
         email: dto.email.trim().toLowerCase(),
@@ -487,7 +488,7 @@ export class AdminService {
     }
 
     const tempPassword = `Pangat#${randomInt(100000, 999999)}`;
-    owner.passwordHash = await bcrypt.hash(tempPassword, 10);
+    owner.passwordHash = await bcrypt.hash(tempPassword, BCRYPT_COST);
     owner.passwordChangedAt = new Date(); // signs out the owner's existing sessions
     owner.failedLoginCount = 0;
     owner.lockedUntil = null;

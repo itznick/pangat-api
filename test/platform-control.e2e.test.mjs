@@ -51,10 +51,15 @@ let A; let B;
 
 before(async () => {
   await db.connect();
-  // bootstrap a platform owner (idempotent: reuse if it already exists)
+  // Platform owner. The bootstrap secret only works on a fresh platform (no administrator yet); on a shared database
+  // that already has one, seed this run's owner directly so the suite stays repeatable.
   const email = `root-${run}@pangat.test`;
   const r = await call('POST', '/auth/setup-super-admin', { headers: { 'x-bootstrap-secret': BOOT }, body: { name: 'Root Admin', email, password: PW } });
-  assert.equal(r.status, 201, JSON.stringify(r.body));
+  if (r.status !== 201) {
+    assert.equal(r.status, 403, JSON.stringify(r.body));
+    const { default: bcrypt } = await import('bcrypt');
+    await db.query(`INSERT INTO staff (name, email, password_hash, role, is_platform_admin, platform_role) VALUES ('Root Admin', $1, $2, 'PLATFORM_SUPER_ADMIN', true, 'OWNER')`, [email, await bcrypt.hash(PW, 10)]);
+  }
   OWNER = { email, token: await tokenOf(email) };
   A = await onboard('a');
   B = await onboard('b');

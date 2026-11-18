@@ -31,8 +31,9 @@ import { StaffRole } from '../common/enums/index.js';
 export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
 
-  /** Public diner order placement */
+  /** Public diner order placement. Throttled per IP (a whole cafe can share one Wi-Fi address, so the cap is generous). */
   @Post()
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @UseGuards(IdempotencyGuard)
   async create(
     @Body() dto: CreateOrderDto,

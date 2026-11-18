@@ -5,6 +5,7 @@ import { randomBytes } from 'crypto';
 import { AuditActor, PlatformAuditService } from './audit.service.js';
 import { MERCHANT_STAFF_SQL } from './restaurants-admin.service.js';
 import { ALL_PERMISSIONS, PERMISSION_CATALOG, PLATFORM_ROLES, resolvePlatformPermissions } from './permissions.js';
+import { BCRYPT_COST } from '../common/security/passwords.js';
 
 const tempPassword = () => `${randomBytes(9).toString('base64url')}#7a`;
 
@@ -100,7 +101,7 @@ export class UsersAdminService {
   async resetPassword(id: string, actor: AuditActor) {
     const u = await this.target(id);
     const pw = tempPassword();
-    await this.ds.query('UPDATE staff SET password_hash = $2, password_changed_at = now(), failed_login_count = 0, locked_until = NULL WHERE id = $1', [id, await bcrypt.hash(pw, 10)]);
+    await this.ds.query('UPDATE staff SET password_hash = $2, password_changed_at = now(), failed_login_count = 0, locked_until = NULL WHERE id = $1', [id, await bcrypt.hash(pw, BCRYPT_COST)]);
     await this.audit.record(actor, { action: 'USER_PASSWORD_RESET', category: 'SECURITY', entityType: 'user', entityId: id, entityLabel: `${u.name} <${u.email}>`, organizationId: u.organization_id, summary: `Reset the password for ${u.name}` });
     return { name: u.name, email: u.email, temporaryPassword: pw };
   }
@@ -134,7 +135,7 @@ export class UsersAdminService {
     const perms = this.validatePerms(dto.permissions);
     const [row] = await this.ds.query(
       `INSERT INTO staff (name, email, password_hash, role, is_platform_admin, platform_role, platform_permissions, is_active) VALUES ($1,$2,$3,'PLATFORM_SUPER_ADMIN',true,$4,$5::jsonb,true) RETURNING id`,
-      [dto.name.trim(), email, await bcrypt.hash(pw, 10), dto.role, perms ? JSON.stringify(perms) : null],
+      [dto.name.trim(), email, await bcrypt.hash(pw, BCRYPT_COST), dto.role, perms ? JSON.stringify(perms) : null],
     );
     await this.audit.record(actor, {
       action: 'ADMIN_CREATED', category: 'USER', entityType: 'platform_admin', entityId: row.id, entityLabel: `${dto.name} <${email}>`,
@@ -187,7 +188,7 @@ export class UsersAdminService {
     if (!a) throw new NotFoundException('Administrator not found');
     if (a.id === actor.id) throw new ForbiddenException('Use Change password in your account menu to change your own password');
     const pw = tempPassword();
-    await this.ds.query('UPDATE staff SET password_hash = $2, password_changed_at = now(), failed_login_count = 0, locked_until = NULL WHERE id = $1', [id, await bcrypt.hash(pw, 10)]);
+    await this.ds.query('UPDATE staff SET password_hash = $2, password_changed_at = now(), failed_login_count = 0, locked_until = NULL WHERE id = $1', [id, await bcrypt.hash(pw, BCRYPT_COST)]);
     await this.audit.record(actor, { action: 'ADMIN_PASSWORD_RESET', category: 'SECURITY', entityType: 'platform_admin', entityId: id, entityLabel: `${a.name} <${a.email}>`, summary: `Reset the password for administrator ${a.name}` });
     return { name: a.name, email: a.email, temporaryPassword: pw };
   }

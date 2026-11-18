@@ -547,3 +547,66 @@ describe('5. P2: Password-Reset Neutral Response & Security', () => {
     assert.deepEqual(await unknown.requestPasswordReset('ghost@example.com'), response)
   })
 })
+
+describe('7. Platform bootstrap cannot be abused (S-2)', () => {
+  const SECRET = 'super_secret_bootstrap_token_32chars'
+  const cfg = { get: (k) => (k === 'PLATFORM_BOOTSTRAP_SECRET' ? SECRET : undefined) }
+  const dto = { name: 'Root', email: 'Root@Example.com', password: 'Str0ng-pass-1' }
+  const mk = ({ existing = null, admins = 0 } = {}) => {
+    const saved = []
+    const repo = {
+      findOne: async () => existing,
+      count: async () => admins,
+      create: (o) => ({ id: 'new-1', ...o }),
+      save: async (o) => { saved.push(o); return { id: 'x', ...o } },
+    }
+    return { svc: new AuthService(repo, {}, {}, {}, cfg), saved }
+  }
+  const withEnv = async (v, fn) => { const o = process.env.PLATFORM_BOOTSTRAP_ALLOW_RESET; if (v === undefined) delete process.env.PLATFORM_BOOTSTRAP_ALLOW_RESET; else process.env.PLATFORM_BOOTSTRAP_ALLOW_RESET = v; try { await fn() } finally { if (o === undefined) delete process.env.PLATFORM_BOOTSTRAP_ALLOW_RESET; else process.env.PLATFORM_BOOTSTRAP_ALLOW_RESET = o } }
+
+  it('first run: creates the platform admin with the secret', async () => {
+    const { svc, saved } = mk()
+    const r = await svc.setupPlatformAdmin(dto, undefined, SECRET)
+    assert.equal(r.action, 'CREATED')
+    assert.equal(saved[0].email, 'root@example.com')
+    assert.equal(saved[0].isPlatformAdmin, true)
+  })
+
+  it('once an administrator exists the secret can no longer create another (403)', async () => {
+    const { svc, saved } = mk({ admins: 1 })
+    await assert.rejects(() => svc.setupPlatformAdmin(dto, undefined, SECRET), (e) => e.status === 403)
+    assert.equal(saved.length, 0)
+  })
+
+  it('never overwrites or promotes an existing restaurant account (even with a valid secret)', async () => {
+    const victim = { id: 'v', email: 'root@example.com', role: StaffRole.SUPER_OWNER, isPlatformAdmin: false, passwordHash: 'orig' }
+    const first = mk({ existing: victim, admins: 0 })
+    await assert.rejects(() => first.svc.setupPlatformAdmin(dto, undefined, SECRET), (e) => e.status === 409)
+    const later = mk({ existing: victim, admins: 2 })
+    await assert.rejects(() => later.svc.setupPlatformAdmin(dto, undefined, SECRET), (e) => e.status === 403)
+    assert.equal(victim.passwordHash, 'orig')
+    assert.equal(victim.isPlatformAdmin, false)
+  })
+
+  it('recovery flag lets the secret reset an EXISTING platform admin only, and signs sessions out', async () => {
+    await withEnv('true', async () => {
+      const admin = { id: 'a', email: 'root@example.com', role: StaffRole.PLATFORM_SUPER_ADMIN, isPlatformAdmin: true, passwordHash: 'orig', failedLoginCount: 4, lockedUntil: new Date() }
+      const { svc } = mk({ existing: admin, admins: 1 })
+      const r = await svc.setupPlatformAdmin(dto, undefined, SECRET)
+      assert.equal(r.action, 'RESET')
+      assert.notEqual(admin.passwordHash, 'orig')
+      assert.ok(admin.passwordChangedAt instanceof Date)
+      assert.equal(admin.lockedUntil, null)
+      const victim = { id: 'v', email: 'root@example.com', role: StaffRole.SUPER_OWNER, isPlatformAdmin: false, passwordHash: 'orig' }
+      const other = mk({ existing: victim, admins: 1 })
+      await assert.rejects(() => other.svc.setupPlatformAdmin(dto, undefined, SECRET), (e) => e.status === 403)
+    })
+  })
+
+  it('compares the secret in constant time and rejects near-misses', async () => {
+    const { svc } = mk()
+    for (const bad of [SECRET + 'x', SECRET.slice(0, -1), '', '  ']) {
+      await assert.rejects(() => svc.setupPlatformAdmin(dto, undefined, bad), (e) => e.status === 401)
+    }
+  })
+})

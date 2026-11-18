@@ -49,6 +49,7 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('setup-super-admin')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @HttpCode(HttpStatus.CREATED)
   async setupSuperAdmin(
     @Body() dto: SetupSuperAdminDto,
@@ -60,6 +61,7 @@ export class AuthController {
   }
 
   @Post('setup-platform-admin')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @HttpCode(HttpStatus.CREATED)
   async setupPlatformAdmin(
     @Body() dto: SetupSuperAdminDto,

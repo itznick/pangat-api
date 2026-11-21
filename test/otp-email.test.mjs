@@ -272,3 +272,18 @@ describe('branded email template', async () => {
     assert.match(m.html, /Code inside/); assert.match(m.html, /prefers-color-scheme: dark/)
   })
 })
+
+describe('email logo', async () => {
+  const { renderEmail, emailLogoUrl } = await import('../dist/common/services/email-template.js')
+  const saved = process.env.FRONTEND_URL
+  const mail = () => renderEmail({ heading: 'h', paragraphs: ['p'] }).html
+  it('uses the web app logo when FRONTEND_URL is https (first entry wins, trailing slash ignored)', () => {
+    process.env.FRONTEND_URL = 'https://pangat.example.com/, https://other.example.com'
+    assert.equal(emailLogoUrl(), 'https://pangat.example.com/email/pangat-logo.png')
+    assert.ok(mail().includes('<img src="https://pangat.example.com/email/pangat-logo.png"'))
+  })
+  it('falls back to the wordmark alone when no public https address exists', () => {
+    for (const v of ['', 'http://localhost:5173', '*']) { process.env.FRONTEND_URL = v; assert.equal(emailLogoUrl(), null); assert.ok(!mail().includes('<img')) }
+    process.env.FRONTEND_URL = saved ?? ''
+  })
+})

@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { EmailDeliveryService, isEmailConfigured } from '../common/services/email-delivery.service.js';
+import { renderEmail } from '../common/services/email-template.js';
 import { AuditActor, PlatformAuditService } from './audit.service.js';
 import { escapeHtml } from './events.service.js';
 
@@ -92,11 +93,17 @@ export class CommsService {
         if (ch === 'EMAIL') {
           if (!emailOk) { status = 'SKIPPED'; error = 'Email provider is not configured'; }
           else {
+            const mail = renderEmail({
+              heading: renderTemplate(dto.subject, vars),
+              name: r.name,
+              paragraphs: renderTemplate(dto.body, vars).split(/\n{2,}/).map((x) => x.trim()).filter(Boolean),
+              button: { label: 'Open Pangat', url: this.loginUrl() },
+            });
             const res = await this.email.sendTransactionalEmail({
               to: r.email,
               subject: renderTemplate(dto.subject, vars),
-              htmlContent: `<div style="font-family:system-ui,sans-serif;white-space:pre-wrap">${renderTemplate(dto.body, vars, true)}</div>`,
-              textContent: renderTemplate(dto.body, vars),
+              htmlContent: mail.html,
+              textContent: mail.text,
             });
             if (res.delivered) messageId = res.messageId ?? null;
             else { status = 'FAILED'; error = (res.error || 'Provider rejected the message').slice(0, 300); }

@@ -254,3 +254,21 @@ describe('SMTP provider', async () => {
     assert.equal(r.delivered, false); assert.equal(r.provider, 'smtp'); assert.ok(r.error)
   })
 })
+
+describe('branded email template', async () => {
+  const { renderEmail, escapeEmailHtml } = await import('../dist/common/services/email-template.js')
+  it('escapes every caller-supplied string (no HTML injection through names, headings or notes)', () => {
+    const evil = '<img src=x onerror=alert(1)>'
+    const { html } = renderEmail({ heading: evil, name: evil, paragraphs: [evil], note: evil, code: evil })
+    assert.ok(!html.includes(evil)); assert.ok(html.includes(escapeEmailHtml(evil)))
+  })
+  it('only turns http(s) links into buttons', () => {
+    assert.ok(!renderEmail({ heading: 'h', paragraphs: [], button: { label: 'Go', url: 'javascript:alert(1)' } }).html.includes('javascript:'))
+    assert.ok(renderEmail({ heading: 'h', paragraphs: [], button: { label: 'Go', url: 'https://app.example.com/login?resetToken=abc' } }).html.includes('href="https://app.example.com/login?resetToken=abc"'))
+  })
+  it('gives a plain-text twin that keeps the code and link, and includes a preheader', () => {
+    const m = renderEmail({ heading: 'Your code', name: 'Asha', paragraphs: ['Use it now.'], code: '123456', button: { label: 'Open', url: 'https://x.test/a' }, note: 'Expires soon.', preheader: 'Code inside' })
+    assert.match(m.text, /Namaskar Asha,/); assert.match(m.text, /Code: 123456/); assert.match(m.text, /Open: https:\/\/x\.test\/a/)
+    assert.match(m.html, /Code inside/); assert.match(m.html, /prefers-color-scheme: dark/)
+  })
+})

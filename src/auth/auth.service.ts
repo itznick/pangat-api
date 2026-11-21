@@ -30,6 +30,7 @@ import { MenuItem } from '../menu/entities/menu-item.entity.js';
 import { AttemptLimiter } from '../common/security/attempt-limiter.js';
 import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 import { OtpService } from '../common/services/otp.service.js';
+import { renderEmail } from '../common/services/email-template.js';
 import { ensureTrial } from '../subscriptions/subscription-access.js';
 import { recordLoginEvent, LoginMeta } from '../platform/login-events.js';
 import { resolvePlatformPermissions } from '../platform/permissions.js';
@@ -227,7 +228,10 @@ export class AuthService {
     // Second factor for platform admins (opt-in). Only enforced while a code can really be delivered, so a missing
     // email provider can never lock every administrator out; the setting's help text says so.
     if (staffIsAdmin && getSetting<boolean>('security.adminLoginOtp') === true) {
-      if (!this.otpService.canDeliver()) {
+      if (process.env.ADMIN_LOGIN_OTP_DISABLED === 'true') {
+        // Break-glass for when the mail provider is down or the admin's email is not a real inbox
+        this.logger.warn('ADMIN_LOGIN_OTP_DISABLED=true: platform admin sign-in code is being skipped');
+      } else if (!this.otpService.canDeliver()) {
         this.logger.warn('security.adminLoginOtp is on but no email provider is configured: sign-in code skipped');
       } else if (!loginDto.otp) {
         const sent = await this.otpService.issue('LOGIN', staff.email, staff.name);
@@ -853,24 +857,20 @@ export class AuthService {
         'https://layerform.in';
       const resetUrl = `${frontendBaseUrl}/login?resetToken=${rawToken}`;
 
+      const resetMail = renderEmail({
+        preheader: 'Use this single-use link to choose a new password. It expires in 60 minutes.',
+        heading: 'Reset your password',
+        name: staff.name,
+        paragraphs: ['We received a request to reset the password for your Pangat account. Choose a new one with the button below.'],
+        button: { label: 'Reset password', url: resetUrl },
+        note: 'This link works once and expires in 60 minutes. If you did not request a reset, you can ignore this email; your password stays the same.',
+      });
       // Dispatch reset email with single-use raw token link
       const delivery = await this.emailDeliveryService.sendTransactionalEmail({
         to: staff.email,
         subject: 'Reset your Pangat password',
-        htmlContent: `
-          <div style="font-family: sans-serif; padding: 20px; color: #1e293b;">
-            <h2>Namaskar ${staff.name},</h2>
-            <p>A password reset was requested for your Pangat account.</p>
-            <p>Please click the button below or copy the link into your browser to reset your password. This link is single-use and will expire in 60 minutes.</p>
-            <p style="margin: 24px 0;">
-              <a href="${resetUrl}" style="background-color: #059669; color: #ffffff; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block;">
-                Reset Password
-              </a>
-            </p>
-            <p style="font-size: 12px; color: #64748b;">If you did not request this reset, you can safely ignore this email.</p>
-          </div>
-        `,
-        textContent: `Namaskar ${staff.name},\n\nPlease use the following link to reset your Pangat password:\n${resetUrl}\n\nThis single-use link expires in 60 minutes.`,
+        htmlContent: resetMail.html,
+        textContent: resetMail.text,
       });
       deliveryProvider = delivery.provider;
       const isDelivered = Boolean(delivery.delivered);

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 import { getSetting } from './settings.service.js';
+import { renderEmail } from '../common/services/email-template.js';
 
 export type EventSeverity = 'INFO' | 'WARNING' | 'CRITICAL';
 
@@ -34,12 +35,13 @@ export class PlatformEventsService {
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean);
+        const alertMail = renderEmail({ heading: title, paragraphs: [detail || 'No further detail was recorded.'], note: 'Critical platform alert. Open Super Admin → Monitoring for the full picture.' });
         for (const addr of to) {
           await this.email.sendTransactionalEmail({
             to: addr,
             subject: `[Pangat alert] ${title}`,
-            htmlContent: `<p>${escapeHtml(title)}</p><p>${escapeHtml(detail || '')}</p>`,
-            textContent: `${title}\n${detail || ''}`,
+            htmlContent: alertMail.html,
+            textContent: alertMail.text,
           });
         }
       }

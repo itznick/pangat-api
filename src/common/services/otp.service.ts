@@ -2,7 +2,7 @@ import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import * as crypto from 'crypto';
 import { EmailDeliveryService, isEmailConfigured } from './email-delivery.service.js';
-import { escapeHtml } from '../../platform/events.service.js';
+import { renderEmail } from './email-template.js';
 import { resolveSettingsKey } from '../security/secrets.js';
 
 export type OtpPurpose = 'LOGIN' | 'SIGNUP';
@@ -72,16 +72,19 @@ export class OtpService {
 
     const copy = PURPOSE_COPY[purpose];
     const mins = OTP_TTL_MS / 60_000;
+    const mail = renderEmail({
+      preheader: `Your code is ${code}. It expires in ${mins} minutes.`,
+      heading: copy.subject,
+      name,
+      paragraphs: [copy.lead],
+      code,
+      note: `This code expires in ${mins} minutes and works once. If you did not ask for it, you can ignore this email: nobody can use it without your password. Never share it with anyone, including Pangat staff.`,
+    });
     const res = await this.email.sendTransactionalEmail({
       to: identifier,
       subject: copy.subject,
-      htmlContent: `<div style="font-family:system-ui,sans-serif;padding:20px;color:#1e293b">
-        <h2>Namaskar${name ? ` ${escapeHtml(name)}` : ''},</h2>
-        <p>${copy.lead}</p>
-        <p style="font-size:32px;font-weight:700;letter-spacing:8px;margin:24px 0">${code}</p>
-        <p style="font-size:12px;color:#64748b">This code expires in ${mins} minutes. If you did not ask for it, you can ignore this email; nobody can use it without your password.</p>
-      </div>`,
-      textContent: `${copy.lead}\n\nCode: ${code}\n\nExpires in ${mins} minutes. If you did not ask for it, ignore this email.`,
+      htmlContent: mail.html,
+      textContent: mail.text,
     });
     if (!res.delivered) this.logger.warn(`OTP email not delivered (${res.provider})`);
     return res.delivered;

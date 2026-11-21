@@ -181,6 +181,14 @@ describe('AuthService: admin sign-in code and sign-up verification', async () =>
     const owner = build({ isAdmin: false })
     assert.equal((await owner.svc.login(creds)).accessToken, 'jwt'); assert.equal(owner.log.issued, 0)
   })
+  it('break-glass env var skips the admin code so a broken mailbox cannot lock everyone out', async () => {
+    await setSettings({ 'security.adminLoginOtp': true })
+    process.env.ADMIN_LOGIN_OTP_DISABLED = 'true'
+    try {
+      const { svc, log } = build()
+      assert.equal((await svc.login(creds)).accessToken, 'jwt'); assert.equal(log.issued, 0)
+    } finally { delete process.env.ADMIN_LOGIN_OTP_DISABLED }
+  })
   it('sign-up: requires a code only when the setting is on and mail can be delivered', async () => {
     const dto = { email: 'new@cafe.in' }
     await setSettings({ 'security.signupEmailOtp': true })
@@ -244,5 +252,38 @@ describe('SMTP provider', async () => {
     process.env.SMTP_HOST = '127.0.0.1'; process.env.SMTP_PORT = '1'
     const r = await new EmailDeliveryService({ get: () => undefined }).sendTransactionalEmail({ to: 'a@b.com', subject: 's', htmlContent: 'x' })
     assert.equal(r.delivered, false); assert.equal(r.provider, 'smtp'); assert.ok(r.error)
+  })
+})
+
+describe('branded email template', async () => {
+  const { renderEmail, escapeEmailHtml } = await import('../dist/common/services/email-template.js')
+  it('escapes every caller-supplied string (no HTML injection through names, headings or notes)', () => {
+    const evil = '<img src=x onerror=alert(1)>'
+    const { html } = renderEmail({ heading: evil, name: evil, paragraphs: [evil], note: evil, code: evil })
+    assert.ok(!html.includes(evil)); assert.ok(html.includes(escapeEmailHtml(evil)))
+  })
+  it('only turns http(s) links into buttons', () => {
+    assert.ok(!renderEmail({ heading: 'h', paragraphs: [], button: { label: 'Go', url: 'javascript:alert(1)' } }).html.includes('javascript:'))
+    assert.ok(renderEmail({ heading: 'h', paragraphs: [], button: { label: 'Go', url: 'https://app.example.com/login?resetToken=abc' } }).html.includes('href="https://app.example.com/login?resetToken=abc"'))
+  })
+  it('gives a plain-text twin that keeps the code and link, and includes a preheader', () => {
+    const m = renderEmail({ heading: 'Your code', name: 'Asha', paragraphs: ['Use it now.'], code: '123456', button: { label: 'Open', url: 'https://x.test/a' }, note: 'Expires soon.', preheader: 'Code inside' })
+    assert.match(m.text, /Namaskar Asha,/); assert.match(m.text, /Code: 123456/); assert.match(m.text, /Open: https:\/\/x\.test\/a/)
+    assert.match(m.html, /Code inside/); assert.match(m.html, /prefers-color-scheme: dark/)
+  })
+})
+
+describe('email logo', async () => {
+  const { renderEmail, emailLogoUrl } = await import('../dist/common/services/email-template.js')
+  const saved = process.env.FRONTEND_URL
+  const mail = () => renderEmail({ heading: 'h', paragraphs: ['p'] }).html
+  it('uses the web app logo when FRONTEND_URL is https (first entry wins, trailing slash ignored)', () => {
+    process.env.FRONTEND_URL = 'https://pangat.example.com/, https://other.example.com'
+    assert.equal(emailLogoUrl(), 'https://pangat.example.com/email/pangat-logo.png')
+    assert.ok(mail().includes('<img src="https://pangat.example.com/email/pangat-logo.png"'))
+  })
+  it('falls back to the wordmark alone when no public https address exists', () => {
+    for (const v of ['', 'http://localhost:5173', '*']) { process.env.FRONTEND_URL = v; assert.equal(emailLogoUrl(), null); assert.ok(!mail().includes('<img')) }
+    process.env.FRONTEND_URL = saved ?? ''
   })
 })

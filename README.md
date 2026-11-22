@@ -36,6 +36,12 @@ npm run test:integration
   `security.adminLoginOtp` (platform admins enter a code after their password) and `security.signupEmailOtp`
   (`POST /auth/signup-otp`, then `emailOtp` on `POST /auth/onboard`).
 
+## Compliance and operations documents
+
+* `docs/COMPLIANCE.md`: who is who, data inventory and retention, rights process, role matrix, open questions for a lawyer / CA.
+* `docs/INCIDENT_RESPONSE.md`: what to do in the first hour, and the CERT-In 6-hour / DPDP clocks.
+* `docs/BACKUP_RESTORE.md`: Neon restore drill and the real restore procedure.
+
 ## Audit history
 
 * **Restaurant audit (`audit_logs`)** and **platform audit (`platform_audit_logs`)** are append-only: the database rejects UPDATE, DELETE and TRUNCATE (migration 013). Deleting an outlet cannot erase its history (`ON DELETE RESTRICT`).

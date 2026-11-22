@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS document_sequences (
 CREATE TABLE IF NOT EXISTS tax_documents (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   restaurant_id uuid NOT NULL REFERENCES restaurants(id) ON DELETE RESTRICT,
-  order_id      uuid NOT NULL REFERENCES orders(id) ON DELETE RESTRICT,
+  order_id      varchar(20) NOT NULL REFERENCES orders(id) ON DELETE RESTRICT,   -- order ids are short text ids, not uuids
   kind          varchar(12) NOT NULL,
   number        varchar(16) NOT NULL,
   fiscal_year   varchar(4)  NOT NULL,

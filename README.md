@@ -26,6 +26,8 @@ npm test                    # unit tests (no database needed)
 THROTTLE_DISABLED=true PLATFORM_BOOTSTRAP_SECRET=bootstrapsecret1234567 RAZORPAY_WEBHOOK_SECRET=whsec_test_123 \
   DATABASE_URL=postgres://... node dist/main &
 npm run test:integration
+npm run test:platform      # platform admin roles, settings, audit, support
+npm run test:compliance    # bills, credit notes, append-only tables, consent, redaction, privacy requests, two-factor
 ```
 
 ## Email & OTP

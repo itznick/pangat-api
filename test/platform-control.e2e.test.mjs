@@ -67,7 +67,12 @@ before(async () => {
     const e = `${role.toLowerCase()}-${run}@pangat.test`;
     const c = await call('POST', '/admin/admins', { token: OWNER.token, body: { name: `${role} person`, email: e, role, password: PW + 'xyz' } });
     assert.equal(c.status, 201, `${role} ${JSON.stringify(c.body)}`);
-    admins[role] = { id: c.data.id, email: e, token: await tokenOf(e, PW + 'xyz') };
+    // an administrator created with a typed password must choose their own before anything else works
+    const first = await login(e, PW + 'xyz');
+    assert.equal(first.data.user.mustChangePassword, true);
+    const chg = await call('POST', '/auth/change-password', { token: first.data.accessToken, body: { currentPassword: PW + 'xyz', newPassword: 'Tulsi-Wada-Pune-42' } });
+    assert.equal(chg.status, 200, JSON.stringify(chg.body));
+    admins[role] = { id: c.data.id, email: e, token: chg.data.accessToken };
   }
 });
 after(async () => {
@@ -143,7 +148,8 @@ describe('Role-based access control (enforced on the server)', () => {
   it('role changes take effect on the very next request', async () => {
     const e = `temp-${run}@pangat.test`;
     const c = await call('POST', '/admin/admins', { token: OWNER.token, body: { name: 'Temp', email: e, role: 'ANALYST', password: PW + 'tmp' } });
-    const t = await tokenOf(e, PW + 'tmp');
+    const first = await login(e, PW + 'tmp');
+    const t = (await call('POST', '/auth/change-password', { token: first.data.accessToken, body: { currentPassword: PW + 'tmp', newPassword: 'Tulsi-Wada-Pune-42' } })).data.accessToken;
     assert.equal((await call('GET', '/admin/payments', { token: t })).status, 200);
     await call('PATCH', `/admin/admins/${c.data.id}`, { token: OWNER.token, body: { role: 'SUPPORT' } });
     assert.equal((await call('GET', '/admin/payments', { token: t })).status, 403);
@@ -188,7 +194,7 @@ describe('Restaurant management', () => {
     assert.equal((await call('GET', '/auth/me', { token: victim.token })).status, 403, 'existing token must stop working');
     // guests cannot order either
     const menu = (await call('GET', `/menu/public/${victim.slug}`)).data;
-    const order = await call('POST', '/orders', { headers: { 'x-idempotency-key': `k-${crypto.randomBytes(6).toString('hex')}` }, body: { restaurantSlug: victim.slug, orderType: 'TAKEAWAY', customerName: 'G', paymentMethod: 'PAY_AT_COUNTER', items: [{ menuItemId: menu.items[0].id, name: menu.items[0].name, price: Number(menu.items[0].price), quantity: 1 }] } });
+    const order = await call('POST', '/orders', { headers: { 'x-idempotency-key': `k-${crypto.randomBytes(6).toString('hex')}` }, body: { restaurantSlug: victim.slug, orderType: 'TAKEAWAY', customerName: 'G', consentAccepted: true, paymentMethod: 'PAY_AT_COUNTER', items: [{ menuItemId: menu.items[0].id, name: menu.items[0].name, price: Number(menu.items[0].price), quantity: 1 }] } });
     assert.equal(order.status, 400);
     assert.equal((await call('POST', `/admin/restaurants/${victim.orgId}/status`, { token: OWNER.token, body: { action: 'SUSPEND', reason: 'again' } })).status, 400, 'already suspended');
     assert.equal((await call('POST', `/admin/restaurants/${victim.orgId}/status`, { token: OWNER.token, body: { action: 'RESTORE' } })).status, 200);
@@ -391,8 +397,12 @@ describe('User & access management', () => {
     await new Promise((r) => setTimeout(r, 1100));
     await call('POST', `/admin/users/${id}/logout`, { token: OWNER.token });
     assert.equal((await call('GET', '/auth/me', { token: t })).status, 401);
+    // Support never sees or relays a password: a reset emails the person a single-use link (and is refused when no email provider is set up)
     const rp = await call('POST', `/admin/users/${id}/reset-password`, { token: OWNER.token });
-    assert.equal((await login(o.email, rp.data.temporaryPassword)).status, 200);
+    assert.equal(rp.status, 503, JSON.stringify(rp.body));
+    assert.match(JSON.stringify(rp.body), /Email is not configured/);
+    assert.equal(rp.data?.temporaryPassword, undefined);
+    assert.equal((await login(o.email)).status, 200, 'a refused reset must not change or lock the current password');
   });
 
   it('platform administrators cannot be managed through the merchant user endpoints', async () => {
@@ -436,7 +446,7 @@ describe('Platform settings & feature access', () => {
     await call('PUT', '/admin/settings', { token: OWNER.token, body: { changes: { 'general.publicOrderingEnabled': false } } });
     await new Promise((r) => setTimeout(r, 100));
     const menu = (await call('GET', `/menu/public/${B.slug}`)).data;
-    const body = { restaurantSlug: B.slug, orderType: 'TAKEAWAY', customerName: 'G', paymentMethod: 'PAY_AT_COUNTER', items: [{ menuItemId: menu.items[0].id, name: menu.items[0].name, price: Number(menu.items[0].price), quantity: 1 }] };
+    const body = { restaurantSlug: B.slug, orderType: 'TAKEAWAY', customerName: 'G', consentAccepted: true, paymentMethod: 'PAY_AT_COUNTER', items: [{ menuItemId: menu.items[0].id, name: menu.items[0].name, price: Number(menu.items[0].price), quantity: 1 }] };
     const blocked = await call('POST', '/orders', { headers: { 'x-idempotency-key': `s-${crypto.randomBytes(6).toString('hex')}` }, body });
     assert.equal(blocked.status, 400);
     await call('PUT', '/admin/settings', { token: OWNER.token, body: { changes: { 'general.publicOrderingEnabled': true } } });
@@ -540,7 +550,9 @@ describe('Support & issue management', () => {
     await call('POST', `/admin/support/tickets/${ticket.id}/events`, { token: admins.SUPPORT.token, body: { kind: 'REPLY', body: 'We are on it.' } });
     const res = await call('PATCH', `/admin/support/tickets/${ticket.id}`, { token: admins.SUPPORT.token, body: { status: 'RESOLVED', resolution: 'Fixed reconnect logic' } });
     assert.equal(res.status, 200);
-    const full = await call('GET', `/admin/support/tickets/${ticket.id}`, { token: admins.ANALYST.token });
+    // support conversations are not part of the analyst's job (least privilege): only roles with support.view read them
+    assert.equal((await call('GET', `/admin/support/tickets/${ticket.id}`, { token: admins.ANALYST.token })).status, 403);
+    const full = await call('GET', `/admin/support/tickets/${ticket.id}`, { token: admins.SUPPORT.token });
     assert.ok(full.data.events.length >= 6);
     assert.equal(full.data.ticket.status, 'RESOLVED');
   });

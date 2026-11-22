@@ -18,7 +18,8 @@
     "test:integration": "node --test --test-concurrency=1 test/integration.e2e.test.mjs",
     "test:platform": "node --test --test-concurrency=1 test/platform-control.e2e.test.mjs",
     "test:unit": "node --test test/otp-email.test.mjs test/security-integration.test.mjs test/hardening.test.mjs test/cache.test.mjs",
-    "test:cov": "node --test --experimental-test-coverage test/security-integration.test.mjs test/hardening.test.mjs test/cache.test.mjs"
+    "test:cov": "node --test --experimental-test-coverage test/security-integration.test.mjs test/hardening.test.mjs test/cache.test.mjs",
+    "test:compliance": "node --test --test-concurrency=1 test/compliance.e2e.test.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",

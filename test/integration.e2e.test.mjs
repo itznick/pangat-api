@@ -20,6 +20,7 @@ const BOOT = process.env.PLATFORM_BOOTSTRAP_SECRET || 'bootstrapsecret1234567';
 const WH_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || 'whsec_test_123';
 const run = crypto.randomBytes(3).toString('hex');
 const PW = 'Str0ng-pass-1';
+const PW2 = 'Tulsi-Wada-Pune-42'; // the password a team member chooses at first sign-in (the owner-typed one is temporary)
 
 const db = new pg.Client({ connectionString: DB });
 
@@ -71,7 +72,13 @@ before(async () => {
     const email = `${role.toLowerCase()}-${run}@example.com`;
     const r = await call('POST', `/restaurants/${A.outlet.id}/staff`, { token: A.token, body: { name: role, email, password: PW, role } });
     assert.equal(r.status, 201, `${role}: ${JSON.stringify(r.body)}`);
-    staff[role] = { id: r.data.id, email, token: await tokenOf(email) };
+    // An owner-typed password is temporary: the first sign-in must be followed by choosing a new one before anything else works
+    const first = await login(email);
+    assert.equal(first.data.user.mustChangePassword, true, `${role}: temporary password must be flagged`);
+    assert.equal((await call('GET', `/restaurants/${A.outlet.id}/audit-logs`, { token: first.data.accessToken })).status, 403, `${role}: blocked until the password is changed`);
+    const chg = await call('POST', '/auth/change-password', { token: first.data.accessToken, body: { currentPassword: PW, newPassword: PW2 } });
+    assert.equal(chg.status, 200, `${role}: ${JSON.stringify(chg.body)}`);
+    staff[role] = { id: r.data.id, email, token: chg.data.accessToken, password: PW2 };
   }
 });
 after(async () => { await db.end(); });
@@ -138,9 +145,9 @@ describe('Authentication & account security', () => {
     const o = await onboard('reset');
     const raw = crypto.randomBytes(32).toString('hex');
     await db.query('UPDATE staff SET reset_token_hash=$1, reset_token_expires_at=now()+interval \'1 hour\' WHERE lower(email)=lower($2)', [crypto.createHash('sha256').update(raw).digest('hex'), o.email]);
-    assert.equal((await call('POST', '/auth/reset-password', { body: { token: raw, newPassword: 'Reset-pass-33' } })).status, 200);
-    assert.equal((await call('POST', '/auth/reset-password', { body: { token: raw, newPassword: 'Reset-pass-44' } })).status, 400, 'token is single-use');
-    assert.equal((await login(o.email, 'Reset-pass-33')).status, 200);
+    assert.equal((await call('POST', '/auth/reset-password', { body: { token: raw, newPassword: 'Tulsi-Wada-Pune-33' } })).status, 200);
+    assert.equal((await call('POST', '/auth/reset-password', { body: { token: raw, newPassword: 'Tulsi-Wada-Pune-44' } })).status, 400, 'token is single-use');
+    assert.equal((await login(o.email, 'Tulsi-Wada-Pune-33')).status, 200);
   });
 });
 
@@ -237,17 +244,19 @@ describe('Role-based access control', () => {
     const r = await call('PATCH', `/restaurants/${A.outlet.id}/staff/${staff.CASHIER.id}`, { token: A.token, body: { isActive: false } });
     assert.equal(r.status, 200);
     assert.equal((await call('GET', '/auth/me', { token: staff.CASHIER.token })).status, 401);
-    assert.equal((await login(staff.CASHIER.email)).status, 401);
+    assert.equal((await login(staff.CASHIER.email, PW2)).status, 401);
     await call('PATCH', `/restaurants/${A.outlet.id}/staff/${staff.CASHIER.id}`, { token: A.token, body: { isActive: true } });
-    assert.equal((await login(staff.CASHIER.email)).status, 200);
+    assert.equal((await login(staff.CASHIER.email, PW2)).status, 200);
   });
 
   it('owner can reset a staff password (one-time temp password) and the old one stops working', async () => {
     const r = await call('POST', `/restaurants/${A.outlet.id}/staff/${staff.STEWARD.id}/reset-password`, { token: A.token });
     assert.equal(r.status, 201);
     assert.ok(r.data.temporaryPassword.length >= 8);
-    assert.equal((await login(staff.STEWARD.email)).status, 401);
-    assert.equal((await login(staff.STEWARD.email, r.data.temporaryPassword)).status, 200);
+    assert.equal((await login(staff.STEWARD.email, PW2)).status, 401);
+    const again = await login(staff.STEWARD.email, r.data.temporaryPassword);
+    assert.equal(again.status, 200);
+    assert.equal(again.data.user.mustChangePassword, true, 'a reset password is temporary too');
   });
 });
 

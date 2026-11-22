@@ -56,13 +56,17 @@ Target answer time 30 days (the Rules allow up to 90 for grievances: **Confirm**
 ## Security controls (what to show an auditor)
 
 - Roles and least privilege: see "Role matrix" below; kitchen role receives no customer or money fields (API and live feed).
-- Authentication: bcrypt (cost 12), lockout after 5 failures, tokens revoked instantly on password change or deactivation, optional email code for platform admins.
+- Authentication: bcrypt (cost 12), lockout after 5 failures, tokens revoked instantly on password change or deactivation. Passwords: 10+ characters, no common/sequential/identity-based passwords. Temporary and owner-typed passwords must be replaced at first sign-in. Platform admin sessions last 8 hours.
+- Two-factor: authenticator app (TOTP, RFC 6238) with single-use recovery codes, available to everyone, can be **required** for platform admins (Settings → Security → *Require an authenticator app for platform admins*). Optional email code as a fallback for admins without it.
+- Kitchen accountability: each chef can have a personal PIN (unique per outlet) so actions are recorded under their name; the shared station PIN is still supported but records everything as "Kitchen Station".
+- Abuse limits: per-IP throttles (real client IP via trust proxy), 5-guess lockouts for passwords/PINs/second factor, and burst limits on public ordering per outlet and per table.
 - Audit: restaurant and platform audit logs are append-only in the database; each entry has actor, role, IP, device, request id; money and security changes are saved in the same transaction as their audit entry.
 - Pangat staff opening a restaurant's data is logged and visible to that restaurant's owner.
 - Transport: TLS; HSTS and security headers (see `netlify.toml` and API helmet).
 - Secrets: encrypted at rest in settings (AES-256-GCM); environment variables for the rest.
 - Backups and recovery: `BACKUP_RESTORE.md`. Incidents: `INCIDENT_RESPONSE.md`.
-- CI on every pull request: build, tests, dependency audit, secret scan.
+- Web app: Content-Security-Policy and security headers (`netlify.toml`). If `index.html`'s inline script ever changes, its hash in the policy must be recomputed (build the app, hash the `<script>` body with SHA-256, base64).
+- CI on every pull request (`.github/workflows/ci.yml`): build, tests, dependency audit (fails on high/critical), secret scan. Dependabot opens update pull requests weekly.
 
 ## Role matrix
 
@@ -85,6 +89,14 @@ Target answer time 30 days (the Rules allow up to 90 for grievances: **Confirm**
 - Credit notes for refunds: own series `{code}/{FY}/C{5 digits}`.
 - Bills show GSTIN, FSSAI licence number, HSN/SAC, CGST/SGST split.
 - A paid and numbered bill cannot be edited.
+
+## Not built yet (known gaps)
+
+1. Extra roles recommended in the audit: Accountant/Auditor (read-only bills and reports), Storekeeper, Delivery partner, Area manager. Today an accountant must use an owner or manager login.
+2. Tamper-evident audit (hash chain) and automatic "leakage" alerts to owners (many cancellations/refunds by one person, out-of-hours actions).
+3. Session list ("my devices") and idle timeout for restaurant staff; tokens are still bearer tokens kept in the browser, so the CSP is the main defence against script injection.
+4. SMS verification of diner phone numbers (needs DLT registration and a paid provider).
+5. Service-charge GST treatment (see below) and bill-of-supply handling.
 
 ## Open items for a lawyer / CA (**Confirm**)
 

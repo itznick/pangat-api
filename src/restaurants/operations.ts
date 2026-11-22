@@ -29,6 +29,11 @@ export interface OutletOperations {
   avgPrepMinutes: number;
   /** Printed at the bottom of customer receipts. */
   receiptFooter: string;
+  /**
+   * Separation of duties: by default only the cashier, manager or owner can mark a bill as paid. A small cafe where
+   * stewards also take payment can switch this on; the switch itself is recorded in the activity log.
+   */
+  stewardCanSettle: boolean;
 }
 
 const day = (open = '09:00', close = '23:00'): DayHours => ({ closed: false, open, close });
@@ -42,6 +47,7 @@ export const DEFAULT_OPERATIONS: OutletOperations = {
   payments: { upi: true, payAtCounter: true, cod: true },
   avgPrepMinutes: 15,
   receiptFooter: '',
+  stewardCanSettle: false,
 };
 
 /** Fill any missing keys so older outlets (with `null` / partial JSON) behave like defaults. */

@@ -20,6 +20,7 @@ import { CancelOrderDto } from './dto/cancel-order.dto.js';
 import { EditOrderItemsDto } from './dto/edit-order-items.dto.js';
 import { ProcessRefundDto } from './dto/process-refund.dto.js';
 import { IdempotencyGuard } from '../common/guards/idempotency.guard.js';
+import { isKitchenOnly, redactForKitchen, redactOrdersFor } from './order-redaction.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 import { RolesGuard } from '../common/guards/roles.guard.js';
@@ -47,6 +48,7 @@ export class OrdersController {
   @Get()
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   async findAll(
+    @Req() req: any,
     @Query('restaurantSlug') restaurantSlug?: string,
     @Query('status') status?: string,
     @Query('paymentStatus') paymentStatus?: string,
@@ -63,7 +65,7 @@ export class OrdersController {
       page: page ? Number(page) : undefined,
       limit: limit ? Number(limit) : undefined,
     });
-    return withMessage(orders, 'Orders retrieved successfully');
+    return withMessage(redactOrdersFor(req?.user, orders as any[]), 'Orders retrieved successfully');
   }
 
   /** Single order lookup (open for diner live tracking with token and staff with JWT) */
@@ -75,7 +77,14 @@ export class OrdersController {
     @Req() req?: any,
   ) {
     const order = await this.ordersService.findOrderForCaller(id, token, req?.user);
-    return withMessage(order, 'Order retrieved successfully');
+    return withMessage(isKitchenOnly(req?.user) ? redactForKitchen(order) : order, 'Order retrieved successfully');
+  }
+
+  /** Printable tax invoice (bill number, GSTIN, FSSAI, CGST/SGST split, credit notes). Staff, or the diner with the tracking token. */
+  @Get(':id/bill')
+  @UseGuards(OptionalJwtAuthGuard)
+  async bill(@Param('id') id: string, @Query('token') token?: string, @Req() req?: any) {
+    return withMessage(await this.ordersService.getBill(id, token, req?.user), 'Bill retrieved successfully');
   }
 
   /** Diner feedback submission */
@@ -100,7 +109,7 @@ export class OrdersController {
     @Req() req: any,
   ) {
     const updated = await this.ordersService.updateStatus(id, dto.status, req?.user?.restaurantId, req?.user);
-    return withMessage(updated, `Order status advanced to ${dto.status}`);
+    return withMessage(isKitchenOnly(req?.user) ? redactForKitchen(updated) : updated, `Order status advanced to ${dto.status}`);
   }
 
   /** KDS ticket regression: Chefs, Managers, Owners returning ticket to earlier stage with reason */
@@ -113,7 +122,7 @@ export class OrdersController {
     @Req() req: any,
   ) {
     const updated = await this.ordersService.regressStatus(id, dto, req?.user?.restaurantId, req?.user);
-    return withMessage(updated, `Order returned to ${dto.targetStatus}`);
+    return withMessage(isKitchenOnly(req?.user) ? redactForKitchen(updated) : updated, `Order returned to ${dto.targetStatus}`);
   }
 
   /** Order cancellation with mandatory reason */

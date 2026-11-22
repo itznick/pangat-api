@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import helmet from 'helmet';
+import { requestContextMiddleware } from './common/request-context.js';
 import compression from 'compression';
 import { AppModule } from './app.module.js';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor.js';
@@ -12,6 +13,12 @@ import { publicMenuCache } from './common/cache/ttl-cache.js';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { rawBody: true });
   const configService = app.get(ConfigService);
+
+  // Behind a load balancer the real client is the address the balancer saw, never a value the client typed.
+  // TRUST_PROXY_HOPS = how many proxies sit in front of the API (Render: 1). req.ip, rate limiting and audit evidence all rely on it.
+  const hops = Number.parseInt(process.env.TRUST_PROXY_HOPS ?? '1', 10);
+  (app.getHttpAdapter().getInstance() as any).set('trust proxy', Number.isInteger(hops) && hops >= 0 ? hops : 1);
+  app.use(requestContextMiddleware);
 
   // Security: Helmet headers configured for cross-origin APIs & web sockets
   app.use(

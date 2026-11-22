@@ -1,3 +1,4 @@
+import { runPrivacyRetention } from '../privacy/retention.js';
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { EventsGateway } from '../events/events.gateway.js';
@@ -30,6 +31,7 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     this.jobs = [
       { name: 'health-snapshot', label: 'Health sampling', everyMs: 5 * 60_000, firstDelayMs: 20_000, run: () => this.healthSnapshot() },
       { name: 'subscription-sweep', label: 'Subscription expiry & trial reminders', everyMs: 60 * 60_000, firstDelayMs: 45_000, run: () => this.subscriptionSweep() },
+      { name: 'privacy-retention', label: 'Remove old personal details (privacy)', everyMs: 24 * 60 * 60_000, firstDelayMs: 180_000, run: () => runPrivacyRetention(this.ds) },
       { name: 'data-retention', label: 'Log retention cleanup', everyMs: 24 * 60 * 60_000, firstDelayMs: 120_000, run: () => this.retention() },
     ];
   }
@@ -160,9 +162,10 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     const del = async (sql: string) => (await this.ds.query(sql))[1] as number;
     return {
       healthSnapshots: await del(`DELETE FROM health_snapshots WHERE taken_at < now() - interval '14 days'`),
-      errorLogs: await del(`DELETE FROM error_logs WHERE created_at < now() - interval '30 days'`),
-      webhookEvents: await del(`DELETE FROM webhook_events WHERE received_at < now() - interval '90 days'`),
-      loginEvents: await del(`DELETE FROM login_events WHERE created_at < now() - interval '180 days'`),
+      errorLogs: await del(`DELETE FROM error_logs WHERE created_at < now() - interval '90 days'`),
+      webhookEvents: await del(`DELETE FROM webhook_events WHERE received_at < now() - interval '180 days'`),
+      // sign-in history is security evidence: keep a full year (CERT-In asks for 180 days of logs; DPDP security safeguards point to a year)
+      loginEvents: await del(`DELETE FROM login_events WHERE created_at < now() - interval '365 days'`),
       jobRuns: await del(`DELETE FROM job_runs WHERE started_at < now() - interval '60 days'`),
     };
   }

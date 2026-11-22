@@ -26,6 +26,8 @@ npm test                    # unit tests (no database needed)
 THROTTLE_DISABLED=true PLATFORM_BOOTSTRAP_SECRET=bootstrapsecret1234567 RAZORPAY_WEBHOOK_SECRET=whsec_test_123 \
   DATABASE_URL=postgres://... node dist/main &
 npm run test:integration
+npm run test:platform      # platform admin roles, settings, audit, support
+npm run test:compliance    # bills, credit notes, append-only tables, consent, redaction, privacy requests, two-factor
 ```
 
 ## Email & OTP
@@ -35,6 +37,21 @@ npm run test:integration
 * Both uses are opt-in under Super Admin > Settings > Security and are only enforced while an email provider is configured:
   `security.adminLoginOtp` (platform admins enter a code after their password) and `security.signupEmailOtp`
   (`POST /auth/signup-otp`, then `emailOtp` on `POST /auth/onboard`).
+
+## Compliance and operations documents
+
+* `docs/COMPLIANCE.md`: who is who, data inventory and retention, rights process, role matrix, open questions for a lawyer / CA.
+* `docs/INCIDENT_RESPONSE.md`: what to do in the first hour, and the CERT-In 6-hour / DPDP clocks.
+* `docs/BACKUP_RESTORE.md`: Neon restore drill and the real restore procedure.
+
+## Audit history
+
+* **Restaurant audit (`audit_logs`)** and **platform audit (`platform_audit_logs`)** are append-only: the database rejects UPDATE, DELETE and TRUNCATE (migration 013). Deleting an outlet cannot erase its history (`ON DELETE RESTRICT`).
+  Dev tip: to reset a test database, drop and recreate it rather than truncating these two tables.
+* Every entry carries who, their role, from which IP and browser, and the request id (also returned to clients in the `X-Request-Id` header).
+* Money and security actions (cancel, refund, mark paid, settings, staff, menu, tables, passwords) are saved **in the same transaction** as their audit entry; if the record cannot be written the action fails.
+* Pangat staff opening a restaurant's console data is logged (`MERCHANT_DATA_VIEWED/CHANGED`, category PRIVACY) and shown to the owner under Settings → Activity. It needs the `merchant.view` permission.
+* `TRUST_PROXY_HOPS` (default 1) must equal the number of proxies in front of the API, so the recorded IP is the real client.
 
 ## Security model (summary)
 

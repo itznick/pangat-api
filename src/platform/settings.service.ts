@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import * as crypto from 'crypto';
 import { SETTINGS, SETTING_BY_KEY, SETTING_GROUPS, SettingDef } from './settings.registry.js';
 import { resolveSettingsKey } from '../common/security/secrets.js';
+import { PRIVACY_POLICY_VERSION } from './compliance.js';
 
 type Cache = Map<string, unknown>;
 let cache: Cache = new Map();
@@ -179,6 +180,19 @@ export class PlatformSettingsService implements OnModuleInit, OnModuleDestroy {
         logoUrl: getSetting('branding.logoUrl'),
       },
       selfSignupEnabled: getSetting<boolean>('general.selfSignupEnabled') !== false,
+      compliance: {
+        policyVersion: PRIVACY_POLICY_VERSION,
+        legalName: getSetting<string>('compliance.legalName') || 'Pangat Technologies',
+        registeredAddress: getSetting<string | null>('compliance.registeredAddress') ?? null,
+        grievanceOfficer: {
+          name: getSetting<string>('compliance.grievanceOfficerName') || 'Nikhil Bhamare',
+          email: getSetting<string | null>('compliance.grievanceOfficerEmail') ?? null,
+          phone: getSetting<string | null>('compliance.grievanceOfficerPhone') ?? null,
+        },
+        responseDays: getSetting<number>('compliance.responseDays') || 30,
+        dinerDataRetentionMonths: getSetting<number>('compliance.dinerDataRetentionMonths') ?? 12,
+        jurisdictionCity: getSetting<string | null>('compliance.jurisdictionCity') ?? null,
+      },
       maintenance: { active: isMaintenanceActive(), message: getSetting('operations.maintenanceMessage'), start: start ?? null, end: end ?? null },
     };
   }

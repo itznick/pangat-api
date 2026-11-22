@@ -16,6 +16,11 @@ export class LoginDto {
   @IsOptional()
   restaurantSlug?: string;
 
+  /** Code from the authenticator app, or a one-time recovery code, when two-factor sign-in is on for the account */
+  @IsString()
+  @IsOptional()
+  totp?: string;
+
   /** 6-digit email code; only used when platform-admin sign-in codes are switched on */
   @IsString()
   @IsOptional()

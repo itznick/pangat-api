@@ -63,6 +63,20 @@ export class Order {
   @Column({ name: 'customer_phone', type: 'varchar', length: 15, nullable: true })
   customerPhone: string | null;
 
+  /** Statutory serial number, issued when the bill is paid (CGST Rule 46). Never changes once issued. */
+  @Column({ name: 'bill_number', type: 'varchar', length: 16, nullable: true })
+  billNumber: string | null;
+
+  @Column({ name: 'bill_issued_at', type: 'timestamptz', nullable: true })
+  billIssuedAt: Date | null;
+
+  /** Privacy notice version the diner accepted, and when (required whenever personal details are collected) */
+  @Column({ name: 'consent_version', type: 'varchar', length: 20, nullable: true })
+  consentVersion: string | null;
+
+  @Column({ name: 'consent_at', type: 'timestamptz', nullable: true })
+  consentAt: Date | null;
+
   /** Delivery fulfillment details */
   @Column({ name: 'delivery_address', type: 'text', nullable: true })
   deliveryAddress: string | null;

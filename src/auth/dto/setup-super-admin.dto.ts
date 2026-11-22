@@ -1,4 +1,5 @@
-import { IsEmail, IsNotEmpty, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsEmail, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { IsAcceptablePassword } from '../../common/security/password-policy.js';
 
 export class SetupSuperAdminDto {
   @IsString()
@@ -8,8 +9,7 @@ export class SetupSuperAdminDto {
   @IsEmail({}, { message: 'Please provide a valid email address' })
   email: string;
 
-  @IsString()
-  @MinLength(6, { message: 'Password must be at least 6 characters' })
+  @IsAcceptablePassword()
   password: string;
 
   @IsString()

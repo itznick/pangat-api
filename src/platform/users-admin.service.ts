@@ -2,6 +2,8 @@ import { BadRequestException, ForbiddenException, Injectable, NotFoundException 
 import { DataSource } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
+import { assertPasswordAllowed } from '../common/security/password-policy.js';
+import { PasswordLinkService } from '../common/services/password-link.service.js';
 import { AuditActor, PlatformAuditService } from './audit.service.js';
 import { MERCHANT_STAFF_SQL } from './restaurants-admin.service.js';
 import { ALL_PERMISSIONS, PERMISSION_CATALOG, PLATFORM_ROLES, resolvePlatformPermissions } from './permissions.js';
@@ -11,7 +13,7 @@ const tempPassword = () => `${randomBytes(9).toString('base64url')}#7a`;
 
 @Injectable()
 export class UsersAdminService {
-  constructor(private readonly ds: DataSource, private readonly audit: PlatformAuditService) {}
+  constructor(private readonly ds: DataSource, private readonly audit: PlatformAuditService, private readonly passwordLinks: PasswordLinkService) {}
 
   // ── merchant users ───────────────────────────────────────────────────────
   async list(q: { q?: string; role?: string; status?: string; organizationId?: string; sort?: string; order?: string; page?: number; limit?: number }) {
@@ -98,12 +100,12 @@ export class UsersAdminService {
     return { revoked: true };
   }
 
+  /** Emails the user a single-use link. Support never sees or relays a password, and the user keeps their current one until they use the link. */
   async resetPassword(id: string, actor: AuditActor) {
     const u = await this.target(id);
-    const pw = tempPassword();
-    await this.ds.query('UPDATE staff SET password_hash = $2, password_changed_at = now(), failed_login_count = 0, locked_until = NULL WHERE id = $1', [id, await bcrypt.hash(pw, BCRYPT_COST)]);
-    await this.audit.record(actor, { action: 'USER_PASSWORD_RESET', category: 'SECURITY', entityType: 'user', entityId: id, entityLabel: `${u.name} <${u.email}>`, organizationId: u.organization_id, summary: `Reset the password for ${u.name}` });
-    return { name: u.name, email: u.email, temporaryPassword: pw };
+    await this.passwordLinks.send(u, 'RESET');
+    await this.audit.record(actor, { action: 'USER_PASSWORD_RESET_LINK_SENT', category: 'SECURITY', entityType: 'user', entityId: id, entityLabel: `${u.name} <${u.email}>`, organizationId: u.organization_id, summary: `Emailed a password reset link to ${u.name}` });
+    return { name: u.name, email: u.email, linkSent: true };
   }
 
   // ── platform administrators ──────────────────────────────────────────────
@@ -131,10 +133,10 @@ export class UsersAdminService {
     const email = dto.email.trim().toLowerCase();
     if ((await this.ds.query('SELECT 1 FROM staff WHERE lower(email) = $1', [email]))[0]) throw new BadRequestException('A user with this email already exists');
     const pw = dto.password?.trim() || tempPassword();
-    if (pw.length < 10) throw new BadRequestException('Password must be at least 10 characters');
+    assertPasswordAllowed(pw, { email, name: dto.name });
     const perms = this.validatePerms(dto.permissions);
     const [row] = await this.ds.query(
-      `INSERT INTO staff (name, email, password_hash, role, is_platform_admin, platform_role, platform_permissions, is_active) VALUES ($1,$2,$3,'PLATFORM_SUPER_ADMIN',true,$4,$5::jsonb,true) RETURNING id`,
+      `INSERT INTO staff (name, email, password_hash, role, is_platform_admin, platform_role, platform_permissions, is_active, must_change_password) VALUES ($1,$2,$3,'PLATFORM_SUPER_ADMIN',true,$4,$5::jsonb,true,true) RETURNING id`,
       [dto.name.trim(), email, await bcrypt.hash(pw, BCRYPT_COST), dto.role, perms ? JSON.stringify(perms) : null],
     );
     await this.audit.record(actor, {
@@ -187,10 +189,9 @@ export class UsersAdminService {
     const a = (await this.ds.query(`SELECT id, name, email FROM staff WHERE id = $1 AND (is_platform_admin = true OR role = 'PLATFORM_SUPER_ADMIN')`, [id]))[0];
     if (!a) throw new NotFoundException('Administrator not found');
     if (a.id === actor.id) throw new ForbiddenException('Use Change password in your account menu to change your own password');
-    const pw = tempPassword();
-    await this.ds.query('UPDATE staff SET password_hash = $2, password_changed_at = now(), failed_login_count = 0, locked_until = NULL WHERE id = $1', [id, await bcrypt.hash(pw, BCRYPT_COST)]);
-    await this.audit.record(actor, { action: 'ADMIN_PASSWORD_RESET', category: 'SECURITY', entityType: 'platform_admin', entityId: id, entityLabel: `${a.name} <${a.email}>`, summary: `Reset the password for administrator ${a.name}` });
-    return { name: a.name, email: a.email, temporaryPassword: pw };
+    await this.passwordLinks.send(a, 'RESET');
+    await this.audit.record(actor, { action: 'ADMIN_PASSWORD_RESET_LINK_SENT', category: 'SECURITY', entityType: 'platform_admin', entityId: id, entityLabel: `${a.name} <${a.email}>`, summary: `Emailed a password reset link to administrator ${a.name}` });
+    return { name: a.name, email: a.email, linkSent: true };
   }
 
   /** Sign-in history of platform administrators (successful and failed). */

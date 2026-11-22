@@ -1,3 +1,4 @@
+import { AuditService } from '../audit/audit.service.js';
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
@@ -17,6 +18,8 @@ export class TablesService {
     private readonly restaurantRepo: Repository<Restaurant>,
     @Optional()
     private readonly dataSource?: DataSource,
+    @Optional()
+    private readonly auditService?: AuditService,
   ) {}
 
   async findAll(restaurantId?: string, restaurantSlug?: string): Promise<Table[]> {
@@ -60,7 +63,7 @@ export class TablesService {
     return this.tableRepo.save(table);
   }
 
-  async create(dto: CreateTableDto): Promise<Table> {
+  async create(dto: CreateTableDto, actor?: any): Promise<Table> {
     const restaurant = await this.restaurantRepo.findOne({
       where: { id: dto.restaurantId },
     });
@@ -101,10 +104,17 @@ export class TablesService {
       qrCodeUrl: `/r/${restaurant.slug}/t/${cleanNum}`,
     });
 
-    return this.tableRepo.save(table);
+    return this.tableRepo.manager.transaction(async (em) => {
+      const persisted = await em.getRepository(Table).save(table);
+      await this.auditService?.record({
+        restaurantId: restaurant.id, organizationId: restaurant.organizationId, entityType: 'TABLE', entityId: persisted.id, action: 'TABLE_ADDED',
+        staffId: actor?.id, staffName: actor?.name, staffRole: actor?.role, staffEmail: actor?.email, metadata: { tableNumber: persisted.tableNumber },
+      }, em);
+      return persisted;
+    });
   }
 
-  async remove(id: string, authorizedRestaurantId?: string): Promise<void> {
+  async remove(id: string, authorizedRestaurantId?: string, actor?: any): Promise<void> {
     const table = await this.findOne(id);
     if (authorizedRestaurantId && table.restaurantId !== authorizedRestaurantId) {
       throw new ForbiddenException('Access denied: Table does not belong to authorized restaurant');
@@ -136,6 +146,12 @@ export class TablesService {
       }
     }
 
-    await this.tableRepo.remove(table);
+    await this.tableRepo.manager.transaction(async (em) => {
+      await this.auditService?.record({
+        restaurantId: table.restaurantId, entityType: 'TABLE', entityId: table.id, action: 'TABLE_REMOVED',
+        staffId: actor?.id, staffName: actor?.name, staffRole: actor?.role, staffEmail: actor?.email, metadata: { tableNumber: table.tableNumber },
+      }, em);
+      await em.getRepository(Table).remove(table);
+    });
   }
 }

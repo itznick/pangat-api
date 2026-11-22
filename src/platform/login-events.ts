@@ -28,7 +28,7 @@ export async function recordLoginEvent(
   }
 }
 
+/** `req.ip` is the proxy-verified client address (see `trust proxy` in main.ts). The raw X-Forwarded-For header is client-controlled and must never be used. */
 export function clientMeta(req: any): LoginMeta {
-  const fwd = String(req?.headers?.['x-forwarded-for'] || '').split(',')[0].trim();
-  return { ip: fwd || req?.ip || null, userAgent: String(req?.headers?.['user-agent'] || '') || null };
+  return { ip: String(req?.ip || '').slice(0, 64) || null, userAgent: String(req?.headers?.['user-agent'] || '') || null };
 }

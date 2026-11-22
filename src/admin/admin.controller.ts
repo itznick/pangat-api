@@ -64,8 +64,8 @@ export class AdminController {
   async resetOrganizationPassword(@Param('id') id: string, @Req() req: any) {
     const result: any = await this.adminService.resetOrganizationPassword(id);
     await this.audit.record(actorOf(req), {
-      action: 'OWNER_PASSWORD_RESET', category: 'SECURITY', entityType: 'organization', entityId: id, entityLabel: result.organizationName, organizationId: id,
-      summary: `Reset the owner password for ${result.organizationName}`,
+      action: 'OWNER_PASSWORD_RESET_LINK_SENT', category: 'SECURITY', entityType: 'organization', entityId: id, entityLabel: result.organizationName, organizationId: id,
+      summary: `Emailed a password reset link to the owner of ${result.organizationName}`,
     });
     return result;
   }

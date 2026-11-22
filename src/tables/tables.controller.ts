@@ -64,8 +64,8 @@ export class TablesController {
   @Post()
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
-  async createTable(@Body() dto: CreateTableDto) {
-    const created = await this.tablesService.create(dto);
+  async createTable(@Body() dto: CreateTableDto, @Req() req: any) {
+    const created = await this.tablesService.create(dto, req?.user);
     return withMessage(created, `Table '${created.tableNumber}' added to floor successfully`);
   }
 
@@ -74,7 +74,7 @@ export class TablesController {
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
   async removeTable(@Param('id') id: string, @Req() req: any) {
-    await this.tablesService.remove(id, req?.user?.restaurantId);
+    await this.tablesService.remove(id, req?.user?.restaurantId, req?.user);
     return withMessage({ id }, 'Table removed from floor successfully');
   }
 }

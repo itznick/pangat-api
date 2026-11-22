@@ -1,4 +1,5 @@
 import {
+  Optional,
   Injectable,
   UnauthorizedException,
   BadRequestException,
@@ -11,7 +12,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, MoreThan } from 'typeorm';
+import { Repository, DataSource, EntityManager, MoreThan } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import { createHash, timingSafeEqual } from 'crypto';
@@ -30,6 +31,11 @@ import { MenuItem } from '../menu/entities/menu-item.entity.js';
 import { AttemptLimiter } from '../common/security/attempt-limiter.js';
 import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 import { OtpService } from '../common/services/otp.service.js';
+import { assertPasswordAllowed } from '../common/security/password-policy.js';
+import { TwoFactorService } from './two-factor.service.js';
+import { AuditService } from '../audit/audit.service.js';
+import { PlatformAuditService } from '../platform/audit.service.js';
+import { currentRequest } from '../common/request-context.js';
 import { renderEmail } from '../common/services/email-template.js';
 import { ensureTrial } from '../subscriptions/subscription-access.js';
 import { recordLoginEvent, LoginMeta } from '../platform/login-events.js';
@@ -49,7 +55,40 @@ export class AuthService {
     private readonly emailDeliveryService: EmailDeliveryService,
     private readonly configService: ConfigService,
     private readonly otpService: OtpService,
+    @Optional() private readonly auditService?: AuditService,
+    @Optional() private readonly platformAudit?: PlatformAuditService,
+    @Optional() private readonly twoFactor?: TwoFactorService,
   ) {}
+
+  /**
+   * Account-security events (password changed/reset, sessions revoked, profile changed). Restaurant staff go to the restaurant audit
+   * log, platform administrators to the platform audit log. Pass the transaction's manager to save the record with the change.
+   */
+  private async auditAccount(staff: Staff, action: string, summary: string, metadata: Record<string, any> | null = null, em?: EntityManager) {
+    const isAdmin = Boolean(staff.isPlatformAdmin || staff.role === StaffRole.PLATFORM_SUPER_ADMIN);
+    if (isAdmin) {
+      const ctx = currentRequest();
+      await this.platformAudit?.record(
+        { id: staff.id, name: staff.name, email: staff.email, role: staff.platformRole || staff.role, ip: ctx?.ip ?? null, userAgent: ctx?.userAgent ?? null },
+        { action: `ADMIN_${action}`, category: 'SECURITY', entityType: 'platform_admin', entityId: staff.id, entityLabel: staff.email, summary },
+      );
+      return;
+    }
+    await this.auditService?.record({
+      restaurantId: staff.restaurantId, organizationId: staff.organizationId, entityType: 'ACCOUNT', entityId: staff.id, action,
+      staffId: staff.id, staffName: staff.name, staffRole: staff.role, staffEmail: staff.email, metadata: { summary, ...(metadata ?? {}) },
+    }, em);
+  }
+
+  /**
+   * Platform administrators can open every restaurant's data, so their sessions are short (8 hours by default, ADMIN_JWT_EXPIRATION).
+   * Restaurant staff keep the configured lifetime (JWT_EXPIRATION): a kitchen tablet must not be signed out mid-service.
+   */
+  private signToken(payload: Record<string, unknown>, isPlatformAdmin: boolean): string {
+    return isPlatformAdmin
+      ? this.jwtService.sign(payload, { expiresIn: (process.env.ADMIN_JWT_EXPIRATION || '8h') as any })
+      : this.jwtService.sign(payload);
+  }
 
   /** Constant-time comparison so the bootstrap secret cannot be recovered by timing guesses. */
   private static safeEqual(a: string, b: string): boolean {
@@ -149,7 +188,11 @@ export class AuthService {
 
   /** Invalidate every token issued so far for this staff member. */
   async revokeSessions(staffId: string) {
-    await this.staffRepo.update({ id: staffId }, { passwordChangedAt: new Date() });
+    const staff = await this.staffRepo.findOne({ where: { id: staffId } });
+    await this.staffRepo.manager.transaction(async (em) => {
+      await em.getRepository(Staff).update({ id: staffId }, { passwordChangedAt: new Date() });
+      if (staff) await this.auditAccount(staff, 'SESSIONS_REVOKED', 'Signed out of every device', null, em);
+    });
   }
 
   /** Failed password attempts before the account is locked, and for how long. */
@@ -225,9 +268,17 @@ export class AuthService {
         }
       }
     }
+    // Authenticator-app second factor: strongest option, used whenever the person has switched it on
+    if (staff.totpEnabled && this.twoFactor) {
+      if (!loginDto.totp) return { totpRequired: true as const, message: 'Enter the 6-digit code from your authenticator app (or a recovery code).' };
+      if (!(await this.twoFactor.verifyLogin(staff, loginDto.totp))) {
+        await logFail('WRONG_TOTP');
+        throw new UnauthorizedException('That code is wrong or has expired.');
+      }
+    }
     // Second factor for platform admins (opt-in). Only enforced while a code can really be delivered, so a missing
     // email provider can never lock every administrator out; the setting's help text says so.
-    if (staffIsAdmin && getSetting<boolean>('security.adminLoginOtp') === true) {
+    if (staffIsAdmin && !staff.totpEnabled && getSetting<boolean>('security.adminLoginOtp') === true) {
       if (process.env.ADMIN_LOGIN_OTP_DISABLED === 'true') {
         // Break-glass for when the mail provider is down or the admin's email is not a real inbox
         this.logger.warn('ADMIN_LOGIN_OTP_DISABLED=true: platform admin sign-in code is being skipped');
@@ -320,7 +371,7 @@ export class AuthService {
     };
 
     return {
-      accessToken: this.jwtService.sign(payload),
+      accessToken: this.signToken(payload, isPlatformAdmin),
       user: {
         id: staff.id,
         name: staff.name,
@@ -331,6 +382,9 @@ export class AuthService {
         platformPermissions: isPlatformAdmin ? resolvePlatformPermissions(staff.platformRole, staff.platformPermissions) : [],
         organizationId: staff.organizationId,
         restaurantId: staff.restaurantId,
+        mustChangePassword: Boolean(staff.mustChangePassword),
+        totpEnabled: Boolean(staff.totpEnabled),
+        mustEnrollTotp: Boolean(isPlatformAdmin && !staff.totpEnabled && getSetting<boolean>('security.adminTotpRequired') === true),
         restaurantSlug: outlets[0]?.slug || null,
         organizationName: organization?.name || null,
       },
@@ -451,6 +505,8 @@ export class AuthService {
         staff.isPlatformAdmin || staff.role === StaffRole.PLATFORM_SUPER_ADMIN ? resolvePlatformPermissions(staff.platformRole, staff.platformPermissions) : [],
       organizationId: staff.organizationId,
       restaurantId: staff.restaurantId,
+      mustChangePassword: Boolean(staff.mustChangePassword),
+      totpEnabled: Boolean(staff.totpEnabled),
       lastLoginAt: staff.lastLoginAt,
     };
   }
@@ -459,9 +515,13 @@ export class AuthService {
   async updateProfile(userId: string, dto: { name?: string; phone?: string }) {
     const staff = await this.staffRepo.findOne({ where: { id: userId } });
     if (!staff) throw new UnauthorizedException('User account no longer exists');
+    const before = { name: staff.name, phoneSet: Boolean(staff.phone) };
     if (dto.name !== undefined) staff.name = dto.name.trim().slice(0, 120) || staff.name;
     if (dto.phone !== undefined) staff.phone = dto.phone.trim().slice(0, 30) || null;
-    await this.staffRepo.save(staff);
+    await this.staffRepo.manager.transaction(async (em) => {
+      await em.getRepository(Staff).save(staff);
+      await this.auditAccount(staff, 'PROFILE_UPDATED', 'Updated their name or phone number', { before, after: { name: staff.name, phoneSet: Boolean(staff.phone) } }, em);
+    });
     return this.me(userId);
   }
 
@@ -475,11 +535,16 @@ export class AuthService {
     if (currentPassword === newPassword) {
       throw new BadRequestException('Choose a new password that differs from the current one');
     }
+    assertPasswordAllowed(newPassword, staff);
+    staff.mustChangePassword = false;
     staff.passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
     staff.passwordChangedAt = new Date();
     staff.failedLoginCount = 0;
     staff.lockedUntil = null;
-    await this.staffRepo.save(staff);
+    await this.staffRepo.manager.transaction(async (em) => {
+      await em.getRepository(Staff).save(staff);
+      await this.auditAccount(staff, 'PASSWORD_CHANGED', 'Changed their own password; every other session was signed out', null, em);
+    });
     // fresh token so the caller stays signed in on this device
     const payload = {
       sub: staff.id,
@@ -489,7 +554,7 @@ export class AuthService {
       organizationId: staff.organizationId,
       restaurantId: staff.restaurantId,
     };
-    return { accessToken: this.jwtService.sign(payload), message: 'Password updated. Other devices were signed out.' };
+    return { accessToken: this.signToken(payload, Boolean(payload.isPlatformAdmin)), message: 'Password updated. Other devices were signed out.' };
   }
 
   /** Email verification on self-service sign-up: opt-in, and only enforced while a code can be delivered. */
@@ -594,6 +659,11 @@ export class AuthService {
         outOfStockNotification: true,
       });
       const savedOutlet = await queryRunner.manager.save(Restaurant, outlet);
+      await this.auditService?.record({
+        restaurantId: savedOutlet.id, organizationId: savedOrg.id, entityType: 'ORGANIZATION', entityId: savedOrg.id, action: 'ORGANIZATION_SIGNED_UP',
+        staffId: savedSuperOwner.id, staffName: savedSuperOwner.name, staffRole: savedSuperOwner.role, staffEmail: savedSuperOwner.email,
+        metadata: { brand: savedOrg.name, outlet: savedOutlet.name, slug: savedOutlet.slug, emailVerified: this.signupOtpRequired() },
+      }, queryRunner.manager);
 
       // 6. Generate Batch Tables (Indoor & Outdoor)
       const indoorCount = Math.max(1, dto.indoorTableCount ?? 12);
@@ -759,6 +829,7 @@ export class AuthService {
           name: dto.storeManager.name || 'Store Manager',
           email: mgrEmail,
           passwordHash: await bcrypt.hash(dto.storeManager.password, BCRYPT_COST),
+          mustChangePassword: true,
           role: StaffRole.STORE_MANAGER,
           organizationId: savedOrg.id,
           restaurantId: savedOutlet.id,
@@ -849,7 +920,10 @@ export class AuthService {
       // Store deterministic SHA-256 hash with 1 hour expiration
       staff.resetTokenHash = tokenHash;
       staff.resetTokenExpiresAt = new Date(Date.now() + 60 * 60 * 1000);
-      await this.staffRepo.save(staff);
+      await this.staffRepo.manager.transaction(async (em) => {
+        await em.getRepository(Staff).save(staff);
+        await this.auditAccount(staff, 'PASSWORD_RESET_REQUESTED', 'A password reset link was requested', null, em);
+      });
 
       // Build reset URL strictly from validated environment configuration (preventing Host header poisoning)
       const frontendBaseUrl =
@@ -916,6 +990,8 @@ export class AuthService {
       throw new BadRequestException('Invalid or expired password reset token');
     }
 
+    assertPasswordAllowed(newPassword, staff);
+    staff.mustChangePassword = false;
     staff.passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
     staff.passwordChangedAt = new Date(); // signs out every existing session
     staff.failedLoginCount = 0;
@@ -923,7 +999,10 @@ export class AuthService {
     // Invalidate token immediately to prevent reuse
     staff.resetTokenHash = null;
     staff.resetTokenExpiresAt = null;
-    await this.staffRepo.save(staff);
+    await this.staffRepo.manager.transaction(async (em) => {
+      await em.getRepository(Staff).save(staff);
+      await this.auditAccount(staff, 'PASSWORD_RESET_COMPLETED', 'Chose a new password using a reset link; every session was signed out', null, em);
+    });
 
     return {
       success: true,

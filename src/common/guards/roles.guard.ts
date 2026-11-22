@@ -8,6 +8,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import { ROLES_KEY } from '../decorators/roles.decorator.js';
 import { StaffRole } from '../enums/index.js';
+import { assertPlatformMerchantAccess } from './platform-merchant-access.js';
 
 @Injectable()
 export class RolesGuard implements CanActivate {
@@ -29,10 +30,7 @@ export class RolesGuard implements CanActivate {
     }
 
     if (user.isPlatformAdmin === true || user.role === StaffRole.PLATFORM_SUPER_ADMIN) {
-      const m = String(context.switchToHttp().getRequest().method || 'GET').toUpperCase();
-      if (m !== 'GET' && m !== 'HEAD' && m !== 'OPTIONS' && !(user.platformPermissions || []).includes('merchant.operate')) {
-        throw new ForbiddenException('Access denied: your platform role is read-only inside restaurant consoles');
-      }
+      assertPlatformMerchantAccess(user, context.switchToHttp().getRequest().method);
       return true;
     }
 

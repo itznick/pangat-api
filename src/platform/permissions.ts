@@ -23,11 +23,16 @@ export const PERMISSION_CATALOG: { key: string; label: string; group: string }[]
   { key: 'settings.view', label: 'View platform settings', group: 'Platform' },
   { key: 'settings.manage', label: 'Change settings, feature access & maintenance', group: 'Platform' },
   { key: 'exports.manage', label: 'Export restaurant data', group: 'Platform' },
+  { key: 'privacy.view', label: 'View privacy requests & consent records', group: 'Compliance' },
+  { key: 'privacy.manage', label: 'Handle privacy requests (access, correction, erasure, grievances)', group: 'Compliance' },
+  { key: 'merchant.view', label: 'Open restaurant consoles (sees customer details)', group: 'Platform' },
   { key: 'merchant.operate', label: 'Make changes inside a restaurant console', group: 'Platform' },
 ];
 
 export const ALL_PERMISSIONS = PERMISSION_CATALOG.map((p) => p.key);
-const views = ALL_PERMISSIONS.filter((p) => p.endsWith('.view'));
+// Read-only roles get exactly what the job needs. Audit, settings, monitoring and the user directory are
+// deliberately NOT in the analyst preset: they expose people's details and security evidence.
+const ANALYST_VIEWS = ['dashboard.view', 'restaurants.view', 'subscriptions.view', 'payments.view'];
 
 export const PLATFORM_ROLES: Record<string, { label: string; description: string; permissions: string[] }> = {
   OWNER: { label: 'Owner', description: 'Full control, including administrators and settings', permissions: ALL_PERMISSIONS },
@@ -39,17 +44,25 @@ export const PLATFORM_ROLES: Record<string, { label: string; description: string
   FINANCE: {
     label: 'Finance',
     description: 'Billing, subscriptions and financial reports',
-    permissions: ['dashboard.view', 'restaurants.view', 'subscriptions.view', 'subscriptions.manage', 'payments.view', 'payments.export', 'audit.view'],
+    permissions: ['dashboard.view', 'restaurants.view', 'subscriptions.view', 'subscriptions.manage', 'payments.view', 'payments.export'],
   },
   SUPPORT: {
     label: 'Support',
     description: 'Helps restaurants: tickets, account issues, read-only visibility',
-    permissions: ['dashboard.view', 'restaurants.view', 'subscriptions.view', 'users.view', 'users.manage', 'support.view', 'support.manage', 'notifications.view', 'monitoring.view'],
+    permissions: ['dashboard.view', 'restaurants.view', 'merchant.view', 'subscriptions.view', 'users.view', 'users.manage', 'support.view', 'support.manage', 'notifications.view', 'monitoring.view'],
   },
-  ANALYST: { label: 'Read-only analyst', description: 'Can look at everything, change nothing', permissions: views },
+  ANALYST: { label: 'Read-only analyst', description: 'Business numbers only: restaurants, subscriptions and payments. Cannot change anything', permissions: ANALYST_VIEWS },
+  COMPLIANCE: {
+    label: 'Compliance / Grievance officer',
+    description: 'Handles privacy requests and complaints; can read the audit log. Cannot change billing, settings or accounts',
+    permissions: ['dashboard.view', 'privacy.view', 'privacy.manage', 'audit.view', 'restaurants.view'],
+  },
 };
 
 export function resolvePlatformPermissions(role: string | null | undefined, explicit?: string[] | null): string[] {
   if (Array.isArray(explicit) && explicit.length > 0) return explicit.filter((p) => ALL_PERMISSIONS.includes(p));
-  return PLATFORM_ROLES[role || 'OWNER']?.permissions ?? PLATFORM_ROLES.OWNER.permissions;
+  // Accounts created before roles existed have no role at all and were always full administrators.
+  if (role === null || role === undefined || role === '') return PLATFORM_ROLES.OWNER.permissions;
+  // Anything else must be a known role. An unknown or misspelt role gets NOTHING (fail closed), never full access.
+  return PLATFORM_ROLES[role]?.permissions ?? [];
 }

@@ -1,3 +1,4 @@
+import { IsAcceptablePassword } from '../../common/security/password-policy.js';
 import { IsEmail, IsNotEmpty, IsString, MinLength } from 'class-validator';
 
 export class RequestPasswordResetDto {
@@ -12,6 +13,6 @@ export class ResetPasswordDto {
   token: string;
 
   @IsString()
-  @MinLength(8, { message: 'Password must be at least 8 characters' })
+  @IsAcceptablePassword()
   newPassword: string;
 }

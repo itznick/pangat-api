@@ -1,8 +1,14 @@
+import { SlidingWindowLimiter } from '../common/security/sliding-window.js';
+import { issueBillNumber, issueCreditNote } from '../billing/document-numbers.js';
+import { PRIVACY_POLICY_VERSION } from '../platform/compliance.js';
+import { assertPlatformMerchantAccess } from '../common/guards/platform-merchant-access.js';
 import {
   Injectable,
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Optional,
 } from '@nestjs/common';
 import { getOrderingStatus, resolveOperations } from '../restaurants/operations.js';
@@ -35,6 +41,10 @@ import {
 import { EventsGateway } from '../events/events.gateway.js';
 import { AuditService } from '../audit/audit.service.js';
 import { InventoryService } from '../inventory/inventory.service.js';
+
+/** Public ordering needs no sign-in, so a flood from one place must not drown an outlet's kitchen. Real service never comes near these. */
+const outletOrderLimiter = new SlidingWindowLimiter(Number(process.env.PUBLIC_ORDER_BURST_PER_OUTLET) || 60, 5 * 60_000);
+const tableOrderLimiter = new SlidingWindowLimiter(Number(process.env.PUBLIC_ORDER_BURST_PER_TABLE) || 6, 5 * 60_000);
 
 @Injectable()
 export class OrdersService {
@@ -78,6 +88,11 @@ export class OrdersService {
     if (!dto.items || dto.items.length === 0) {
       throw new BadRequestException('Order must contain at least one item');
     }
+
+    // Flood protection (see limiter definitions above)
+    const tooBusy = () => new HttpException('This outlet is receiving a very high number of orders right now. Please ask a staff member to take your order.', HttpStatus.TOO_MANY_REQUESTS);
+    if (!outletOrderLimiter.allow(restaurant.id)) throw tooBusy();
+    if (dto.tableNumber && !tableOrderLimiter.allow(`${restaurant.id}:${String(dto.tableNumber).trim().toUpperCase()}`)) throw tooBusy();
 
     // Platform-wide switch (incident response) and per-restaurant feature access
     if (getSetting<boolean>('general.publicOrderingEnabled') === false) {
@@ -186,6 +201,11 @@ export class OrdersService {
     }
 
     // Validation for Takeaway and Delivery customer details
+    // DPDP: personal details are only collected from someone who has accepted the privacy notice, and we keep the proof
+    const hasPersonalData = Boolean(dto.customerName?.trim() || dto.customerPhone?.trim() || dto.deliveryAddress?.trim());
+    if (hasPersonalData && dto.consentAccepted !== true) {
+      throw new BadRequestException('Please accept the Privacy Notice to continue. We use your name and phone only to prepare and deliver your order.');
+    }
     if (orderType === OrderType.TAKEAWAY && (!dto.customerName || !dto.customerName.trim())) {
       throw new BadRequestException('Customer name is required for takeaway / parcel pickup');
     }
@@ -313,6 +333,8 @@ export class OrdersService {
       restaurantId: restaurant.id,
       orderType,
       tableNumber: finalTableNumber,
+      consentVersion: hasPersonalData ? PRIVACY_POLICY_VERSION : null,
+      consentAt: hasPersonalData ? new Date() : null,
       customerName: dto.customerName ? dto.customerName.trim() : null,
       customerPhone: dto.customerPhone ? dto.customerPhone.trim() : null,
       deliveryAddress: dto.deliveryAddress ? dto.deliveryAddress.trim() : null,
@@ -459,6 +481,49 @@ export class OrdersService {
     return order;
   }
 
+  /**
+   * The printable tax invoice for one order, computed from the stored amounts (never recomputed from today's menu or rates).
+   * Same access rules as the order itself: staff of the outlet, or the diner holding the tracking token. The kitchen role never gets bills.
+   */
+  async getBill(idOrToken: string, token: string | undefined, user?: any) {
+    if (user && user.role === StaffRole.CHEF && !user.isPlatformAdmin) {
+      throw new ForbiddenException('Bills are not available to the kitchen role');
+    }
+    const order: any = await this.findOrderForCaller(idOrToken, token, user);
+    const r = order.restaurant ?? (await this.restaurantRepo.findOne({ where: { id: order.restaurantId } }));
+    const money = (n: unknown) => Math.round(Number(n || 0) * 100) / 100;
+    const taxable = money(order.subtotal);
+    const gst = money(order.gstAmount);
+    const cgst = money(gst / 2); // intra-state supply: the GST is split equally between CGST and SGST
+    const creditNotes = await this.orderRepo.manager.query(
+      `SELECT number, amount, reason, issued_at AS "issuedAt" FROM tax_documents WHERE order_id = $1 AND kind = 'CREDIT_NOTE' ORDER BY issued_at ASC`,
+      [order.id],
+    );
+    return {
+      status: order.billNumber ? 'ISSUED' : 'PROVISIONAL',
+      billNumber: order.billNumber ?? null,
+      issuedAt: order.billIssuedAt ?? null,
+      restaurant: {
+        name: r?.name, branchArea: r?.branchArea ?? null, phone: r?.phone ?? null,
+        gstin: r?.gstin ?? null, fssaiLicense: r?.fssaiLicense ?? null, hsnSac: r?.hsnSac || '9963',
+      },
+      order: { id: order.id, type: order.orderType, table: order.tableNumber ?? null, createdAt: order.createdAt, customerName: order.customerName ?? null },
+      items: (order.items || []).map((i: any) => {
+        const mods = Array.isArray(i.selectedModifiers) ? i.selectedModifiers : [];
+        const unit = money(Number(i.price) + mods.reduce((a: number, m: any) => a + Number(m.price || 0), 0));
+        return { name: i.name, quantity: Number(i.quantity), unitPrice: unit, amount: money(unit * Number(i.quantity)), modifiers: mods.map((m: any) => m.name) };
+      }),
+      taxableValue: taxable,
+      gst: { ratePercent: taxable > 0 ? Math.round((gst / taxable) * 10000) / 100 : 0, cgst, sgst: money(gst - cgst), total: gst },
+      serviceCharge: money(order.serviceChargeAmount),
+      deliveryFee: money(order.deliveryFee),
+      total: money(order.totalAmount),
+      payment: { method: order.paymentMethod, status: order.paymentStatus, settledAt: order.settledAt ?? null },
+      refundedAmount: money(order.refundAmount),
+      creditNotes: creditNotes.map((c: any) => ({ number: c.number, amount: money(c.amount), reason: c.reason, issuedAt: c.issuedAt })),
+    };
+  }
+
   async findOrderForCaller(
     idOrToken: string,
     tokenParam?: string,
@@ -485,6 +550,7 @@ export class OrdersService {
       const isPlatformAdmin =
         user.isPlatformAdmin === true || user.role === StaffRole.PLATFORM_SUPER_ADMIN;
       if (isPlatformAdmin) {
+        assertPlatformMerchantAccess(user, 'GET');
         return order;
       }
       if (user.restaurantId && user.restaurantId === order.restaurantId) {
@@ -798,7 +864,43 @@ export class OrdersService {
       order.paymentStatus = PaymentStatus.FAILED;
     }
 
-    const saved = await this.orderRepo.save(order);
+    // The order change and its audit records are ONE transaction: a cancellation can never exist without its record.
+    const saved = await this.orderRepo.manager.transaction(async (em) => {
+      const persisted = await em.getRepository(Order).save(order);
+      await this.auditService.record({
+        restaurantId: order.restaurantId,
+        entityType: 'ORDER',
+        entityId: order.id,
+        action: AuditAction.ORDER_CANCELLED,
+        staffId: staffUser?.id || null,
+        staffName: staffUser?.name || null,
+        staffRole: staffUser?.role || null,
+        staffEmail: staffUser?.email || null,
+        reason: fullReason,
+        metadata: {
+          previousStatus,
+          newStatus: OrderStatus.CANCELLED,
+          previousPaymentStatus,
+          newPaymentStatus: persisted.paymentStatus,
+          totalAmount: persisted.totalAmount,
+        },
+      }, em);
+      if (previousPaymentStatus === PaymentStatus.PAID) {
+        await this.auditService.record({
+          restaurantId: order.restaurantId,
+          entityType: 'ORDER',
+          entityId: order.id,
+          action: AuditAction.ORDER_REFUND_REQUESTED,
+          staffId: staffUser?.id || null,
+          staffName: staffUser?.name || null,
+          staffRole: staffUser?.role || null,
+          staffEmail: staffUser?.email || null,
+          reason: `Auto refund request generated from order cancellation: ${fullReason}`,
+          metadata: { refundableAmount: persisted.totalAmount },
+        }, em);
+      }
+      return persisted;
+    });
 
     // Reverse stock exactly once if an order is cancelled before PREPARING.
     // After PREPARING begins, NO automatic stock restoration is permitted.
@@ -809,40 +911,6 @@ export class OrdersService {
         staffUser,
         fullReason,
       );
-    }
-
-    // Audit record for cancellation
-    await this.auditService.record({
-      restaurantId: order.restaurantId,
-      entityType: 'ORDER',
-      entityId: order.id,
-      action: AuditAction.ORDER_CANCELLED,
-      staffId: staffUser?.id || null,
-      staffName: staffUser?.name || null,
-      staffRole: staffUser?.role || null,
-      reason: fullReason,
-      metadata: {
-        previousStatus,
-        newStatus: OrderStatus.CANCELLED,
-        previousPaymentStatus,
-        newPaymentStatus: saved.paymentStatus,
-      },
-    });
-
-    if (previousPaymentStatus === PaymentStatus.PAID) {
-      await this.auditService.record({
-        restaurantId: order.restaurantId,
-        entityType: 'ORDER',
-        entityId: order.id,
-        action: AuditAction.ORDER_REFUND_REQUESTED,
-        staffId: staffUser?.id || null,
-        staffName: staffUser?.name || null,
-        staffRole: staffUser?.role || null,
-        reason: `Auto refund request generated from order cancellation: ${fullReason}`,
-        metadata: {
-          refundableAmount: saved.totalAmount,
-        },
-      });
     }
 
     let restaurantSlug: string | undefined = order.restaurant?.slug;
@@ -866,6 +934,12 @@ export class OrdersService {
     const order = await this.findOne(id);
     if (authorizedRestaurantId && order.restaurantId !== authorizedRestaurantId) {
       throw new ForbiddenException('Access denied: Order does not belong to authorized restaurant');
+    }
+
+    // A paid bill has a legal number and a tax amount: it must not change. Cancel it (which starts a refund and a credit note)
+    // and place a new order, or add the extra items as a separate order.
+    if (order.paymentStatus === PaymentStatus.PAID || order.billNumber) {
+      throw new BadRequestException('This bill is already paid and numbered, so its items cannot be changed. Cancel it for a refund and place a new order, or add the extra items as a separate order.');
     }
 
     // Rule 1: Option A (Conservative): Staff can only edit items while order is in RECEIVED stage
@@ -1075,25 +1149,33 @@ export class OrdersService {
       order.paymentStatus = PaymentStatus.PARTIALLY_REFUNDED;
     }
 
-    const saved = await this.orderRepo.save(order);
-
-    await this.auditService.record({
-      restaurantId: order.restaurantId,
-      entityType: 'ORDER',
-      entityId: order.id,
-      action: AuditAction.ORDER_REFUND_SETTLED,
-      staffId: staffUser?.id || null,
-      staffName: staffUser?.name || null,
-      staffRole: staffUser?.role || null,
+    // Refund state and its audit record are ONE transaction (money must never move without a record)
+    const saved = await this.orderRepo.manager.transaction(async (em) => {
+      // Money going back needs a credit note that refers to the original bill (CGST Rule 53), numbered in its own series
+      const creditNoteNumber = await issueCreditNote(em, order, refundAmount, dto.reason, staffUser);
+      const persisted = await em.getRepository(Order).save(order);
+      await this.auditService.record({
+        restaurantId: order.restaurantId,
+        entityType: 'ORDER',
+        entityId: order.id,
+        action: AuditAction.ORDER_REFUND_SETTLED,
+        staffId: staffUser?.id || null,
+        staffName: staffUser?.name || null,
+        staffRole: staffUser?.role || null,
+        staffEmail: staffUser?.email || null,
       reason: dto.reason,
       metadata: {
         idempotencyKey: dto.idempotencyKey,
+        creditNoteNumber,
+        billNumber: order.billNumber,
         refundMethod: dto.refundMethod,
         refundAmount,
         totalRefunded: nextTotalRefunded,
         providerReference: dto.providerReference || null,
-        finalPaymentStatus: saved.paymentStatus,
+        finalPaymentStatus: persisted.paymentStatus,
       },
+      }, em);
+      return persisted;
     });
 
     return saved;
@@ -1107,6 +1189,14 @@ export class OrdersService {
 
     if (order.orderStatus === OrderStatus.CANCELLED) {
       throw new BadRequestException('Cannot mark a CANCELLED order as paid.');
+    }
+    // Separation of duties: a steward takes orders; settling money is the cashier's, manager's or owner's job
+    // unless this outlet has deliberately allowed it (Settings → Operations).
+    if (actor?.role === StaffRole.STEWARD) {
+      const outlet = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });
+      if (!resolveOperations(outlet?.operations).stewardCanSettle) {
+        throw new ForbiddenException('Settling a bill is limited to the cashier, manager or owner at this outlet.');
+      }
     }
     // Idempotent: a second tap (or a retry) must not move the settlement time or re-emit events
     if (order.paymentStatus === PaymentStatus.PAID) {
@@ -1129,18 +1219,24 @@ export class OrdersService {
     const previous = order.paymentStatus;
     order.paymentStatus = PaymentStatus.PAID;
     order.settledAt = new Date();
-    const saved = await this.orderRepo.save(order);
-
-    await this.auditService.record({
-      restaurantId: order.restaurantId,
-      entityType: 'ORDER',
-      entityId: order.id,
-      action: 'PAYMENT_MARKED_PAID',
-      staffId: actor?.id,
-      staffName: actor?.name,
-      staffRole: actor?.role,
-      metadata: { from: previous, method: order.paymentMethod, amount: order.totalAmount },
-    }).catch(() => undefined);
+    // Payment and its audit record are ONE transaction; a failed audit write now fails the request instead of being swallowed
+    const saved = await this.orderRepo.manager.transaction(async (em) => {
+      // The legal bill number is issued with the payment, in the same transaction (see billing/document-numbers.ts)
+      await issueBillNumber(em, order, actor, order.settledAt ?? new Date());
+      const persisted = await em.getRepository(Order).save(order);
+      await this.auditService.record({
+        restaurantId: order.restaurantId,
+        entityType: 'ORDER',
+        entityId: order.id,
+        action: 'PAYMENT_MARKED_PAID',
+        staffId: actor?.id,
+        staffName: actor?.name,
+        staffRole: actor?.role,
+        staffEmail: actor?.email,
+        metadata: { from: previous, method: order.paymentMethod, amount: order.totalAmount, billNumber: order.billNumber },
+      }, em);
+      return persisted;
+    });
 
     await this.syncTableStatus(order, restaurantSlug);
 

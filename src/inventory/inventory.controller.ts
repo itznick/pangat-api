@@ -187,7 +187,8 @@ export class InventoryController {
    * Create or update recipe for a menu item.
    */
   @Post('recipes')
-  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER, StaffRole.CHEF)
+  // Recipes decide how much stock every sale deducts, so changing them is a management decision, not a kitchen one
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
   async upsertRecipe(
     @Query('restaurantId') restaurantId: string,
     @Body() dto: CreateRecipeDto,

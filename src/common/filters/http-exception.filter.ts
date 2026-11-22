@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { reportServerError } from '../../platform/monitoring.service.js';
+import { currentRequest } from '../request-context.js';
 
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
@@ -78,6 +79,8 @@ export class HttpExceptionFilter implements ExceptionFilter {
       error:      errorLabel,
       message:    messages,
       ...(code ? { code } : {}),
+      // Quote this to support: it finds the exact request in the error log and audit log
+      requestId:  currentRequest()?.requestId,
       path:       req.url,
       timestamp:  new Date().toISOString(),
     });

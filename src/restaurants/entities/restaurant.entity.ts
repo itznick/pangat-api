@@ -61,6 +61,14 @@ export class Restaurant {
   @Column({ name: 'gstin', type: 'varchar', length: 20, nullable: true })
   gstin: string | null;
 
+  /** 14-digit FSSAI licence / registration number: must be printed on every bill */
+  @Column({ name: 'fssai_license', type: 'varchar', length: 14, nullable: true })
+  fssaiLicense: string | null;
+
+  /** Short code in this outlet's bill numbers; created on first use and never changed */
+  @Column({ name: 'invoice_prefix', type: 'varchar', length: 4, nullable: true })
+  invoicePrefix: string | null;
+
   /** HSN / SAC code for F&B services */
   @Column({ name: 'hsn_sac', length: 10, default: '9963' })
   hsnSac: string;

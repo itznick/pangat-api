@@ -70,6 +70,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       platformPermissions: isPlatformAdmin ? resolvePlatformPermissions(staff.platformRole, staff.platformPermissions) : [],
       organizationId: staff.organizationId,
       restaurantId: staff.restaurantId,
+      mustChangePassword: Boolean(staff.mustChangePassword),
+      mustEnrollTotp: Boolean(isPlatformAdmin && !staff.totpEnabled && getSetting<boolean>('security.adminTotpRequired') === true),
     };
   }
 }

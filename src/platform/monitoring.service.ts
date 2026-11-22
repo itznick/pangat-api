@@ -2,6 +2,7 @@ import { Injectable, Logger, NestMiddleware, OnModuleInit } from '@nestjs/common
 import { DataSource } from 'typeorm';
 import * as os from 'os';
 import { EventsGateway } from '../events/events.gateway.js';
+import { currentRequest } from '../common/request-context.js';
 import { getSetting } from './settings.service.js';
 import { resolveEmailProvider } from '../common/services/email-delivery.service.js';
 
@@ -64,10 +65,10 @@ export class RequestMetricsMiddleware implements NestMiddleware {
 }
 
 // ── server error log (5xx) ────────────────────────────────────────────────────
-type Sink = (e: { method: string; url: string; status: number; error: Error; userId?: string | null; orgId?: string | null }) => void;
+type Sink = (e: { method: string; url: string; status: number; error: Error; userId?: string | null; orgId?: string | null; requestId?: string | null }) => void;
 let sink: Sink | null = null;
 /** Called by the global exception filter for every 5xx. */
-export const reportServerError: Sink = (e) => sink?.(e);
+export const reportServerError: Sink = (e) => sink?.({ requestId: currentRequest()?.requestId ?? null, ...e });
 
 export function redact(text: string, max: number): string {
   return String(text || '')
@@ -87,8 +88,8 @@ export class ErrorLogService implements OnModuleInit {
     sink = (e) => {
       void this.ds
         .query(
-          `INSERT INTO error_logs (method, path, status, error_name, message, stack, user_id, organization_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-          [e.method?.slice(0, 10), cleanPath(e.url || ''), e.status, (e.error?.name || 'Error').slice(0, 100), redact(e.error?.message, 400), redact(e.error?.stack || '', 1500), e.userId ?? null, e.orgId ?? null],
+          `INSERT INTO error_logs (method, path, status, error_name, message, stack, user_id, organization_id, request_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [e.method?.slice(0, 10), cleanPath(e.url || ''), e.status, (e.error?.name || 'Error').slice(0, 100), redact(e.error?.message, 400), redact(e.error?.stack || '', 1500), e.userId ?? null, e.orgId ?? null, e.requestId ?? null],
         )
         .catch((err) => this.logger.debug(`error log write failed: ${err.message}`));
     };
@@ -238,7 +239,7 @@ export class MonitoringService {
     if (q.from) { p.push(q.from); c.push(`created_at >= $${p.length}`); }
     const where = c.length ? `WHERE ${c.join(' AND ')}` : '';
     const [items, total] = await Promise.all([
-      this.ds.query(`SELECT id, method, path, status, error_name, message, stack, created_at FROM error_logs ${where} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${(page - 1) * limit}`, p),
+      this.ds.query(`SELECT id, method, path, status, error_name, message, stack, request_id, created_at FROM error_logs ${where} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${(page - 1) * limit}`, p),
       this.ds.query(`SELECT COUNT(*)::int AS n FROM error_logs ${where}`, p),
     ]);
     return { items, total: total[0].n, page, limit };

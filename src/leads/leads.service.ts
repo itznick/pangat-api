@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { PRIVACY_POLICY_VERSION } from '../platform/compliance.js';
 import { Lead } from './entities/lead.entity.js';
 import { CreateLeadDto } from './dto/create-lead.dto.js';
 import { UpdateLeadDto } from './dto/update-lead.dto.js';
@@ -20,6 +21,8 @@ export class LeadsService {
       city: createLeadDto.city,
       tableCount: createLeadDto.tableCount || '10-20',
       notes: createLeadDto.notes || null,
+      consentVersion: PRIVACY_POLICY_VERSION,
+      consentAt: new Date(),
     });
     return this.leadRepo.save(lead);
   }

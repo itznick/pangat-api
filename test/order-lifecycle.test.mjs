@@ -25,6 +25,8 @@ function createMockOrdersService(initialOrder, options = {}) {
       currentOrder = { ...order };
       return currentOrder;
     },
+    // Money actions save the order and its audit record in one transaction
+    manager: { transaction: (cb) => mockDataSource.transaction(cb) },
   };
 
   const mockOrderItemRepo = {
@@ -95,6 +97,14 @@ function createMockOrdersService(initialOrder, options = {}) {
           return [];
         },
         delete: async () => {},
+        // statutory numbering: outlet code + next serial
+        query: async (sql) => (/invoice_prefix FROM restaurants/.test(sql) ? [{ invoice_prefix: 'T001' }] : /RETURNING last_value/.test(sql) ? [{ last_value: 1 }] : []),
+        getRepository: () => ({
+          save: async (val) => {
+            currentOrder = { ...val };
+            return currentOrder;
+          },
+        }),
         create: (entity, dto) => ({ ...dto, id: 'item-uuid-' + Math.random().toString(36).slice(2, 6) }),
         save: async (entity, val) => {
           if (Array.isArray(val)) return val;

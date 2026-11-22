@@ -13,6 +13,7 @@ import { TableStatus, StaffRole } from '../common/enums/index.js';
 import { CreateOutletDto } from './dto/create-outlet.dto.js';
 import { resolveFeatureAccess } from '../platform/features.js';
 import { EntitlementService } from '../subscriptions/entitlement.service.js';
+import { AuditService } from '../audit/audit.service.js';
 
 @Injectable()
 export class OrganizationsService {
@@ -24,6 +25,8 @@ export class OrganizationsService {
     private readonly dataSource: DataSource,
     @Optional()
     private readonly entitlementService?: EntitlementService,
+    @Optional()
+    private readonly auditService?: AuditService,
   ) {}
 
   async listOutlets(user: any, requestedOrgId?: string): Promise<Restaurant[]> {
@@ -143,6 +146,12 @@ export class OrganizationsService {
         );
       }
       await queryRunner.manager.save(Table, tables);
+
+      await this.auditService?.record({
+        restaurantId: savedOutlet.id, organizationId: orgId, entityType: 'RESTAURANT', entityId: savedOutlet.id, action: 'OUTLET_CREATED',
+        staffId: user?.id, staffName: user?.name, staffRole: user?.role, staffEmail: user?.email,
+        metadata: { name: savedOutlet.name, slug: savedOutlet.slug, tables: tableCount },
+      }, queryRunner.manager);
 
       await queryRunner.commitTransaction();
       return savedOutlet;

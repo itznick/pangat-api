@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { StaffRole } from '../enums/index.js';
+import { assertPlatformMerchantAccess } from './platform-merchant-access.js';
 import { Restaurant } from '../../restaurants/entities/restaurant.entity.js';
 import { Order } from '../../orders/entities/order.entity.js';
 import { Table } from '../../tables/entities/table.entity.js';
@@ -31,10 +32,7 @@ export class TenantGuard implements CanActivate {
 
     // Platform Super Admin bypasses tenant scoping
     if (user.isPlatformAdmin === true || user.role === StaffRole.PLATFORM_SUPER_ADMIN) {
-      const m = String(request.method || 'GET').toUpperCase();
-      if (m !== 'GET' && m !== 'HEAD' && m !== 'OPTIONS' && !(user.platformPermissions || []).includes('merchant.operate')) {
-        throw new ForbiddenException('Access denied: your platform role is read-only inside restaurant consoles');
-      }
+      assertPlatformMerchantAccess(user, request.method);
       return true;
     }
 

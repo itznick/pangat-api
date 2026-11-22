@@ -902,16 +902,8 @@ export class InventoryService {
 
       await queryRunner.commitTransaction();
 
-      if (recordedMovements.length > 0) {
-        await this.auditService.record({
-          restaurantId,
-          entityType: 'Order',
-          entityId: orderId,
-          action: AuditAction.STOCK_DEDUCTED,
-          reason: `Auto deducted ${recordedMovements.length} ingredients for confirmed order ${orderId}`,
-          metadata: { orderId, deductedCount: recordedMovements.length },
-        });
-      }
+      // Automatic deductions are recorded line by line in stock_movements (with the order id): a second summary row in the
+      // audit log only repeated a count and buried the manual changes people actually need to review.
     } catch (err) {
       await queryRunner.rollbackTransaction();
       throw err;
@@ -995,19 +987,7 @@ export class InventoryService {
 
       await queryRunner.commitTransaction();
 
-      if (restoredMovements.length > 0) {
-        await this.auditService.record({
-          restaurantId,
-          entityType: 'Order',
-          entityId: orderId,
-          action: AuditAction.STOCK_RESTORED,
-          staffId: actor?.id,
-          staffName: actor?.name,
-          staffRole: actor?.role,
-          reason: `Stock reversed for cancelled order ${orderId} (${restoredMovements.length} ingredients restored)`,
-          metadata: { orderId, restoredCount: restoredMovements.length },
-        });
-      }
+      // Same for restores: stock_movements holds the detail and the order's own cancellation audit explains why.
     } catch (err) {
       await queryRunner.rollbackTransaction();
       throw err;

@@ -182,7 +182,7 @@ export class PlatformSettingsService implements OnModuleInit, OnModuleDestroy {
       selfSignupEnabled: getSetting<boolean>('general.selfSignupEnabled') !== false,
       compliance: {
         policyVersion: PRIVACY_POLICY_VERSION,
-        legalName: getSetting<string>('compliance.legalName') || 'Pangat',
+        legalName: getSetting<string>('compliance.legalName') || 'Pangat Technologies',
         registeredAddress: getSetting<string | null>('compliance.registeredAddress') ?? null,
         grievanceOfficer: {
           name: getSetting<string>('compliance.grievanceOfficerName') || 'Nikhil Bhamare',

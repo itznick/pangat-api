@@ -72,7 +72,7 @@ export const SETTINGS: SettingDef[] = [
   { key: 'operations.maintenanceStart', group: 'operations', label: 'Scheduled window start', type: 'datetime', default: null, help: 'Optional: maintenance switches on automatically in this window.' },
   { key: 'operations.maintenanceEnd', group: 'operations', label: 'Scheduled window end', type: 'datetime', default: null },
 
-  { key: 'compliance.legalName', group: 'compliance', label: 'Legal name of the business', type: 'string', default: 'Pangat', help: 'Shown on the Privacy Policy and Terms.' },
+  { key: 'compliance.legalName', group: 'compliance', label: 'Legal name of the business', type: 'string', default: 'Pangat Technologies', help: 'Shown on the Privacy Policy and Terms.' },
   { key: 'compliance.registeredAddress', group: 'compliance', label: 'Registered address', type: 'text', default: null, help: 'Shown on the Privacy Policy and Terms when set.' },
   { key: 'compliance.grievanceOfficerName', group: 'compliance', label: 'Grievance officer: name', type: 'string', default: 'Nikhil Bhamare', help: 'Published on the Privacy Policy. People can write to this person about their data.' },
   { key: 'compliance.grievanceOfficerEmail', group: 'compliance', label: 'Grievance officer: email', type: 'email', default: null, help: 'Published on the Privacy Policy and notified of every new privacy request. Set this before launch.' },

@@ -19,6 +19,7 @@ import { CreateStaffDto } from './dto/create-staff.dto.js';
 import { AuditService } from '../audit/audit.service.js';
 import { EntitlementService } from '../subscriptions/entitlement.service.js';
 import { BCRYPT_COST } from '../common/security/passwords.js';
+import { assertPasswordAllowed } from '../common/security/password-policy.js';
 import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 import { renderEmail } from '../common/services/email-template.js';
 
@@ -342,6 +343,7 @@ export class RestaurantsService {
   async createStaff(restaurantId: string, dto: CreateStaffDto, actor?: any) {
     const restaurant = await this.ownedOutlet(restaurantId);
     const email = dto.email.trim().toLowerCase();
+    assertPasswordAllowed(dto.password, { email, name: dto.name });
 
     const existing = await this.staffRepo
       .createQueryBuilder('s')
@@ -368,6 +370,7 @@ export class RestaurantsService {
       name: dto.name.trim(),
       email,
       passwordHash: await bcrypt.hash(dto.password, BCRYPT_COST),
+      mustChangePassword: true, // the owner typed it, so the member must replace it with their own
       role: dto.role,
       phone: dto.phone?.trim() || null,
       organizationId: restaurant.organizationId,
@@ -426,6 +429,7 @@ export class RestaurantsService {
     const staff = await this.staffOfOutlet(restaurantId, staffId);
     const temp = `Pg-${randomBytes(6).toString('base64url')}`;
     staff.passwordHash = await bcrypt.hash(temp, BCRYPT_COST);
+    staff.mustChangePassword = true;
     staff.passwordChangedAt = new Date();
     staff.failedLoginCount = 0;
     staff.lockedUntil = null;

@@ -16,6 +16,7 @@ import {
   ValidateIf,
   Matches,
 } from 'class-validator';
+import { IsAcceptablePassword } from '../../common/security/password-policy.js';
 import { Type } from 'class-transformer';
 
 export class StoreManagerDto {
@@ -51,7 +52,7 @@ export class OnboardDto {
   email: string;
 
   @IsString()
-  @MinLength(8, { message: 'Password must be at least 8 characters' })
+  @IsAcceptablePassword()
   password: string;
 
   /** 6-digit code emailed by POST /auth/signup-otp; required only when email verification on sign-up is switched on */

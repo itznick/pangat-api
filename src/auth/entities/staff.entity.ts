@@ -88,6 +88,10 @@ export class Staff {
   @Column({ name: 'password_changed_at', type: 'timestamp with time zone', nullable: true })
   passwordChangedAt: Date | null;
 
+  /** True after a temporary or someone-else-chosen password: the person must pick their own before doing anything else */
+  @Column({ name: 'must_change_password', type: 'boolean', default: false })
+  mustChangePassword: boolean;
+
   @Column({ name: 'failed_login_count', type: 'int', default: 0 })
   failedLoginCount: number;
 

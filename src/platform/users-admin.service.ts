@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable, NotFoundException 
 import { DataSource } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
+import { assertPasswordAllowed } from '../common/security/password-policy.js';
 import { PasswordLinkService } from '../common/services/password-link.service.js';
 import { AuditActor, PlatformAuditService } from './audit.service.js';
 import { MERCHANT_STAFF_SQL } from './restaurants-admin.service.js';
@@ -132,10 +133,10 @@ export class UsersAdminService {
     const email = dto.email.trim().toLowerCase();
     if ((await this.ds.query('SELECT 1 FROM staff WHERE lower(email) = $1', [email]))[0]) throw new BadRequestException('A user with this email already exists');
     const pw = dto.password?.trim() || tempPassword();
-    if (pw.length < 10) throw new BadRequestException('Password must be at least 10 characters');
+    assertPasswordAllowed(pw, { email, name: dto.name });
     const perms = this.validatePerms(dto.permissions);
     const [row] = await this.ds.query(
-      `INSERT INTO staff (name, email, password_hash, role, is_platform_admin, platform_role, platform_permissions, is_active) VALUES ($1,$2,$3,'PLATFORM_SUPER_ADMIN',true,$4,$5::jsonb,true) RETURNING id`,
+      `INSERT INTO staff (name, email, password_hash, role, is_platform_admin, platform_role, platform_permissions, is_active, must_change_password) VALUES ($1,$2,$3,'PLATFORM_SUPER_ADMIN',true,$4,$5::jsonb,true,true) RETURNING id`,
       [dto.name.trim(), email, await bcrypt.hash(pw, BCRYPT_COST), dto.role, perms ? JSON.stringify(perms) : null],
     );
     await this.audit.record(actor, {

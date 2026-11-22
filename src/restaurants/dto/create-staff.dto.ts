@@ -1,6 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // src/restaurants/dto/create-staff.dto.ts
 // ─────────────────────────────────────────────────────────────────────────────
+import { IsAcceptablePassword } from '../../common/security/password-policy.js';
 import {
   IsString,
   IsNotEmpty,
@@ -32,8 +33,7 @@ export class CreateStaffDto {
   email: string;
 
   @IsString()
-  @MinLength(8, { message: 'Password must be at least 8 characters' })
-  @MaxLength(128)
+  @IsAcceptablePassword()
   password: string;
 
   @IsOptional()

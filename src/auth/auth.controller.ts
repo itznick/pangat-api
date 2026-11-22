@@ -19,6 +19,7 @@ import { OnboardDto } from './dto/onboard.dto.js';
 import { SetupSuperAdminDto } from './dto/setup-super-admin.dto.js';
 import { RequestPasswordResetDto, ResetPasswordDto } from './dto/password-reset.dto.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
+import { IsAcceptablePassword } from '../common/security/password-policy.js';
 import { clientMeta } from '../platform/login-events.js';
 
 export class ChangePasswordDto {
@@ -27,8 +28,7 @@ export class ChangePasswordDto {
   currentPassword: string;
 
   @IsString()
-  @MinLength(8, { message: 'New password must be at least 8 characters' })
-  @MaxLength(128)
+  @IsAcceptablePassword()
   newPassword: string;
 }
 

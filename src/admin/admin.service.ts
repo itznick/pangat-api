@@ -155,6 +155,8 @@ export class AdminService {
         name: dto.ownerFullName.trim(),
         email: dto.email.trim().toLowerCase(),
         passwordHash,
+        // Handed-over passwords (operator-set or the fallback) must be replaced at first sign-in; a welcome link lets the owner choose their own
+        mustChangePassword: !useWelcomeLink,
         role: StaffRole.SUPER_OWNER,
         organizationId: savedOrg.id,
         restaurantId: null,

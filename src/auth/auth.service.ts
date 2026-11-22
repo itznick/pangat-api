@@ -31,6 +31,7 @@ import { MenuItem } from '../menu/entities/menu-item.entity.js';
 import { AttemptLimiter } from '../common/security/attempt-limiter.js';
 import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 import { OtpService } from '../common/services/otp.service.js';
+import { assertPasswordAllowed } from '../common/security/password-policy.js';
 import { AuditService } from '../audit/audit.service.js';
 import { PlatformAuditService } from '../platform/audit.service.js';
 import { currentRequest } from '../common/request-context.js';
@@ -75,6 +76,16 @@ export class AuthService {
       restaurantId: staff.restaurantId, organizationId: staff.organizationId, entityType: 'ACCOUNT', entityId: staff.id, action,
       staffId: staff.id, staffName: staff.name, staffRole: staff.role, staffEmail: staff.email, metadata: { summary, ...(metadata ?? {}) },
     }, em);
+  }
+
+  /**
+   * Platform administrators can open every restaurant's data, so their sessions are short (8 hours by default, ADMIN_JWT_EXPIRATION).
+   * Restaurant staff keep the configured lifetime (JWT_EXPIRATION): a kitchen tablet must not be signed out mid-service.
+   */
+  private signToken(payload: Record<string, unknown>, isPlatformAdmin: boolean): string {
+    return isPlatformAdmin
+      ? this.jwtService.sign(payload, { expiresIn: (process.env.ADMIN_JWT_EXPIRATION || '8h') as any })
+      : this.jwtService.sign(payload);
   }
 
   /** Constant-time comparison so the bootstrap secret cannot be recovered by timing guesses. */
@@ -350,7 +361,7 @@ export class AuthService {
     };
 
     return {
-      accessToken: this.jwtService.sign(payload),
+      accessToken: this.signToken(payload, isPlatformAdmin),
       user: {
         id: staff.id,
         name: staff.name,
@@ -361,6 +372,7 @@ export class AuthService {
         platformPermissions: isPlatformAdmin ? resolvePlatformPermissions(staff.platformRole, staff.platformPermissions) : [],
         organizationId: staff.organizationId,
         restaurantId: staff.restaurantId,
+        mustChangePassword: Boolean(staff.mustChangePassword),
         restaurantSlug: outlets[0]?.slug || null,
         organizationName: organization?.name || null,
       },
@@ -481,6 +493,7 @@ export class AuthService {
         staff.isPlatformAdmin || staff.role === StaffRole.PLATFORM_SUPER_ADMIN ? resolvePlatformPermissions(staff.platformRole, staff.platformPermissions) : [],
       organizationId: staff.organizationId,
       restaurantId: staff.restaurantId,
+      mustChangePassword: Boolean(staff.mustChangePassword),
       lastLoginAt: staff.lastLoginAt,
     };
   }
@@ -509,6 +522,8 @@ export class AuthService {
     if (currentPassword === newPassword) {
       throw new BadRequestException('Choose a new password that differs from the current one');
     }
+    assertPasswordAllowed(newPassword, staff);
+    staff.mustChangePassword = false;
     staff.passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
     staff.passwordChangedAt = new Date();
     staff.failedLoginCount = 0;
@@ -526,7 +541,7 @@ export class AuthService {
       organizationId: staff.organizationId,
       restaurantId: staff.restaurantId,
     };
-    return { accessToken: this.jwtService.sign(payload), message: 'Password updated. Other devices were signed out.' };
+    return { accessToken: this.signToken(payload, Boolean(payload.isPlatformAdmin)), message: 'Password updated. Other devices were signed out.' };
   }
 
   /** Email verification on self-service sign-up: opt-in, and only enforced while a code can be delivered. */
@@ -801,6 +816,7 @@ export class AuthService {
           name: dto.storeManager.name || 'Store Manager',
           email: mgrEmail,
           passwordHash: await bcrypt.hash(dto.storeManager.password, BCRYPT_COST),
+          mustChangePassword: true,
           role: StaffRole.STORE_MANAGER,
           organizationId: savedOrg.id,
           restaurantId: savedOutlet.id,
@@ -961,6 +977,8 @@ export class AuthService {
       throw new BadRequestException('Invalid or expired password reset token');
     }
 
+    assertPasswordAllowed(newPassword, staff);
+    staff.mustChangePassword = false;
     staff.passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
     staff.passwordChangedAt = new Date(); // signs out every existing session
     staff.failedLoginCount = 0;

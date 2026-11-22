@@ -107,6 +107,13 @@ export class RestaurantsController {
     return withMessage(r, 'Temporary password generated. Share it securely; it is shown only once.');
   }
 
+  @Post(':id/staff/:staffId/pin')
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
+  async setStaffPin(@Param('id') id: string, @Param('staffId') staffId: string, @Body() dto: SetKitchenPinDto, @Req() req: any) {
+    return withMessage(await this.restaurantsService.setStaffPin(id, staffId, dto.pin, req.user), 'Personal kitchen PIN saved');
+  }
+
   // ── Kitchen station PIN ──────────────────────────────────────────────────
   @Get(':id/kitchen-pin')
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)

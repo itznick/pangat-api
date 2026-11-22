@@ -440,6 +440,35 @@ export class RestaurantsService {
     return { staffId: staff.id, email: staff.email, temporaryPassword: temp };
   }
 
+  /** True when `pin` already opens another kitchen account at this outlet (a PIN must identify exactly one person). */
+  private async pinInUse(restaurantId: string, pin: string, exceptStaffId?: string): Promise<boolean> {
+    const chefs = await this.staffRepo.find({ where: { restaurantId, role: StaffRole.CHEF } });
+    for (const c of chefs) {
+      if (c.id === exceptStaffId || c.isActive === false) continue;
+      if (c.pinHash && (await bcrypt.compare(pin, c.pinHash))) return true;
+      if (c.pinCode && c.pinCode === pin) return true;
+    }
+    return false;
+  }
+
+  /**
+   * A personal kitchen PIN: the person signs in to the kitchen screen with it and every action is recorded under THEIR name
+   * (the shared station PIN records everything as "Kitchen Station", so nobody can be held to account).
+   */
+  async setStaffPin(restaurantId: string, staffId: string, pin: string, actor?: any) {
+    const staff = await this.staffOfOutlet(restaurantId, staffId);
+    if (staff.role !== StaffRole.CHEF) throw new BadRequestException('Only kitchen (chef) accounts sign in with a PIN');
+    if (!/^\d{4,6}$/.test(pin)) throw new BadRequestException('Kitchen PIN must be 4 to 6 digits');
+    if (await this.pinInUse(restaurantId, pin, staff.id)) throw new BadRequestException('That PIN is already used by someone else at this outlet. Choose another.');
+    staff.pinHash = await bcrypt.hash(pin, BCRYPT_COST);
+    staff.pinCode = null;
+    await this.staffRepo.manager.transaction(async (em) => {
+      await em.getRepository(Staff).save(staff);
+      await this.audit(restaurantId, 'STAFF', staff.id, 'STAFF_PIN_SET', actor, { target: staff.email }, em, staff.organizationId);
+    });
+    return { staffId: staff.id, hasPin: true };
+  }
+
   /** Create or rotate the outlet's kitchen-station PIN (stored hashed on a dedicated CHEF station account). */
   async setKitchenPin(restaurantId: string, pin: string, actor?: any) {
     const restaurant = await this.ownedOutlet(restaurantId);
@@ -455,6 +484,7 @@ export class RestaurantsService {
         restaurantId: restaurant.id,
       });
     }
+    if (await this.pinInUse(restaurant.id, pin, station.id)) throw new BadRequestException('That PIN is already used by someone at this outlet. Choose another.');
     station.pinHash = await bcrypt.hash(pin, BCRYPT_COST);
     station.pinCode = null;
     station.isActive = true;

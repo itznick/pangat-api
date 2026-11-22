@@ -84,3 +84,46 @@ describe('platform administrator sessions', () => {
     svc.signToken({}, false); assert.equal(calls.pop(), undefined)
   })
 })
+
+describe('personal kitchen PINs', async () => {
+  const bcrypt = (await import('bcrypt')).default
+  const { RestaurantsService } = await import('../dist/restaurants/restaurants.service.js')
+  const build = () => {
+    const chefs = [
+      { id: 'c1', email: 'ravi@cafe.in', name: 'Ravi', role: 'CHEF', isActive: true, restaurantId: 'r1', organizationId: 'o1', pinHash: bcrypt.hashSync('4321', 4) },
+      { id: 'c2', email: 'sita@cafe.in', name: 'Sita', role: 'CHEF', isActive: true, restaurantId: 'r1', organizationId: 'o1', pinHash: null },
+      { id: 'w1', email: 'asha@cafe.in', name: 'Asha', role: 'STEWARD', isActive: true, restaurantId: 'r1', organizationId: 'o1' },
+    ]
+    const audits = []
+    const staffRepo = { findOne: async ({ where }) => chefs.find((c) => c.id === where.id && c.restaurantId === where.restaurantId) ?? null, find: async () => chefs.filter((c) => c.role === 'CHEF'), manager: { transaction: async (cb) => cb({ getRepository: () => ({ save: async (x) => x }) }) } }
+    return { svc: new RestaurantsService({}, staffRepo, {}, undefined, { record: async (a) => { audits.push(a) } }), chefs, audits }
+  }
+  it('stores a hashed PIN for one chef, records who set it, and never logs the PIN', async () => {
+    const { svc, chefs, audits } = build()
+    await svc.setStaffPin('r1', 'c2', '8765', { id: 'o', name: 'Asha', role: 'SUPER_OWNER' })
+    assert.ok(await bcrypt.compare('8765', chefs[1].pinHash)); assert.equal(chefs[1].pinCode, null)
+    assert.equal(audits[0].action, 'STAFF_PIN_SET'); assert.ok(!JSON.stringify(audits).includes('8765'))
+  })
+  it('refuses a PIN another person at the outlet already uses, non-chefs and malformed PINs', async () => {
+    const { svc } = build()
+    await assert.rejects(() => svc.setStaffPin('r1', 'c2', '4321', {}), /already used/)
+    await assert.rejects(() => svc.setStaffPin('r1', 'w1', '8765', {}), /Only kitchen/)
+    await assert.rejects(() => svc.setStaffPin('r1', 'c2', '12', {}), /4 to 6 digits/)
+    await assert.rejects(() => svc.setStaffPin('r1', 'c2', 'abcd', {}), /4 to 6 digits/)
+  })
+  it('a chef can keep or change their own PIN (it only conflicts with other people)', async () => {
+    const { svc } = build()
+    await svc.setStaffPin('r1', 'c1', '4321', {})
+  })
+})
+
+describe('flood protection', async () => {
+  const { SlidingWindowLimiter } = await import('../dist/common/security/sliding-window.js')
+  it('allows the limit inside the window, refuses beyond it, and recovers as time passes; keys are independent', () => {
+    const l = new SlidingWindowLimiter(3, 1000)
+    assert.deepEqual([0, 100, 200, 300].map((t) => l.allow('a', t)), [true, true, true, false])
+    assert.equal(l.allow('b', 300), true)
+    assert.equal(l.allow('a', 1001), true) // the first hit has aged out
+    assert.equal(l.allow('a', 1002), false)
+  })
+})

@@ -1,3 +1,4 @@
+import { SlidingWindowLimiter } from '../common/security/sliding-window.js';
 import { issueBillNumber, issueCreditNote } from '../billing/document-numbers.js';
 import { PRIVACY_POLICY_VERSION } from '../platform/compliance.js';
 import { assertPlatformMerchantAccess } from '../common/guards/platform-merchant-access.js';
@@ -6,6 +7,8 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Optional,
 } from '@nestjs/common';
 import { getOrderingStatus, resolveOperations } from '../restaurants/operations.js';
@@ -38,6 +41,10 @@ import {
 import { EventsGateway } from '../events/events.gateway.js';
 import { AuditService } from '../audit/audit.service.js';
 import { InventoryService } from '../inventory/inventory.service.js';
+
+/** Public ordering needs no sign-in, so a flood from one place must not drown an outlet's kitchen. Real service never comes near these. */
+const outletOrderLimiter = new SlidingWindowLimiter(Number(process.env.PUBLIC_ORDER_BURST_PER_OUTLET) || 60, 5 * 60_000);
+const tableOrderLimiter = new SlidingWindowLimiter(Number(process.env.PUBLIC_ORDER_BURST_PER_TABLE) || 6, 5 * 60_000);
 
 @Injectable()
 export class OrdersService {
@@ -81,6 +88,11 @@ export class OrdersService {
     if (!dto.items || dto.items.length === 0) {
       throw new BadRequestException('Order must contain at least one item');
     }
+
+    // Flood protection (see limiter definitions above)
+    const tooBusy = () => new HttpException('This outlet is receiving a very high number of orders right now. Please ask a staff member to take your order.', HttpStatus.TOO_MANY_REQUESTS);
+    if (!outletOrderLimiter.allow(restaurant.id)) throw tooBusy();
+    if (dto.tableNumber && !tableOrderLimiter.allow(`${restaurant.id}:${String(dto.tableNumber).trim().toUpperCase()}`)) throw tooBusy();
 
     // Platform-wide switch (incident response) and per-restaurant feature access
     if (getSetting<boolean>('general.publicOrderingEnabled') === false) {

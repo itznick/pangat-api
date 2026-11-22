@@ -97,6 +97,8 @@ function createMockOrdersService(initialOrder, options = {}) {
           return [];
         },
         delete: async () => {},
+        // statutory numbering: outlet code + next serial
+        query: async (sql) => (/invoice_prefix FROM restaurants/.test(sql) ? [{ invoice_prefix: 'T001' }] : /RETURNING last_value/.test(sql) ? [{ last_value: 1 }] : []),
         getRepository: () => ({
           save: async (val) => {
             currentOrder = { ...val };

@@ -202,7 +202,7 @@ export class RestaurantsService {
    * Settings that decide where customer money goes or what tax is charged. Only the Owner may change them: a manager who
    * could edit the UPI ID could quietly send every customer payment to a personal account.
    */
-  static readonly OWNER_ONLY_SETTINGS = ['upiVpa', 'gstin', 'hsnSac', 'gstPercentage', 'serviceChargePercentage'] as const;
+  static readonly OWNER_ONLY_SETTINGS = ['upiVpa', 'gstin', 'fssaiLicense', 'hsnSac', 'gstPercentage', 'serviceChargePercentage'] as const;
 
   private static maskSetting(key: string, v: unknown): string {
     const s = v === null || v === undefined || v === '' ? '(empty)' : String(v);
@@ -218,7 +218,7 @@ export class RestaurantsService {
         order: { createdAt: 'ASC' } as any,
       });
       if (!owner?.email) return;
-      const label: Record<string, string> = { upiVpa: 'UPI ID', gstin: 'GSTIN', hsnSac: 'HSN/SAC code', gstPercentage: 'GST %', serviceChargePercentage: 'Service charge %' };
+      const label: Record<string, string> = { upiVpa: 'UPI ID', gstin: 'GSTIN', fssaiLicense: 'FSSAI licence', hsnSac: 'HSN/SAC code', gstPercentage: 'GST %', serviceChargePercentage: 'Service charge %' };
       const mail = renderEmail({
         preheader: `A payment or tax setting was changed for ${restaurant.name}`,
         heading: 'A payment or tax setting was changed',
@@ -291,6 +291,7 @@ export class RestaurantsService {
       isActive: r.isActive,
       upiVpa: r.upiVpa,
       gstin: r.gstin,
+      fssaiLicense: r.fssaiLicense,
       hsnSac: r.hsnSac,
       gstPercentage: r.gstPercentage,
       serviceChargePercentage: r.serviceChargePercentage ?? 0,

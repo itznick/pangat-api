@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  ValidateIf,
   IsBoolean,
   IsInt,
   IsNumber,
@@ -83,8 +84,17 @@ export class UpdateSettingsDto {
   email?: string;
 
   @IsOptional()
+  @ValidateIf((o) => o.gstin !== '' && o.gstin !== null)
   @IsString()
+  @Matches(/^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/, { message: 'Enter a valid 15-character GSTIN, for example 27AAAAA0000A1Z5' })
   gstin?: string;
+
+  /** 14 digits, printed on every bill (FSSAI order). Leave empty only if you are not yet licensed. */
+  @IsOptional()
+  @ValidateIf((o) => o.fssaiLicense !== '' && o.fssaiLicense !== null)
+  @IsString()
+  @Matches(/^\d{14}$/, { message: 'The FSSAI licence number has 14 digits' })
+  fssaiLicense?: string;
 
   @IsOptional()
   @IsString()

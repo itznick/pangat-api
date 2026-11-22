@@ -1,3 +1,4 @@
+import { issueBillNumber, issueCreditNote } from '../billing/document-numbers.js';
 import { PRIVACY_POLICY_VERSION } from '../platform/compliance.js';
 import { assertPlatformMerchantAccess } from '../common/guards/platform-merchant-access.js';
 import {
@@ -468,6 +469,49 @@ export class OrdersService {
     return order;
   }
 
+  /**
+   * The printable tax invoice for one order, computed from the stored amounts (never recomputed from today's menu or rates).
+   * Same access rules as the order itself: staff of the outlet, or the diner holding the tracking token. The kitchen role never gets bills.
+   */
+  async getBill(idOrToken: string, token: string | undefined, user?: any) {
+    if (user && user.role === StaffRole.CHEF && !user.isPlatformAdmin) {
+      throw new ForbiddenException('Bills are not available to the kitchen role');
+    }
+    const order: any = await this.findOrderForCaller(idOrToken, token, user);
+    const r = order.restaurant ?? (await this.restaurantRepo.findOne({ where: { id: order.restaurantId } }));
+    const money = (n: unknown) => Math.round(Number(n || 0) * 100) / 100;
+    const taxable = money(order.subtotal);
+    const gst = money(order.gstAmount);
+    const cgst = money(gst / 2); // intra-state supply: the GST is split equally between CGST and SGST
+    const creditNotes = await this.orderRepo.manager.query(
+      `SELECT number, amount, reason, issued_at AS "issuedAt" FROM tax_documents WHERE order_id = $1 AND kind = 'CREDIT_NOTE' ORDER BY issued_at ASC`,
+      [order.id],
+    );
+    return {
+      status: order.billNumber ? 'ISSUED' : 'PROVISIONAL',
+      billNumber: order.billNumber ?? null,
+      issuedAt: order.billIssuedAt ?? null,
+      restaurant: {
+        name: r?.name, branchArea: r?.branchArea ?? null, phone: r?.phone ?? null,
+        gstin: r?.gstin ?? null, fssaiLicense: r?.fssaiLicense ?? null, hsnSac: r?.hsnSac || '9963',
+      },
+      order: { id: order.id, type: order.orderType, table: order.tableNumber ?? null, createdAt: order.createdAt, customerName: order.customerName ?? null },
+      items: (order.items || []).map((i: any) => {
+        const mods = Array.isArray(i.selectedModifiers) ? i.selectedModifiers : [];
+        const unit = money(Number(i.price) + mods.reduce((a: number, m: any) => a + Number(m.price || 0), 0));
+        return { name: i.name, quantity: Number(i.quantity), unitPrice: unit, amount: money(unit * Number(i.quantity)), modifiers: mods.map((m: any) => m.name) };
+      }),
+      taxableValue: taxable,
+      gst: { ratePercent: taxable > 0 ? Math.round((gst / taxable) * 10000) / 100 : 0, cgst, sgst: money(gst - cgst), total: gst },
+      serviceCharge: money(order.serviceChargeAmount),
+      deliveryFee: money(order.deliveryFee),
+      total: money(order.totalAmount),
+      payment: { method: order.paymentMethod, status: order.paymentStatus, settledAt: order.settledAt ?? null },
+      refundedAmount: money(order.refundAmount),
+      creditNotes: creditNotes.map((c: any) => ({ number: c.number, amount: money(c.amount), reason: c.reason, issuedAt: c.issuedAt })),
+    };
+  }
+
   async findOrderForCaller(
     idOrToken: string,
     tokenParam?: string,
@@ -880,6 +924,12 @@ export class OrdersService {
       throw new ForbiddenException('Access denied: Order does not belong to authorized restaurant');
     }
 
+    // A paid bill has a legal number and a tax amount: it must not change. Cancel it (which starts a refund and a credit note)
+    // and place a new order, or add the extra items as a separate order.
+    if (order.paymentStatus === PaymentStatus.PAID || order.billNumber) {
+      throw new BadRequestException('This bill is already paid and numbered, so its items cannot be changed. Cancel it for a refund and place a new order, or add the extra items as a separate order.');
+    }
+
     // Rule 1: Option A (Conservative): Staff can only edit items while order is in RECEIVED stage
     if (order.orderStatus === OrderStatus.PREPARING) {
       throw new BadRequestException(
@@ -1089,6 +1139,8 @@ export class OrdersService {
 
     // Refund state and its audit record are ONE transaction (money must never move without a record)
     const saved = await this.orderRepo.manager.transaction(async (em) => {
+      // Money going back needs a credit note that refers to the original bill (CGST Rule 53), numbered in its own series
+      const creditNoteNumber = await issueCreditNote(em, order, refundAmount, dto.reason, staffUser);
       const persisted = await em.getRepository(Order).save(order);
       await this.auditService.record({
         restaurantId: order.restaurantId,
@@ -1102,6 +1154,8 @@ export class OrdersService {
       reason: dto.reason,
       metadata: {
         idempotencyKey: dto.idempotencyKey,
+        creditNoteNumber,
+        billNumber: order.billNumber,
         refundMethod: dto.refundMethod,
         refundAmount,
         totalRefunded: nextTotalRefunded,
@@ -1155,6 +1209,8 @@ export class OrdersService {
     order.settledAt = new Date();
     // Payment and its audit record are ONE transaction; a failed audit write now fails the request instead of being swallowed
     const saved = await this.orderRepo.manager.transaction(async (em) => {
+      // The legal bill number is issued with the payment, in the same transaction (see billing/document-numbers.ts)
+      await issueBillNumber(em, order, actor, order.settledAt ?? new Date());
       const persisted = await em.getRepository(Order).save(order);
       await this.auditService.record({
         restaurantId: order.restaurantId,
@@ -1165,7 +1221,7 @@ export class OrdersService {
         staffName: actor?.name,
         staffRole: actor?.role,
         staffEmail: actor?.email,
-        metadata: { from: previous, method: order.paymentMethod, amount: order.totalAmount },
+        metadata: { from: previous, method: order.paymentMethod, amount: order.totalAmount, billNumber: order.billNumber },
       }, em);
       return persisted;
     });

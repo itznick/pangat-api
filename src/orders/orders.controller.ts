@@ -80,6 +80,13 @@ export class OrdersController {
     return withMessage(isKitchenOnly(req?.user) ? redactForKitchen(order) : order, 'Order retrieved successfully');
   }
 
+  /** Printable tax invoice (bill number, GSTIN, FSSAI, CGST/SGST split, credit notes). Staff, or the diner with the tracking token. */
+  @Get(':id/bill')
+  @UseGuards(OptionalJwtAuthGuard)
+  async bill(@Param('id') id: string, @Query('token') token?: string, @Req() req?: any) {
+    return withMessage(await this.ordersService.getBill(id, token, req?.user), 'Bill retrieved successfully');
+  }
+
   /** Diner feedback submission */
   @Post(':id/feedback')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })

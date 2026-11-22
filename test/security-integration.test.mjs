@@ -512,6 +512,7 @@ describe('5. P2: Password-Reset Neutral Response & Security', () => {
       findOne: async () => mockStaff,
       createQueryBuilder: () => qbFor(mockStaff),
       save: async () => mockStaff,
+      manager: { transaction: async (cb) => cb({ getRepository: () => ({ save: async () => mockStaff }) }) },
     }
     const mockEmailService = {
       sendTransactionalEmail: async () => ({ delivered: true, provider: 'sendgrid' }),

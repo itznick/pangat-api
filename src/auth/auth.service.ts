@@ -1,4 +1,5 @@
 import {
+  Optional,
   Injectable,
   UnauthorizedException,
   BadRequestException,
@@ -11,7 +12,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, MoreThan } from 'typeorm';
+import { Repository, DataSource, EntityManager, MoreThan } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import { createHash, timingSafeEqual } from 'crypto';
@@ -30,6 +31,9 @@ import { MenuItem } from '../menu/entities/menu-item.entity.js';
 import { AttemptLimiter } from '../common/security/attempt-limiter.js';
 import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 import { OtpService } from '../common/services/otp.service.js';
+import { AuditService } from '../audit/audit.service.js';
+import { PlatformAuditService } from '../platform/audit.service.js';
+import { currentRequest } from '../common/request-context.js';
 import { renderEmail } from '../common/services/email-template.js';
 import { ensureTrial } from '../subscriptions/subscription-access.js';
 import { recordLoginEvent, LoginMeta } from '../platform/login-events.js';
@@ -49,7 +53,29 @@ export class AuthService {
     private readonly emailDeliveryService: EmailDeliveryService,
     private readonly configService: ConfigService,
     private readonly otpService: OtpService,
+    @Optional() private readonly auditService?: AuditService,
+    @Optional() private readonly platformAudit?: PlatformAuditService,
   ) {}
+
+  /**
+   * Account-security events (password changed/reset, sessions revoked, profile changed). Restaurant staff go to the restaurant audit
+   * log, platform administrators to the platform audit log. Pass the transaction's manager to save the record with the change.
+   */
+  private async auditAccount(staff: Staff, action: string, summary: string, metadata: Record<string, any> | null = null, em?: EntityManager) {
+    const isAdmin = Boolean(staff.isPlatformAdmin || staff.role === StaffRole.PLATFORM_SUPER_ADMIN);
+    if (isAdmin) {
+      const ctx = currentRequest();
+      await this.platformAudit?.record(
+        { id: staff.id, name: staff.name, email: staff.email, role: staff.platformRole || staff.role, ip: ctx?.ip ?? null, userAgent: ctx?.userAgent ?? null },
+        { action: `ADMIN_${action}`, category: 'SECURITY', entityType: 'platform_admin', entityId: staff.id, entityLabel: staff.email, summary },
+      );
+      return;
+    }
+    await this.auditService?.record({
+      restaurantId: staff.restaurantId, organizationId: staff.organizationId, entityType: 'ACCOUNT', entityId: staff.id, action,
+      staffId: staff.id, staffName: staff.name, staffRole: staff.role, staffEmail: staff.email, metadata: { summary, ...(metadata ?? {}) },
+    }, em);
+  }
 
   /** Constant-time comparison so the bootstrap secret cannot be recovered by timing guesses. */
   private static safeEqual(a: string, b: string): boolean {
@@ -149,7 +175,11 @@ export class AuthService {
 
   /** Invalidate every token issued so far for this staff member. */
   async revokeSessions(staffId: string) {
-    await this.staffRepo.update({ id: staffId }, { passwordChangedAt: new Date() });
+    const staff = await this.staffRepo.findOne({ where: { id: staffId } });
+    await this.staffRepo.manager.transaction(async (em) => {
+      await em.getRepository(Staff).update({ id: staffId }, { passwordChangedAt: new Date() });
+      if (staff) await this.auditAccount(staff, 'SESSIONS_REVOKED', 'Signed out of every device', null, em);
+    });
   }
 
   /** Failed password attempts before the account is locked, and for how long. */
@@ -459,9 +489,13 @@ export class AuthService {
   async updateProfile(userId: string, dto: { name?: string; phone?: string }) {
     const staff = await this.staffRepo.findOne({ where: { id: userId } });
     if (!staff) throw new UnauthorizedException('User account no longer exists');
+    const before = { name: staff.name, phoneSet: Boolean(staff.phone) };
     if (dto.name !== undefined) staff.name = dto.name.trim().slice(0, 120) || staff.name;
     if (dto.phone !== undefined) staff.phone = dto.phone.trim().slice(0, 30) || null;
-    await this.staffRepo.save(staff);
+    await this.staffRepo.manager.transaction(async (em) => {
+      await em.getRepository(Staff).save(staff);
+      await this.auditAccount(staff, 'PROFILE_UPDATED', 'Updated their name or phone number', { before, after: { name: staff.name, phoneSet: Boolean(staff.phone) } }, em);
+    });
     return this.me(userId);
   }
 
@@ -479,7 +513,10 @@ export class AuthService {
     staff.passwordChangedAt = new Date();
     staff.failedLoginCount = 0;
     staff.lockedUntil = null;
-    await this.staffRepo.save(staff);
+    await this.staffRepo.manager.transaction(async (em) => {
+      await em.getRepository(Staff).save(staff);
+      await this.auditAccount(staff, 'PASSWORD_CHANGED', 'Changed their own password; every other session was signed out', null, em);
+    });
     // fresh token so the caller stays signed in on this device
     const payload = {
       sub: staff.id,
@@ -594,6 +631,11 @@ export class AuthService {
         outOfStockNotification: true,
       });
       const savedOutlet = await queryRunner.manager.save(Restaurant, outlet);
+      await this.auditService?.record({
+        restaurantId: savedOutlet.id, organizationId: savedOrg.id, entityType: 'ORGANIZATION', entityId: savedOrg.id, action: 'ORGANIZATION_SIGNED_UP',
+        staffId: savedSuperOwner.id, staffName: savedSuperOwner.name, staffRole: savedSuperOwner.role, staffEmail: savedSuperOwner.email,
+        metadata: { brand: savedOrg.name, outlet: savedOutlet.name, slug: savedOutlet.slug, emailVerified: this.signupOtpRequired() },
+      }, queryRunner.manager);
 
       // 6. Generate Batch Tables (Indoor & Outdoor)
       const indoorCount = Math.max(1, dto.indoorTableCount ?? 12);
@@ -849,7 +891,10 @@ export class AuthService {
       // Store deterministic SHA-256 hash with 1 hour expiration
       staff.resetTokenHash = tokenHash;
       staff.resetTokenExpiresAt = new Date(Date.now() + 60 * 60 * 1000);
-      await this.staffRepo.save(staff);
+      await this.staffRepo.manager.transaction(async (em) => {
+        await em.getRepository(Staff).save(staff);
+        await this.auditAccount(staff, 'PASSWORD_RESET_REQUESTED', 'A password reset link was requested', null, em);
+      });
 
       // Build reset URL strictly from validated environment configuration (preventing Host header poisoning)
       const frontendBaseUrl =
@@ -923,7 +968,10 @@ export class AuthService {
     // Invalidate token immediately to prevent reuse
     staff.resetTokenHash = null;
     staff.resetTokenExpiresAt = null;
-    await this.staffRepo.save(staff);
+    await this.staffRepo.manager.transaction(async (em) => {
+      await em.getRepository(Staff).save(staff);
+      await this.auditAccount(staff, 'PASSWORD_RESET_COMPLETED', 'Chose a new password using a reset link; every session was signed out', null, em);
+    });
 
     return {
       success: true,

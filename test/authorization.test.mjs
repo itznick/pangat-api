@@ -63,7 +63,7 @@ describe('owner-only payment and tax settings', () => {
   const mk = (overrides = {}) => {
     const outlet = { id: 'r1', slug: 'cafe', name: 'Cafe', organizationId: 'org1', upiVpa: 'cafe@okhdfc', gstin: '27AAAAA0000A1Z5', hsnSac: '9963', gstPercentage: 5, serviceChargePercentage: 0, operations: null, ...overrides }
     const sent = [], audits = []
-    const restaurantRepo = { findOne: async () => outlet, save: async (r) => r }
+    const restaurantRepo = { findOne: async () => outlet, save: async (r) => r, manager: { transaction: async (cb) => cb({ getRepository: () => ({ save: async (r) => r }) }) } }
     const staffRepo = { findOne: async () => ({ name: 'Owner', email: 'owner@cafe.in' }) }
     const audit = { record: async (a) => { audits.push(a) } }
     const email = { sendTransactionalEmail: async (m) => { sent.push(m); return { delivered: true, provider: 'brevo' } } }

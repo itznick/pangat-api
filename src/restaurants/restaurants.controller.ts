@@ -87,8 +87,7 @@ export class RestaurantsController {
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   @Roles(StaffRole.SUPER_OWNER)
   async createStaff(@Param('id') id: string, @Body() dto: CreateStaffDto, @Req() req: any) {
-    const staff = await this.restaurantsService.createStaff(id, dto);
-    await this.restaurantsService.audit(id, 'STAFF', staff.id, 'STAFF_CREATED', req.user, { role: staff.role, email: staff.email });
+    const staff = await this.restaurantsService.createStaff(id, dto, req.user);
     return withMessage(staff, 'Staff member added to outlet successfully');
   }
 
@@ -96,8 +95,7 @@ export class RestaurantsController {
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   @Roles(StaffRole.SUPER_OWNER)
   async updateStaff(@Param('id') id: string, @Param('staffId') staffId: string, @Body() dto: UpdateStaffDto, @Req() req: any) {
-    const staff = await this.restaurantsService.updateStaff(id, staffId, dto, req.user.id);
-    await this.restaurantsService.audit(id, 'STAFF', staffId, 'STAFF_UPDATED', req.user, { changes: dto });
+    const staff = await this.restaurantsService.updateStaff(id, staffId, dto, req.user);
     return withMessage(staff, 'Staff member updated');
   }
 
@@ -105,8 +103,7 @@ export class RestaurantsController {
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   @Roles(StaffRole.SUPER_OWNER)
   async resetStaffPassword(@Param('id') id: string, @Param('staffId') staffId: string, @Req() req: any) {
-    const r = await this.restaurantsService.resetStaffPassword(id, staffId);
-    await this.restaurantsService.audit(id, 'STAFF', staffId, 'STAFF_PASSWORD_RESET', req.user, null);
+    const r = await this.restaurantsService.resetStaffPassword(id, staffId, req.user);
     return withMessage(r, 'Temporary password generated. Share it securely; it is shown only once.');
   }
 
@@ -122,9 +119,23 @@ export class RestaurantsController {
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
   async setKitchenPin(@Param('id') id: string, @Body() dto: SetKitchenPinDto, @Req() req: any) {
-    const r = await this.restaurantsService.setKitchenPin(id, dto.pin);
-    await this.restaurantsService.audit(id, 'RESTAURANT', id, 'KITCHEN_PIN_CHANGED', req.user, null);
+    const r = await this.restaurantsService.setKitchenPin(id, dto.pin, req.user);
     return withMessage(r, 'Kitchen PIN saved');
+  }
+
+  // ── Transparency for the owner ───────────────────────────────────────────
+  @Get(':id/platform-access')
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @Roles(StaffRole.SUPER_OWNER)
+  async platformAccess(@Param('id') id: string) {
+    return withMessage(await this.restaurantsService.platformAccessLog(id), 'Pangat staff access to your data');
+  }
+
+  @Get(':id/sign-ins')
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @Roles(StaffRole.SUPER_OWNER)
+  async signIns(@Param('id') id: string) {
+    return withMessage(await this.restaurantsService.signInActivity(id), 'Team sign-in activity');
   }
 
   // ── Audit trail ──────────────────────────────────────────────────────────

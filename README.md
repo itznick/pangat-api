@@ -36,6 +36,15 @@ npm run test:integration
   `security.adminLoginOtp` (platform admins enter a code after their password) and `security.signupEmailOtp`
   (`POST /auth/signup-otp`, then `emailOtp` on `POST /auth/onboard`).
 
+## Audit history
+
+* **Restaurant audit (`audit_logs`)** and **platform audit (`platform_audit_logs`)** are append-only: the database rejects UPDATE, DELETE and TRUNCATE (migration 013). Deleting an outlet cannot erase its history (`ON DELETE RESTRICT`).
+  Dev tip: to reset a test database, drop and recreate it rather than truncating these two tables.
+* Every entry carries who, their role, from which IP and browser, and the request id (also returned to clients in the `X-Request-Id` header).
+* Money and security actions (cancel, refund, mark paid, settings, staff, menu, tables, passwords) are saved **in the same transaction** as their audit entry; if the record cannot be written the action fails.
+* Pangat staff opening a restaurant's console data is logged (`MERCHANT_DATA_VIEWED/CHANGED`, category PRIVACY) and shown to the owner under Settings → Activity. It needs the `merchant.view` permission.
+* `TRUST_PROXY_HOPS` (default 1) must equal the number of proxies in front of the API, so the recorded IP is the real client.
+
 ## Security model (summary)
 
 * JWT sessions; deactivated accounts and password changes invalidate existing tokens immediately.

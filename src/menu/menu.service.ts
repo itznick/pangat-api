@@ -3,7 +3,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { Optional, Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { getOrderingStatus, resolveOperations } from '../restaurants/operations.js';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { MenuItem } from './entities/menu-item.entity.js';
 import { MenuCategory } from './entities/menu-category.entity.js';
 import { Modifier } from './entities/modifier.entity.js';
@@ -98,7 +98,7 @@ export class MenuService {
     });
   }
 
-  async updateAvailability(id: string, isAvailable: boolean, authorizedRestaurantId?: string) {
+  async updateAvailability(id: string, isAvailable: boolean, authorizedRestaurantId?: string, actor?: any) {
     const item = await this.menuItemRepo.findOne({ where: { id } });
     if (!item) {
       throw new NotFoundException(`Menu item '${id}' not found`);
@@ -106,9 +106,14 @@ export class MenuService {
     if (authorizedRestaurantId && item.restaurantId !== authorizedRestaurantId) {
       throw new ForbiddenException('Access denied: Menu item does not belong to authorized restaurant');
     }
+    const wasAvailable = item.isAvailable;
     item.isAvailable = isAvailable;
     item.autoDisabled = false; // a manual choice always wins over the automatic one
-    const saved = await this.menuItemRepo.save(item);
+    const saved = await this.menuItemRepo.manager.transaction(async (em) => {
+      const persisted = await em.getRepository(MenuItem).save(item);
+      if (wasAvailable !== isAvailable) await this.audit(em, item.restaurantId, 'MENU_ITEM', item.id, isAvailable ? 'ITEM_MARKED_AVAILABLE' : 'ITEM_MARKED_SOLD_OUT', actor, { name: item.name });
+      return persisted;
+    });
     const outlet = await this.restaurantRepo.findOne({ where: { id: item.restaurantId } });
     if (outlet) this.eventsGateway?.emitMenuAvailability(outlet.slug, { id: item.id, name: item.name, isAvailable, auto: false });
     return saved;
@@ -124,23 +129,21 @@ export class MenuService {
     }
     const previous = Number(item.price);
     item.price = price;
-    const saved = await this.menuItemRepo.save(item);
-    await this.audit(item.restaurantId, 'MENU_ITEM', item.id, 'PRICE_CHANGED', actor, { name: item.name, from: previous, to: price });
-    return saved;
+    return this.menuItemRepo.manager.transaction(async (em) => {
+      const persisted = await em.getRepository(MenuItem).save(item);
+      await this.audit(em, item.restaurantId, 'MENU_ITEM', item.id, 'PRICE_CHANGED', actor, { name: item.name, from: previous, to: price });
+      return persisted;
+    });
   }
 
-  private async audit(restaurantId: string, entityType: string, entityId: string, action: string, actor: any, metadata: Record<string, any>) {
-    try {
-      await this.auditService.record({
-        restaurantId, entityType, entityId, action,
-        staffId: actor?.id, staffName: actor?.name, staffRole: actor?.role, metadata,
-      });
-    } catch {
-      /* auditing must never block menu edits */
-    }
+  /** Writes the audit entry in the caller's transaction; throws on failure so a change is never saved without its record. */
+  private async audit(em: EntityManager, restaurantId: string, entityType: string, entityId: string, action: string, actor: any, metadata: Record<string, any>, organizationId?: string | null) {
+    await this.auditService.record({
+      restaurantId, organizationId: organizationId ?? null, entityType, entityId, action,
+      staffId: actor?.id, staffName: actor?.name, staffRole: actor?.role, staffEmail: actor?.email, metadata,
+    }, em);
   }
 
-  /** The category must exist and belong to the same outlet as the dish (no cross-tenant attachment). */
   private async assertCategory(categoryId: string, restaurantId: string) {
     const category = await this.categoryRepo.findOne({ where: { id: categoryId } });
     if (!category || category.restaurantId !== restaurantId) {
@@ -155,26 +158,35 @@ export class MenuService {
     if (authorizedRestaurantId && item.restaurantId !== authorizedRestaurantId) {
       throw new ForbiddenException('Access denied: Menu item does not belong to authorized restaurant');
     }
-    await this.menuItemRepo.softRemove(item);
-    await this.audit(item.restaurantId, 'MENU_ITEM', item.id, 'ITEM_DELETED', actor, { name: item.name });
+    await this.menuItemRepo.manager.transaction(async (em) => {
+      await em.getRepository(MenuItem).softRemove(item);
+      await this.audit(em, item.restaurantId, 'MENU_ITEM', item.id, 'ITEM_DELETED', actor, { name: item.name, price: Number(item.price) });
+    });
   }
 
-  async updateCategory(id: string, dto: { name?: string; sortOrder?: number }, authorizedRestaurantId?: string) {
+  async updateCategory(id: string, dto: { name?: string; sortOrder?: number }, authorizedRestaurantId?: string, actor?: any) {
     const category = await this.categoryRepo.findOne({ where: { id } });
     if (!category) throw new NotFoundException(`Category '${id}' not found`);
     if (authorizedRestaurantId && category.restaurantId !== authorizedRestaurantId) {
       throw new ForbiddenException('Access denied: Category does not belong to authorized restaurant');
     }
+    const categoryBefore = category.name;
+    const sortBefore = category.sortOrder;
     if (dto.name !== undefined) {
       const name = dto.name.trim();
       if (!name) throw new BadRequestException('Category name cannot be empty');
       category.name = name;
     }
+    const before = { name: categoryBefore, sortOrder: sortBefore };
     if (dto.sortOrder !== undefined) category.sortOrder = dto.sortOrder;
-    return this.categoryRepo.save(category);
+    return this.categoryRepo.manager.transaction(async (em) => {
+      const persisted = await em.getRepository(MenuCategory).save(category);
+      await this.audit(em, category.restaurantId, 'MENU_CATEGORY', category.id, 'CATEGORY_UPDATED', actor, { before, after: { name: persisted.name, sortOrder: persisted.sortOrder } });
+      return persisted;
+    });
   }
 
-  async createCategory(dto: CreateCategoryDto) {
+  async createCategory(dto: CreateCategoryDto, actor?: any) {
     let restaurant: Restaurant | null = null;
     if (dto.restaurantId) {
       restaurant = await this.restaurantRepo.findOne({ where: { id: dto.restaurantId } });
@@ -192,10 +204,14 @@ export class MenuService {
       sortOrder: dto.sortOrder ?? 0,
     });
 
-    return this.categoryRepo.save(category);
+    return this.categoryRepo.manager.transaction(async (em) => {
+      const persisted = await em.getRepository(MenuCategory).save(category);
+      await this.audit(em, restaurant!.id, 'MENU_CATEGORY', persisted.id, 'CATEGORY_CREATED', actor, { name: persisted.name });
+      return persisted;
+    });
   }
 
-  async removeCategory(id: string, authorizedRestaurantId?: string) {
+  async removeCategory(id: string, authorizedRestaurantId?: string, actor?: any) {
     const category = await this.categoryRepo.findOne({ where: { id } });
     if (!category) {
       throw new NotFoundException(`Category '${id}' not found`);
@@ -211,10 +227,13 @@ export class MenuService {
       );
     }
 
-    await this.categoryRepo.remove(category);
+    await this.categoryRepo.manager.transaction(async (em) => {
+      await this.audit(em, category.restaurantId, 'MENU_CATEGORY', id, 'CATEGORY_DELETED', actor, { name: category.name });
+      await em.getRepository(MenuCategory).remove(category);
+    });
   }
 
-  async createItem(dto: CreateItemDto) {
+  async createItem(dto: CreateItemDto, actor?: any) {
     let restaurant: Restaurant | null = null;
     if (dto.restaurantId) {
       restaurant = await this.restaurantRepo.findOne({ where: { id: dto.restaurantId } });
@@ -240,20 +259,23 @@ export class MenuService {
       isPopular: false,
     });
 
-    const savedItem = await this.menuItemRepo.save(item);
-
-    if (Array.isArray(dto.modifiers) && dto.modifiers.length > 0) {
-      const modifierEntities = dto.modifiers.map((m) =>
-        this.modifierRepo.create({
-          menuItemId: savedItem.id,
-          name: m.name,
-          type: m.type || ModifierType.SINGLE,
-          isRequired: Boolean(m.isRequired),
-          options: m.options || [],
-        }),
-      );
-      await this.modifierRepo.save(modifierEntities);
-    }
+    const savedItem = await this.menuItemRepo.manager.transaction(async (em) => {
+      const persisted = await em.getRepository(MenuItem).save(item);
+      if (Array.isArray(dto.modifiers) && dto.modifiers.length > 0) {
+        const modifierEntities = dto.modifiers.map((m) =>
+          em.getRepository(Modifier).create({
+            menuItemId: persisted.id,
+            name: m.name,
+            type: m.type || ModifierType.SINGLE,
+            isRequired: Boolean(m.isRequired),
+            options: m.options || [],
+          }),
+        );
+        await em.getRepository(Modifier).save(modifierEntities);
+      }
+      await this.audit(em, restaurant!.id, 'MENU_ITEM', persisted.id, 'ITEM_CREATED', actor, { name: persisted.name, price: Number(persisted.price), modifiers: dto.modifiers?.length ?? 0 });
+      return persisted;
+    });
 
     return this.menuItemRepo.findOne({
       where: { id: savedItem.id },
@@ -261,7 +283,7 @@ export class MenuService {
     });
   }
 
-  async updateItem(id: string, dto: UpdateItemDto, authorizedRestaurantId?: string) {
+  async updateItem(id: string, dto: UpdateItemDto, authorizedRestaurantId?: string, actor?: any) {
     const item = await this.menuItemRepo.findOne({ where: { id } });
     if (!item) {
       throw new NotFoundException(`Menu item '${id}' not found`);
@@ -270,6 +292,7 @@ export class MenuService {
       throw new ForbiddenException('Access denied: Menu item does not belong to authorized restaurant');
     }
 
+    const before = { name: item.name, price: Number(item.price), categoryId: item.categoryId, isVeg: item.isVeg, isAvailable: item.isAvailable, description: item.description };
     if (dto.name !== undefined) item.name = dto.name;
     if (dto.description !== undefined) item.description = dto.description;
     if (dto.price !== undefined) item.price = dto.price;
@@ -284,24 +307,39 @@ export class MenuService {
       item.autoDisabled = false;
     }
 
-    await this.menuItemRepo.save(item);
-
-    if (Array.isArray(dto.modifiers)) {
-      // Replace existing modifiers
-      await this.modifierRepo.delete({ menuItemId: id });
-      if (dto.modifiers.length > 0) {
-        const modifierEntities = dto.modifiers.map((m) =>
-          this.modifierRepo.create({
-            menuItemId: id,
-            name: m.name,
-            type: m.type || ModifierType.SINGLE,
-            isRequired: Boolean(m.isRequired),
-            options: m.options || [],
-          }),
-        );
-        await this.modifierRepo.save(modifierEntities);
+    await this.menuItemRepo.manager.transaction(async (em) => {
+      await em.getRepository(MenuItem).save(item);
+      if (Array.isArray(dto.modifiers)) {
+        // Replace existing modifiers
+        await em.getRepository(Modifier).delete({ menuItemId: id });
+        if (dto.modifiers.length > 0) {
+          await em.getRepository(Modifier).save(
+            dto.modifiers.map((m) =>
+              em.getRepository(Modifier).create({
+                menuItemId: id,
+                name: m.name,
+                type: m.type || ModifierType.SINGLE,
+                isRequired: Boolean(m.isRequired),
+                options: m.options || [],
+              }),
+            ),
+          );
+        }
       }
-    }
+      const after = { name: item.name, price: Number(item.price), categoryId: item.categoryId, isVeg: item.isVeg, isAvailable: item.isAvailable, description: item.description };
+      const changed = (Object.keys(after) as (keyof typeof after)[]).filter((k) => String(before[k]) !== String(after[k]));
+      // A price edit made through the general edit form is a price change: it is recorded exactly like the dedicated price action
+      if (changed.includes('price')) await this.audit(em, item.restaurantId, 'MENU_ITEM', item.id, 'PRICE_CHANGED', actor, { name: item.name, from: before.price, to: after.price });
+      const others = changed.filter((k) => k !== 'price');
+      if (others.length > 0 || Array.isArray(dto.modifiers)) {
+        await this.audit(em, item.restaurantId, 'MENU_ITEM', item.id, 'ITEM_UPDATED', actor, {
+          name: item.name,
+          changed: [...others, ...(Array.isArray(dto.modifiers) ? ['modifiers'] : [])],
+          before: Object.fromEntries(others.map((k) => [k, before[k]])),
+          after: Object.fromEntries(others.map((k) => [k, after[k]])),
+        });
+      }
+    });
 
     return this.menuItemRepo.findOne({
       where: { id },

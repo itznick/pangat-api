@@ -1,3 +1,4 @@
+import { assertPlatformMerchantAccess } from '../common/guards/platform-merchant-access.js';
 import {
   Injectable,
   NotFoundException,
@@ -485,6 +486,7 @@ export class OrdersService {
       const isPlatformAdmin =
         user.isPlatformAdmin === true || user.role === StaffRole.PLATFORM_SUPER_ADMIN;
       if (isPlatformAdmin) {
+        assertPlatformMerchantAccess(user, 'GET');
         return order;
       }
       if (user.restaurantId && user.restaurantId === order.restaurantId) {
@@ -798,7 +800,43 @@ export class OrdersService {
       order.paymentStatus = PaymentStatus.FAILED;
     }
 
-    const saved = await this.orderRepo.save(order);
+    // The order change and its audit records are ONE transaction: a cancellation can never exist without its record.
+    const saved = await this.orderRepo.manager.transaction(async (em) => {
+      const persisted = await em.getRepository(Order).save(order);
+      await this.auditService.record({
+        restaurantId: order.restaurantId,
+        entityType: 'ORDER',
+        entityId: order.id,
+        action: AuditAction.ORDER_CANCELLED,
+        staffId: staffUser?.id || null,
+        staffName: staffUser?.name || null,
+        staffRole: staffUser?.role || null,
+        staffEmail: staffUser?.email || null,
+        reason: fullReason,
+        metadata: {
+          previousStatus,
+          newStatus: OrderStatus.CANCELLED,
+          previousPaymentStatus,
+          newPaymentStatus: persisted.paymentStatus,
+          totalAmount: persisted.totalAmount,
+        },
+      }, em);
+      if (previousPaymentStatus === PaymentStatus.PAID) {
+        await this.auditService.record({
+          restaurantId: order.restaurantId,
+          entityType: 'ORDER',
+          entityId: order.id,
+          action: AuditAction.ORDER_REFUND_REQUESTED,
+          staffId: staffUser?.id || null,
+          staffName: staffUser?.name || null,
+          staffRole: staffUser?.role || null,
+          staffEmail: staffUser?.email || null,
+          reason: `Auto refund request generated from order cancellation: ${fullReason}`,
+          metadata: { refundableAmount: persisted.totalAmount },
+        }, em);
+      }
+      return persisted;
+    });
 
     // Reverse stock exactly once if an order is cancelled before PREPARING.
     // After PREPARING begins, NO automatic stock restoration is permitted.
@@ -809,40 +847,6 @@ export class OrdersService {
         staffUser,
         fullReason,
       );
-    }
-
-    // Audit record for cancellation
-    await this.auditService.record({
-      restaurantId: order.restaurantId,
-      entityType: 'ORDER',
-      entityId: order.id,
-      action: AuditAction.ORDER_CANCELLED,
-      staffId: staffUser?.id || null,
-      staffName: staffUser?.name || null,
-      staffRole: staffUser?.role || null,
-      reason: fullReason,
-      metadata: {
-        previousStatus,
-        newStatus: OrderStatus.CANCELLED,
-        previousPaymentStatus,
-        newPaymentStatus: saved.paymentStatus,
-      },
-    });
-
-    if (previousPaymentStatus === PaymentStatus.PAID) {
-      await this.auditService.record({
-        restaurantId: order.restaurantId,
-        entityType: 'ORDER',
-        entityId: order.id,
-        action: AuditAction.ORDER_REFUND_REQUESTED,
-        staffId: staffUser?.id || null,
-        staffName: staffUser?.name || null,
-        staffRole: staffUser?.role || null,
-        reason: `Auto refund request generated from order cancellation: ${fullReason}`,
-        metadata: {
-          refundableAmount: saved.totalAmount,
-        },
-      });
     }
 
     let restaurantSlug: string | undefined = order.restaurant?.slug;
@@ -1075,16 +1079,18 @@ export class OrdersService {
       order.paymentStatus = PaymentStatus.PARTIALLY_REFUNDED;
     }
 
-    const saved = await this.orderRepo.save(order);
-
-    await this.auditService.record({
-      restaurantId: order.restaurantId,
-      entityType: 'ORDER',
-      entityId: order.id,
-      action: AuditAction.ORDER_REFUND_SETTLED,
-      staffId: staffUser?.id || null,
-      staffName: staffUser?.name || null,
-      staffRole: staffUser?.role || null,
+    // Refund state and its audit record are ONE transaction (money must never move without a record)
+    const saved = await this.orderRepo.manager.transaction(async (em) => {
+      const persisted = await em.getRepository(Order).save(order);
+      await this.auditService.record({
+        restaurantId: order.restaurantId,
+        entityType: 'ORDER',
+        entityId: order.id,
+        action: AuditAction.ORDER_REFUND_SETTLED,
+        staffId: staffUser?.id || null,
+        staffName: staffUser?.name || null,
+        staffRole: staffUser?.role || null,
+        staffEmail: staffUser?.email || null,
       reason: dto.reason,
       metadata: {
         idempotencyKey: dto.idempotencyKey,
@@ -1092,8 +1098,10 @@ export class OrdersService {
         refundAmount,
         totalRefunded: nextTotalRefunded,
         providerReference: dto.providerReference || null,
-        finalPaymentStatus: saved.paymentStatus,
+        finalPaymentStatus: persisted.paymentStatus,
       },
+      }, em);
+      return persisted;
     });
 
     return saved;
@@ -1137,18 +1145,22 @@ export class OrdersService {
     const previous = order.paymentStatus;
     order.paymentStatus = PaymentStatus.PAID;
     order.settledAt = new Date();
-    const saved = await this.orderRepo.save(order);
-
-    await this.auditService.record({
-      restaurantId: order.restaurantId,
-      entityType: 'ORDER',
-      entityId: order.id,
-      action: 'PAYMENT_MARKED_PAID',
-      staffId: actor?.id,
-      staffName: actor?.name,
-      staffRole: actor?.role,
-      metadata: { from: previous, method: order.paymentMethod, amount: order.totalAmount },
-    }).catch(() => undefined);
+    // Payment and its audit record are ONE transaction; a failed audit write now fails the request instead of being swallowed
+    const saved = await this.orderRepo.manager.transaction(async (em) => {
+      const persisted = await em.getRepository(Order).save(order);
+      await this.auditService.record({
+        restaurantId: order.restaurantId,
+        entityType: 'ORDER',
+        entityId: order.id,
+        action: 'PAYMENT_MARKED_PAID',
+        staffId: actor?.id,
+        staffName: actor?.name,
+        staffRole: actor?.role,
+        staffEmail: actor?.email,
+        metadata: { from: previous, method: order.paymentMethod, amount: order.totalAmount },
+      }, em);
+      return persisted;
+    });
 
     await this.syncTableStatus(order, restaurantSlug);
 

@@ -1,6 +1,8 @@
 import { Global, MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
+import { APP_INTERCEPTOR } from '@nestjs/core';
+import { PlatformAccessInterceptor } from './access-log.interceptor.js';
 import { PasswordLinkService } from '../common/services/password-link.service.js';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module.js';
 import { PlatformSettingsService } from './settings.service.js';
@@ -26,6 +28,7 @@ import { Staff } from '../auth/entities/staff.entity.js';
   imports: [SubscriptionsModule, TypeOrmModule.forFeature([Staff])],
   controllers: [PlatformController, PlatformPublicController],
   providers: [
+    { provide: APP_INTERCEPTOR, useClass: PlatformAccessInterceptor },
     EmailDeliveryService, PasswordLinkService, PlatformAdminGuard, PlatformSettingsService, PlatformAuditService, PlatformEventsService, SubscriptionsAdminService, RestaurantsAdminService,
     FinanceService, DashboardService, UsersAdminService, CommsService, SupportService, ExportsService, MetricsService, MonitoringService, ErrorLogService, JobsService,
   ],

@@ -25,6 +25,7 @@ export const PERMISSION_CATALOG: { key: string; label: string; group: string }[]
   { key: 'exports.manage', label: 'Export restaurant data', group: 'Platform' },
   { key: 'privacy.view', label: 'View privacy requests & consent records', group: 'Compliance' },
   { key: 'privacy.manage', label: 'Handle privacy requests (access, correction, erasure, grievances)', group: 'Compliance' },
+  { key: 'merchant.view', label: 'Open restaurant consoles (sees customer details)', group: 'Platform' },
   { key: 'merchant.operate', label: 'Make changes inside a restaurant console', group: 'Platform' },
 ];
 
@@ -48,7 +49,7 @@ export const PLATFORM_ROLES: Record<string, { label: string; description: string
   SUPPORT: {
     label: 'Support',
     description: 'Helps restaurants: tickets, account issues, read-only visibility',
-    permissions: ['dashboard.view', 'restaurants.view', 'subscriptions.view', 'users.view', 'users.manage', 'support.view', 'support.manage', 'notifications.view', 'monitoring.view'],
+    permissions: ['dashboard.view', 'restaurants.view', 'merchant.view', 'subscriptions.view', 'users.view', 'users.manage', 'support.view', 'support.manage', 'notifications.view', 'monitoring.view'],
   },
   ANALYST: { label: 'Read-only analyst', description: 'Business numbers only: restaurants, subscriptions and payments. Cannot change anything', permissions: ANALYST_VIEWS },
   COMPLIANCE: {

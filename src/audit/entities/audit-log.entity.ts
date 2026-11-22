@@ -21,12 +21,28 @@ export class AuditLog {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ name: 'restaurant_id' })
-  restaurantId: string;
+  /** Empty for account-level events that belong to no single outlet (sign-in changes, outlet creation) */
+  @Column({ name: 'restaurant_id', type: 'uuid', nullable: true })
+  restaurantId: string | null;
 
-  @ManyToOne(() => Restaurant, { onDelete: 'CASCADE' })
+  @ManyToOne(() => Restaurant, { onDelete: 'RESTRICT', nullable: true })
   @JoinColumn({ name: 'restaurant_id' })
   restaurant: Restaurant;
+
+  @Column({ name: 'organization_id', type: 'uuid', nullable: true })
+  organizationId: string | null;
+
+  @Column({ name: 'actor_email', type: 'varchar', length: 180, nullable: true })
+  actorEmail: string | null;
+
+  @Column({ name: 'ip', type: 'varchar', length: 64, nullable: true })
+  ip: string | null;
+
+  @Column({ name: 'user_agent', type: 'varchar', length: 255, nullable: true })
+  userAgent: string | null;
+
+  @Column({ name: 'request_id', type: 'varchar', length: 64, nullable: true })
+  requestId: string | null;
 
   @Column({ name: 'entity_type', length: 50 })
   entityType: string;

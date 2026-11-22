@@ -52,7 +52,7 @@ export class MenuController {
     @Body() dto: UpdateAvailabilityDto,
     @Req() req: any,
   ) {
-    const updated = await this.menuService.updateAvailability(id, dto.isAvailable, req?.user?.restaurantId);
+    const updated = await this.menuService.updateAvailability(id, dto.isAvailable, req?.user?.restaurantId, req?.user);
     return withMessage(
       updated,
       `Item marked as ${dto.isAvailable ? 'available' : 'sold out (out of stock)'}`,
@@ -76,8 +76,8 @@ export class MenuController {
   @Post('items')
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
-  async createItem(@Body() dto: CreateItemDto) {
-    const item = await this.menuService.createItem(dto);
+  async createItem(@Body() dto: CreateItemDto, @Req() req: any) {
+    const item = await this.menuService.createItem(dto, req?.user);
     return withMessage(item, 'Menu dish created successfully');
   }
 
@@ -90,7 +90,7 @@ export class MenuController {
     @Body() dto: UpdateItemDto,
     @Req() req: any,
   ) {
-    const updated = await this.menuService.updateItem(id, dto, req?.user?.restaurantId);
+    const updated = await this.menuService.updateItem(id, dto, req?.user?.restaurantId, req?.user);
     return withMessage(updated, 'Menu item updated successfully');
   }
 
@@ -108,7 +108,7 @@ export class MenuController {
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
   async updateCategory(@Param('id') id: string, @Body() dto: UpdateCategoryDto, @Req() req: any) {
-    const updated = await this.menuService.updateCategory(id, dto, req?.user?.restaurantId);
+    const updated = await this.menuService.updateCategory(id, dto, req?.user?.restaurantId, req?.user);
     return withMessage(updated, 'Category updated successfully');
   }
 
@@ -116,8 +116,8 @@ export class MenuController {
   @Post('categories')
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
-  async createCategory(@Body() dto: CreateCategoryDto) {
-    const created = await this.menuService.createCategory(dto);
+  async createCategory(@Body() dto: CreateCategoryDto, @Req() req: any) {
+    const created = await this.menuService.createCategory(dto, req?.user);
     return withMessage(created, `Category '${created.name}' created successfully`);
   }
 
@@ -126,7 +126,7 @@ export class MenuController {
   @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
   @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
   async removeCategory(@Param('id') id: string, @Req() req: any) {
-    await this.menuService.removeCategory(id, req?.user?.restaurantId);
+    await this.menuService.removeCategory(id, req?.user?.restaurantId, req?.user);
     return withMessage({ id }, 'Category deleted successfully');
   }
 }

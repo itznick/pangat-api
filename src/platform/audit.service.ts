@@ -13,13 +13,12 @@ export interface AuditActor {
 /** Build the actor block from an authenticated Express request. */
 export function actorOf(req: any): AuditActor {
   const u = req?.user || {};
-  const fwd = String(req?.headers?.['x-forwarded-for'] || '').split(',')[0].trim();
   return {
     id: u.id ?? null,
     name: u.name ?? null,
     email: u.email ?? null,
     role: u.platformRole ?? u.role ?? null,
-    ip: (fwd || req?.ip || '').slice(0, 64) || null,
+    ip: String(req?.ip || '').slice(0, 64) || null, // proxy-verified (trust proxy); never the raw X-Forwarded-For header
     userAgent: String(req?.headers?.['user-agent'] || '').slice(0, 255) || null,
   };
 }

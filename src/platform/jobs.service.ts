@@ -160,9 +160,10 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     const del = async (sql: string) => (await this.ds.query(sql))[1] as number;
     return {
       healthSnapshots: await del(`DELETE FROM health_snapshots WHERE taken_at < now() - interval '14 days'`),
-      errorLogs: await del(`DELETE FROM error_logs WHERE created_at < now() - interval '30 days'`),
-      webhookEvents: await del(`DELETE FROM webhook_events WHERE received_at < now() - interval '90 days'`),
-      loginEvents: await del(`DELETE FROM login_events WHERE created_at < now() - interval '180 days'`),
+      errorLogs: await del(`DELETE FROM error_logs WHERE created_at < now() - interval '90 days'`),
+      webhookEvents: await del(`DELETE FROM webhook_events WHERE received_at < now() - interval '180 days'`),
+      // sign-in history is security evidence: keep a full year (CERT-In asks for 180 days of logs; DPDP security safeguards point to a year)
+      loginEvents: await del(`DELETE FROM login_events WHERE created_at < now() - interval '365 days'`),
       jobRuns: await del(`DELETE FROM job_runs WHERE started_at < now() - interval '60 days'`),
     };
   }

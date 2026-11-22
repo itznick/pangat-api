@@ -19,6 +19,7 @@ import { OnboardDto } from './dto/onboard.dto.js';
 import { SetupSuperAdminDto } from './dto/setup-super-admin.dto.js';
 import { RequestPasswordResetDto, ResetPasswordDto } from './dto/password-reset.dto.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
+import { TwoFactorService } from './two-factor.service.js';
 import { IsAcceptablePassword } from '../common/security/password-policy.js';
 import { clientMeta } from '../platform/login-events.js';
 
@@ -30,6 +31,22 @@ export class ChangePasswordDto {
   @IsString()
   @IsAcceptablePassword()
   newPassword: string;
+}
+
+export class TotpCodeDto {
+  @IsString()
+  @IsNotEmpty()
+  code: string;
+}
+
+export class DisableTotpDto {
+  @IsString()
+  @IsNotEmpty()
+  password: string;
+
+  @IsString()
+  @IsNotEmpty()
+  code: string;
 }
 
 export class UpdateProfileDto {
@@ -46,7 +63,7 @@ export class UpdateProfileDto {
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(private readonly authService: AuthService, private readonly twoFactor: TwoFactorService) {}
 
   @Post('setup-super-admin')
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
@@ -86,7 +103,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   async login(@Body() loginDto: LoginDto, @Req() req: any) {
     const result = await this.authService.login(loginDto, clientMeta(req));
-    if ('otpRequired' in result) return withMessage(result, String((result as { message?: string }).message));
+    if ('otpRequired' in result || 'totpRequired' in result) return withMessage(result, String((result as { message?: string }).message));
     return withMessage(result, 'Authentication successful');
   }
 
@@ -131,6 +148,31 @@ export class AuthController {
       result,
       'Organization, outlet, and tables provisioned successfully in atomic transaction',
     );
+  }
+
+  // ── Two-factor sign-in (authenticator app) ───────────────────────────────
+  @Post('2fa/setup')
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @HttpCode(HttpStatus.OK)
+  async twoFactorSetup(@Req() req: any) {
+    return withMessage(await this.twoFactor.setup(req.user.id), 'Scan the code with your authenticator app, then enter the first code it shows');
+  }
+
+  @Post('2fa/enable')
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @HttpCode(HttpStatus.OK)
+  async twoFactorEnable(@Body() dto: TotpCodeDto, @Req() req: any) {
+    return withMessage(await this.twoFactor.enable(req.user.id, dto.code), 'Two-factor sign-in is on. Save your recovery codes now');
+  }
+
+  @Post('2fa/disable')
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @HttpCode(HttpStatus.OK)
+  async twoFactorDisable(@Body() dto: DisableTotpDto, @Req() req: any) {
+    return withMessage(await this.twoFactor.disable(req.user.id, dto.password, dto.code), 'Two-factor sign-in is off');
   }
 
   @Get('me')

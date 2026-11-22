@@ -32,6 +32,7 @@ import { AttemptLimiter } from '../common/security/attempt-limiter.js';
 import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 import { OtpService } from '../common/services/otp.service.js';
 import { assertPasswordAllowed } from '../common/security/password-policy.js';
+import { TwoFactorService } from './two-factor.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { PlatformAuditService } from '../platform/audit.service.js';
 import { currentRequest } from '../common/request-context.js';
@@ -56,6 +57,7 @@ export class AuthService {
     private readonly otpService: OtpService,
     @Optional() private readonly auditService?: AuditService,
     @Optional() private readonly platformAudit?: PlatformAuditService,
+    @Optional() private readonly twoFactor?: TwoFactorService,
   ) {}
 
   /**
@@ -266,9 +268,17 @@ export class AuthService {
         }
       }
     }
+    // Authenticator-app second factor: strongest option, used whenever the person has switched it on
+    if (staff.totpEnabled && this.twoFactor) {
+      if (!loginDto.totp) return { totpRequired: true as const, message: 'Enter the 6-digit code from your authenticator app (or a recovery code).' };
+      if (!(await this.twoFactor.verifyLogin(staff, loginDto.totp))) {
+        await logFail('WRONG_TOTP');
+        throw new UnauthorizedException('That code is wrong or has expired.');
+      }
+    }
     // Second factor for platform admins (opt-in). Only enforced while a code can really be delivered, so a missing
     // email provider can never lock every administrator out; the setting's help text says so.
-    if (staffIsAdmin && getSetting<boolean>('security.adminLoginOtp') === true) {
+    if (staffIsAdmin && !staff.totpEnabled && getSetting<boolean>('security.adminLoginOtp') === true) {
       if (process.env.ADMIN_LOGIN_OTP_DISABLED === 'true') {
         // Break-glass for when the mail provider is down or the admin's email is not a real inbox
         this.logger.warn('ADMIN_LOGIN_OTP_DISABLED=true: platform admin sign-in code is being skipped');
@@ -373,6 +383,8 @@ export class AuthService {
         organizationId: staff.organizationId,
         restaurantId: staff.restaurantId,
         mustChangePassword: Boolean(staff.mustChangePassword),
+        totpEnabled: Boolean(staff.totpEnabled),
+        mustEnrollTotp: Boolean(isPlatformAdmin && !staff.totpEnabled && getSetting<boolean>('security.adminTotpRequired') === true),
         restaurantSlug: outlets[0]?.slug || null,
         organizationName: organization?.name || null,
       },
@@ -494,6 +506,7 @@ export class AuthService {
       organizationId: staff.organizationId,
       restaurantId: staff.restaurantId,
       mustChangePassword: Boolean(staff.mustChangePassword),
+      totpEnabled: Boolean(staff.totpEnabled),
       lastLoginAt: staff.lastLoginAt,
     };
   }

@@ -84,6 +84,7 @@ export const SETTINGS: SettingDef[] = [
 
   { key: 'security.maxFailedLogins', group: 'security', label: 'Failed sign-ins before lockout', type: 'number', default: 5, min: 3, max: 20 },
   { key: 'security.adminLoginOtp', group: 'security', label: 'Email code for platform admin sign-in', type: 'boolean', default: false, help: 'Platform admins must also enter a 6-digit code emailed to them. Only enforced while an email provider is configured, so a missing provider can never lock everyone out.' },
+  { key: 'security.adminTotpRequired', group: 'security', label: 'Require an authenticator app for platform admins', type: 'boolean', default: false, help: 'Platform admins without two-factor can only open the set-up screen until they turn it on. Turn this on once every admin has set it up (or can).' },
   { key: 'security.signupEmailOtp', group: 'security', label: 'Verify email on self-service sign-up', type: 'boolean', default: false, help: 'New restaurants must confirm their owner email with a 6-digit code before the account is created. Only enforced while an email provider is configured.' },
   { key: 'security.lockoutMinutes', group: 'security', label: 'Lockout duration (minutes)', type: 'number', default: 15, min: 1, max: 1440 },
 ];

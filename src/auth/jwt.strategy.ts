@@ -71,6 +71,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       organizationId: staff.organizationId,
       restaurantId: staff.restaurantId,
       mustChangePassword: Boolean(staff.mustChangePassword),
+      mustEnrollTotp: Boolean(isPlatformAdmin && !staff.totpEnabled && getSetting<boolean>('security.adminTotpRequired') === true),
     };
   }
 }

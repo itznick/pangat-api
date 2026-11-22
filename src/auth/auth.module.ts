@@ -15,6 +15,7 @@ import { AuthController, OnboardingController } from './auth.controller.js';
 import { JwtStrategy } from './jwt.strategy.js';
 import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 import { AuditModule } from '../audit/audit.module.js';
+import { TwoFactorService } from './two-factor.service.js';
 import { OtpService } from '../common/services/otp.service.js';
 
 @Module({
@@ -41,7 +42,7 @@ import { OtpService } from '../common/services/otp.service.js';
     }),
   ],
   controllers: [AuthController, OnboardingController],
-  providers: [AuthService, JwtStrategy, EmailDeliveryService, OtpService],
+  providers: [AuthService, JwtStrategy, EmailDeliveryService, OtpService, TwoFactorService],
   exports: [AuthService, JwtStrategy, PassportModule, EmailDeliveryService, OtpService],
 })
 export class AuthModule {}

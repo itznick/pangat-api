@@ -88,6 +88,24 @@ export class Staff {
   @Column({ name: 'password_changed_at', type: 'timestamp with time zone', nullable: true })
   passwordChangedAt: Date | null;
 
+  /** Authenticator-app secret, encrypted (AES-256-GCM). Only trusted once totpEnabled is true. */
+  @Column({ name: 'totp_secret_enc', type: 'text', nullable: true, select: true })
+  totpSecretEnc: string | null;
+
+  @Column({ name: 'totp_enabled', type: 'boolean', default: false })
+  totpEnabled: boolean;
+
+  @Column({ name: 'totp_enabled_at', type: 'timestamptz', nullable: true })
+  totpEnabledAt: Date | null;
+
+  /** Last accepted 30-second step: a code cannot be used twice */
+  @Column({ name: 'totp_last_step', type: 'bigint', nullable: true, transformer: { to: (v: number | null) => v, from: (v: string | null) => (v == null ? null : Number(v)) } })
+  totpLastStep: number | null;
+
+  /** bcrypt hashes of the one-time recovery codes that are still unused */
+  @Column({ name: 'totp_recovery_hashes', type: 'jsonb', nullable: true })
+  totpRecoveryHashes: string[] | null;
+
   /** True after a temporary or someone-else-chosen password: the person must pick their own before doing anything else */
   @Column({ name: 'must_change_password', type: 'boolean', default: false })
   mustChangePassword: boolean;

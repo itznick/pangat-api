@@ -14,7 +14,7 @@
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
     "lint": "oxlint src/ test/",
-    "test": "node --test --test-concurrency=1 test/qa-remediation.test.mjs test/inventory.test.mjs test/order-lifecycle.test.mjs test/order-types.test.mjs test/recipes-deductions.test.mjs test/security-integration.test.mjs test/hardening.test.mjs test/cache.test.mjs test/subscriptions.test.mjs test/otp-email.test.mjs",
+    "test": "node --test --test-concurrency=1 test/qa-remediation.test.mjs test/inventory.test.mjs test/order-lifecycle.test.mjs test/order-types.test.mjs test/recipes-deductions.test.mjs test/security-integration.test.mjs test/hardening.test.mjs test/cache.test.mjs test/subscriptions.test.mjs test/otp-email.test.mjs test/authorization.test.mjs",
     "test:integration": "node --test --test-concurrency=1 test/integration.e2e.test.mjs",
     "test:platform": "node --test --test-concurrency=1 test/platform-control.e2e.test.mjs",
     "test:unit": "node --test test/otp-email.test.mjs test/security-integration.test.mjs test/hardening.test.mjs test/cache.test.mjs",

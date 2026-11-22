@@ -1,3 +1,4 @@
+import { redactForKitchen } from '../orders/order-redaction.js';
 import {
   WebSocketGateway,
   WebSocketServer,
@@ -168,7 +169,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const cleanSlug = (restaurantSlug || 'pangat').trim().toLowerCase();
     const kdsRoom = `kds:${cleanSlug}`;
     const adminRoom = `admin:${cleanSlug}`;
-    this.server.to(kdsRoom).emit('order:new', order);
+    this.server.to(kdsRoom).emit('order:new', redactForKitchen(order));
     this.server.to(adminRoom).emit('order:new', order);
     this.logger.log(`Emitted order:new to ${kdsRoom} & ${adminRoom} for order #${order.id}`);
   }
@@ -180,7 +181,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const rawSlug = restaurantSlug || order?.restaurant?.slug;
     if (rawSlug) {
       const cleanSlug = rawSlug.trim().toLowerCase();
-      this.server.to(`kds:${cleanSlug}`).emit('order:status', { orderId, status, order });
+      this.server.to(`kds:${cleanSlug}`).emit('order:status', { orderId, status, order: redactForKitchen(order) });
       this.server.to(`admin:${cleanSlug}`).emit('order:status', { orderId, status, order });
     }
     this.logger.log(`Emitted order:status (${status}) for order #${orderId}`);
@@ -199,7 +200,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const rawSlug = restaurantSlug || order?.restaurant?.slug;
     if (rawSlug) {
       const cleanSlug = rawSlug.trim().toLowerCase();
-      this.server.to(`kds:${cleanSlug}`).emit('order:paid', payload);
+      this.server.to(`kds:${cleanSlug}`).emit('order:paid', { orderId, order: redactForKitchen(order) }); // the kitchen is told nothing about money
       this.server.to(`admin:${cleanSlug}`).emit('order:paid', payload);
     }
     this.logger.log(`Emitted order:paid for order #${orderId}`);
@@ -211,7 +212,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const rawSlug = restaurantSlug || order?.restaurant?.slug;
     if (rawSlug) {
       const cleanSlug = rawSlug.trim().toLowerCase();
-      this.server.to(`kds:${cleanSlug}`).emit('order:updated', { orderId, order });
+      this.server.to(`kds:${cleanSlug}`).emit('order:updated', { orderId, order: redactForKitchen(order) });
       this.server.to(`admin:${cleanSlug}`).emit('order:updated', { orderId, order });
     }
     this.logger.log(`Emitted order:updated for order #${orderId}`);

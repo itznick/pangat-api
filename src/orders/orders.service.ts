@@ -1108,6 +1108,14 @@ export class OrdersService {
     if (order.orderStatus === OrderStatus.CANCELLED) {
       throw new BadRequestException('Cannot mark a CANCELLED order as paid.');
     }
+    // Separation of duties: a steward takes orders; settling money is the cashier's, manager's or owner's job
+    // unless this outlet has deliberately allowed it (Settings → Operations).
+    if (actor?.role === StaffRole.STEWARD) {
+      const outlet = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });
+      if (!resolveOperations(outlet?.operations).stewardCanSettle) {
+        throw new ForbiddenException('Settling a bill is limited to the cashier, manager or owner at this outlet.');
+      }
+    }
     // Idempotent: a second tap (or a retry) must not move the settlement time or re-emit events
     if (order.paymentStatus === PaymentStatus.PAID) {
       return order;

@@ -19,6 +19,8 @@ import { CreateStaffDto } from './dto/create-staff.dto.js';
 import { AuditService } from '../audit/audit.service.js';
 import { EntitlementService } from '../subscriptions/entitlement.service.js';
 import { BCRYPT_COST } from '../common/security/passwords.js';
+import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
+import { renderEmail } from '../common/services/email-template.js';
 
 @Injectable()
 export class RestaurantsService {
@@ -33,6 +35,7 @@ export class RestaurantsService {
     private readonly entitlementService?: EntitlementService,
     @Optional()
     private readonly auditService?: AuditService,
+    @Optional() private readonly emailService?: EmailDeliveryService,
   ) {}
 
   async findBySlug(identifier: string): Promise<Restaurant> {
@@ -170,9 +173,58 @@ export class RestaurantsService {
     return this.auditService.list(restaurantId, q);
   }
 
+  /**
+   * Settings that decide where customer money goes or what tax is charged. Only the Owner may change them: a manager who
+   * could edit the UPI ID could quietly send every customer payment to a personal account.
+   */
+  static readonly OWNER_ONLY_SETTINGS = ['upiVpa', 'gstin', 'hsnSac', 'gstPercentage', 'serviceChargePercentage'] as const;
+
+  private static maskSetting(key: string, v: unknown): string {
+    const s = v === null || v === undefined || v === '' ? '(empty)' : String(v);
+    if (key === 'upiVpa' || key === 'gstin') return s.length <= 4 ? '***' : `${s.slice(0, 2)}***${s.includes('@') ? s.slice(s.indexOf('@')) : s.slice(-2)}`;
+    return s;
+  }
+
+  private async notifyOwnerOfSensitiveChange(restaurant: Restaurant, changes: { key: string; from: unknown; to: unknown }[], actor?: any) {
+    if (!this.emailService || changes.length === 0) return;
+    try {
+      const owner = await this.staffRepo.findOne({
+        where: { organizationId: restaurant.organizationId ?? undefined, role: StaffRole.SUPER_OWNER, isActive: true } as any,
+        order: { createdAt: 'ASC' } as any,
+      });
+      if (!owner?.email) return;
+      const label: Record<string, string> = { upiVpa: 'UPI ID', gstin: 'GSTIN', hsnSac: 'HSN/SAC code', gstPercentage: 'GST %', serviceChargePercentage: 'Service charge %' };
+      const mail = renderEmail({
+        preheader: `A payment or tax setting was changed for ${restaurant.name}`,
+        heading: 'A payment or tax setting was changed',
+        name: owner.name,
+        paragraphs: [
+          `${actor?.name || 'A team member'} (${String(actor?.role || 'staff').replace(/_/g, ' ').toLowerCase()}) changed these settings for ${restaurant.name}:`,
+          ...changes.map((c) => `${label[c.key] || c.key}: ${RestaurantsService.maskSetting(c.key, c.from)} → ${RestaurantsService.maskSetting(c.key, c.to)}`),
+        ],
+        note: 'If you did not expect this, change your password and review your team under Settings → Team. The change is recorded in your activity log.',
+      });
+      await this.emailService.sendTransactionalEmail({ to: owner.email, subject: `Payment or tax setting changed: ${restaurant.name}`, htmlContent: mail.html, textContent: mail.text });
+    } catch {
+      /* the change is already saved and audited; a failed courtesy email must not undo it */
+    }
+  }
+
   async updateSettings(slug: string, dto: UpdateSettingsDto, actor?: any): Promise<Restaurant> {
     const restaurant = await this.findBySlug(slug);
     const before = { gst: restaurant.gstPercentage, service: restaurant.serviceChargePercentage, upi: restaurant.upiVpa };
+
+    const sensitive: { key: string; from: unknown; to: unknown }[] = [];
+    for (const key of RestaurantsService.OWNER_ONLY_SETTINGS) {
+      const next = (dto as Record<string, unknown>)[key];
+      if (next === undefined) continue;
+      const cur = (restaurant as unknown as Record<string, unknown>)[key];
+      const same = typeof cur === 'number' || typeof next === 'number' ? Number(cur ?? 0) === Number(next ?? 0) : String(cur ?? '') === String(next ?? '');
+      if (!same) sensitive.push({ key, from: cur, to: next });
+    }
+    if (sensitive.length && actor?.role === StaffRole.STORE_MANAGER && !actor?.isPlatformAdmin) {
+      throw new ForbiddenException('Only the owner can change the UPI ID, GST details or service charge. Ask your owner to update it.');
+    }
 
     const { operations, ...rest } = dto;
     Object.assign(restaurant, rest);
@@ -188,6 +240,7 @@ export class RestaurantsService {
       } as typeof current;
     }
     const saved = await this.restaurantRepo.save(restaurant);
+    void this.notifyOwnerOfSensitiveChange(saved, sensitive, actor);
     await this.audit(restaurant.id, 'RESTAURANT', restaurant.id, 'SETTINGS_UPDATED', actor, {
       changed: Object.keys(dto),
       before,

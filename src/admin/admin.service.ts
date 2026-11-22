@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import * as bcrypt from 'bcrypt';
-import { randomInt } from 'crypto';
+import { randomBytes, randomInt } from 'crypto';
 import { Staff } from '../auth/entities/staff.entity.js';
 import { Organization } from '../organizations/entities/organization.entity.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
@@ -20,12 +20,14 @@ import { UpdateLeadDto } from '../leads/dto/update-lead.dto.js';
 import { ensureTrial } from '../subscriptions/subscription-access.js';
 import { EventsGateway } from '../events/events.gateway.js';
 import { BCRYPT_COST } from '../common/security/passwords.js';
+import { PasswordLinkService } from '../common/services/password-link.service.js';
 
 @Injectable()
 export class AdminService {
   constructor(
     private readonly dataSource: DataSource,
     private readonly eventsGateway: EventsGateway,
+    private readonly passwordLinks: PasswordLinkService,
   ) {}
 
   async getMetrics() {
@@ -106,9 +108,13 @@ export class AdminService {
     await queryRunner.connect();
     await queryRunner.startTransaction();
 
+    // When nobody typed a password and email works, the owner gets a "choose your password" link and no one ever sees a password.
+    // Otherwise (no email provider, or the operator set one on purpose) the previous hand-over behaviour is kept.
+    const operatorPassword = dto.password?.trim() || '';
+    const useWelcomeLink = !operatorPassword && this.passwordLinks.canSend();
     const temporaryPassword =
-      dto.password?.trim() ||
-      `Pangat@${randomInt(100000, 999999)}`;
+      operatorPassword ||
+      (useWelcomeLink ? randomBytes(18).toString('base64url') : `Pangat@${randomInt(100000, 999999)}`);
 
     try {
       // 1. Check if email already registered
@@ -350,6 +356,10 @@ export class AdminService {
       // Commit transaction cleanly
       await queryRunner.commitTransaction();
       await ensureTrial(this.dataSource, savedOrg.id).catch(() => undefined);
+      let welcomeLinkSent = false;
+      if (useWelcomeLink) {
+        welcomeLinkSent = await this.passwordLinks.send(savedSuperOwner, 'WELCOME').then(() => true, () => false);
+      }
 
       return {
         success: true,
@@ -369,7 +379,9 @@ export class AdminService {
         ownerCredentials: {
           name: savedSuperOwner.name,
           email: savedSuperOwner.email,
-          temporaryPassword,
+          // Only handed over when no welcome link went out (no email provider, operator-chosen, or the mail failed)
+          ...(welcomeLinkSent ? {} : { temporaryPassword }),
+          welcomeLinkSent,
           loginUrl: '/login',
         },
         batchTablesCreated: savedTables.length,
@@ -487,21 +499,13 @@ export class AdminService {
       );
     }
 
-    const tempPassword = `Pangat#${randomInt(100000, 999999)}`;
-    owner.passwordHash = await bcrypt.hash(tempPassword, BCRYPT_COST);
-    owner.passwordChangedAt = new Date(); // signs out the owner's existing sessions
-    owner.failedLoginCount = 0;
-    owner.lockedUntil = null;
-    await staffRepo.save(owner);
-
-    // Documented in Security Audit: In production, dispatch via transactional email (AWS SES/SendGrid/Resend)
-    // rather than relying solely on operator portal distribution.
+    await this.passwordLinks.send(owner, 'RESET');
     return {
       success: true,
-      message: `Password reset successfully for ${owner.name}`,
+      message: `A password reset link was emailed to ${owner.name}`,
       ownerName: owner.name,
       ownerEmail: owner.email,
-      temporaryPassword: tempPassword,
+      linkSent: true,
       organizationName: org.name,
     };
   }

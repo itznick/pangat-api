@@ -8,6 +8,7 @@ import { RestaurantsController } from './restaurants.controller.js';
 import { OperationsColumnBootstrap } from './operations-column.bootstrap.js';
 import { OrdersModule } from '../orders/orders.module.js';
 import { AuditModule } from '../audit/audit.module.js';
+import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module.js';
 
 @Module({
@@ -18,7 +19,7 @@ import { SubscriptionsModule } from '../subscriptions/subscriptions.module.js';
     AuditModule,
   ],
   controllers: [RestaurantsController],
-  providers: [RestaurantsService, OperationsColumnBootstrap],
+  providers: [RestaurantsService, OperationsColumnBootstrap, EmailDeliveryService],
   exports: [RestaurantsService],
 })
 export class RestaurantsModule {}

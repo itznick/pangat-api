@@ -56,6 +56,7 @@ export class OperationsDto {
   @IsOptional() @ValidateNested() @Type(() => PaymentsDto) payments?: PaymentsDto;
   @IsOptional() @IsInt() @Min(1) @Max(180) avgPrepMinutes?: number;
   @IsOptional() @IsString() @MaxLength(240) receiptFooter?: string;
+  @IsOptional() @IsBoolean() stewardCanSettle?: boolean;
 }
 
 export class UpdateSettingsDto {

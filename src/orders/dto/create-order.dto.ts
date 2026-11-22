@@ -2,6 +2,7 @@ import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
+  IsBoolean,
   Max,
   IsEnum,
   IsInt,
@@ -97,6 +98,11 @@ export class CreateOrderDto {
   @IsString()
   @IsNotEmpty()
   customerPhone?: string;
+
+  /** The diner ticked "I agree to the Privacy Notice". Required whenever a name, phone number or address is given. */
+  @IsOptional()
+  @IsBoolean()
+  consentAccepted?: boolean;
 
   @IsArray()
   @ArrayMinSize(1)

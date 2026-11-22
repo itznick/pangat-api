@@ -23,6 +23,7 @@ export const SETTING_GROUPS: { id: string; label: string; description: string }[
   { id: 'gateway', label: 'Payment gateway', description: 'Razorpay webhook verification' },
   { id: 'operations', label: 'Maintenance', description: 'Maintenance mode and scheduled windows' },
   { id: 'security', label: 'Security', description: 'Sign-in protection' },
+  { id: 'compliance', label: 'Privacy & compliance', description: 'Grievance officer, legal details and how long personal data is kept' },
 ];
 
 export const SETTINGS: SettingDef[] = [
@@ -70,6 +71,16 @@ export const SETTINGS: SettingDef[] = [
   { key: 'operations.maintenanceMessage', group: 'operations', label: 'Maintenance message', type: 'text', default: 'Pangat is undergoing scheduled maintenance. We will be back shortly.' },
   { key: 'operations.maintenanceStart', group: 'operations', label: 'Scheduled window start', type: 'datetime', default: null, help: 'Optional: maintenance switches on automatically in this window.' },
   { key: 'operations.maintenanceEnd', group: 'operations', label: 'Scheduled window end', type: 'datetime', default: null },
+
+  { key: 'compliance.legalName', group: 'compliance', label: 'Legal name of the business', type: 'string', default: 'Pangat', help: 'Shown on the Privacy Policy and Terms.' },
+  { key: 'compliance.registeredAddress', group: 'compliance', label: 'Registered address', type: 'text', default: null, help: 'Shown on the Privacy Policy and Terms when set.' },
+  { key: 'compliance.grievanceOfficerName', group: 'compliance', label: 'Grievance officer: name', type: 'string', default: 'Nikhil Bhamare', help: 'Published on the Privacy Policy. People can write to this person about their data.' },
+  { key: 'compliance.grievanceOfficerEmail', group: 'compliance', label: 'Grievance officer: email', type: 'email', default: null, help: 'Published on the Privacy Policy and notified of every new privacy request. Set this before launch.' },
+  { key: 'compliance.grievanceOfficerPhone', group: 'compliance', label: 'Grievance officer: phone', type: 'string', default: null },
+  { key: 'compliance.responseDays', group: 'compliance', label: 'Days to answer a privacy request', type: 'number', default: 30, min: 1, max: 90, help: 'Shown to people as the target and used for the due date.' },
+  { key: 'compliance.dinerDataRetentionMonths', group: 'compliance', label: 'Keep diner contact details (months)', type: 'number', default: 12, min: 0, max: 120, help: 'After this long, names, phone numbers and delivery addresses on finished orders are removed. The bill itself (amounts, tax, items) is kept for tax records. 0 keeps them for ever.' },
+  { key: 'compliance.leadRetentionMonths', group: 'compliance', label: 'Keep demo-request details (months)', type: 'number', default: 18, min: 1, max: 120 },
+  { key: 'compliance.jurisdictionCity', group: 'compliance', label: 'City for legal disputes', type: 'string', default: null, help: 'Named in the Terms as the place where disputes are heard. Ask your lawyer.' },
 
   { key: 'security.maxFailedLogins', group: 'security', label: 'Failed sign-ins before lockout', type: 'number', default: 5, min: 3, max: 20 },
   { key: 'security.adminLoginOtp', group: 'security', label: 'Email code for platform admin sign-in', type: 'boolean', default: false, help: 'Platform admins must also enter a 6-digit code emailed to them. Only enforced while an email provider is configured, so a missing provider can never lock everyone out.' },

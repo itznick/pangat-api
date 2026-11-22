@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { Equals, IsBoolean, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
 export class CreateLeadDto {
   @IsString()
@@ -24,4 +24,9 @@ export class CreateLeadDto {
   @IsString()
   @IsOptional()
   notes?: string;
+
+  /** Must be true: we only store contact details of people who accepted the Privacy Notice */
+  @IsBoolean()
+  @Equals(true, { message: 'Please accept the Privacy Notice so we can contact you' })
+  consentAccepted: boolean;
 }

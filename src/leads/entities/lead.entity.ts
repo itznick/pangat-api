@@ -37,6 +37,12 @@ export class Lead {
   @Column({ type: 'text', nullable: true })
   notes: string | null;
 
+  @Column({ name: 'consent_version', type: 'varchar', length: 20, nullable: true })
+  consentVersion: string | null;
+
+  @Column({ name: 'consent_at', type: 'timestamptz', nullable: true })
+  consentAt: Date | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

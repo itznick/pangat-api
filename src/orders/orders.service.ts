@@ -1,3 +1,4 @@
+import { PRIVACY_POLICY_VERSION } from '../platform/compliance.js';
 import { assertPlatformMerchantAccess } from '../common/guards/platform-merchant-access.js';
 import {
   Injectable,
@@ -187,6 +188,11 @@ export class OrdersService {
     }
 
     // Validation for Takeaway and Delivery customer details
+    // DPDP: personal details are only collected from someone who has accepted the privacy notice, and we keep the proof
+    const hasPersonalData = Boolean(dto.customerName?.trim() || dto.customerPhone?.trim() || dto.deliveryAddress?.trim());
+    if (hasPersonalData && dto.consentAccepted !== true) {
+      throw new BadRequestException('Please accept the Privacy Notice to continue. We use your name and phone only to prepare and deliver your order.');
+    }
     if (orderType === OrderType.TAKEAWAY && (!dto.customerName || !dto.customerName.trim())) {
       throw new BadRequestException('Customer name is required for takeaway / parcel pickup');
     }
@@ -314,6 +320,8 @@ export class OrdersService {
       restaurantId: restaurant.id,
       orderType,
       tableNumber: finalTableNumber,
+      consentVersion: hasPersonalData ? PRIVACY_POLICY_VERSION : null,
+      consentAt: hasPersonalData ? new Date() : null,
       customerName: dto.customerName ? dto.customerName.trim() : null,
       customerPhone: dto.customerPhone ? dto.customerPhone.trim() : null,
       deliveryAddress: dto.deliveryAddress ? dto.deliveryAddress.trim() : null,

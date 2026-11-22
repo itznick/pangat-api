@@ -51,7 +51,7 @@ async function onboard(tag, extra = {}) {
 }
 const idem = () => `idem-${crypto.randomBytes(8).toString('hex')}`;
 async function placeOrder(slug, items, extra = {}, key = idem()) {
-  return call('POST', '/orders', { headers: { 'x-idempotency-key': key }, body: { restaurantSlug: slug, orderType: 'TAKEAWAY', customerName: 'Guest', paymentMethod: 'PAY_AT_COUNTER', items, ...extra } });
+  return call('POST', '/orders', { headers: { 'x-idempotency-key': key }, body: { restaurantSlug: slug, orderType: 'TAKEAWAY', customerName: 'Guest', consentAccepted: true, paymentMethod: 'PAY_AT_COUNTER', items, ...extra } });
 }
 const menuOf = async (slug) => (await call('GET', `/menu/public/${slug}`)).data;
 const firstItems = async (slug, n = 1) => {

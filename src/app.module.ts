@@ -21,6 +21,7 @@ import { AuditModule } from './audit/audit.module.js';
 import { InventoryModule } from './inventory/inventory.module.js';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
 import { PlatformModule } from './platform/platform.module.js';
+import { PrivacyModule } from './privacy/privacy.module.js';
 
 @Module({
   imports: [
@@ -91,6 +92,7 @@ import { PlatformModule } from './platform/platform.module.js';
     InventoryModule,
     SubscriptionsModule,
     PlatformModule,
+    PrivacyModule,
     ReportsModule,
   ],
   controllers: [AppController],

@@ -195,9 +195,15 @@ describe('2. P0: Platform Admin Provisioning & Privilege Isolation', () => {
       role: StaffRole.CHEF,
       isPlatformAdmin: false,
     }
+    // AuthService.login looks the account up through a query builder, and legitimately records lastLoginAt;
+    // what must never happen is a write to the role or the platform-admin flag
+    const qb = (row: any) => ({ where() { return this }, andWhere() { return this }, getOne: async () => row })
     const mockStaffRepo = {
       findOne: async () => staffEntity,
-      update: async () => { throw new Error('Should not update role') },
+      createQueryBuilder: () => qb(staffEntity),
+      update: async (_id: string, patch: Record<string, unknown>) => {
+        if ('role' in patch || 'isPlatformAdmin' in patch) throw new Error('Should not update role')
+      },
     }
     const mockJwt = { sign: () => 'token' }
     const mockDataSource = {
@@ -339,6 +345,7 @@ describe('4. P1: Order Pricing, Verification & Public Tracking Security', () => 
       findOne: async () => verifiedDish,
     }
     const mockOrderRepo = {
+      findOne: async () => null, // idempotency lookup: no earlier order with this key
       create: (entity: any) => entity,
       save: async (entity: any) => entity,
     }
@@ -401,7 +408,7 @@ describe('4. P1: Order Pricing, Verification & Public Tracking Security', () => 
     }
 
     const ordersService = new OrdersService(
-      {} as any,
+      { findOne: async () => null } as any, // order repository: no earlier order with this idempotency key
       {} as any,
       { findOne: async () => ({ id: 'rest-A1', name: 'Cafe A1' }) } as any,
       { findOne: async () => ({ id: 'tbl-1', tableNumber: 'T01' }) } as any,
@@ -435,7 +442,7 @@ describe('4. P1: Order Pricing, Verification & Public Tracking Security', () => 
     }
 
     const ordersService = new OrdersService(
-      {} as any,
+      { findOne: async () => null } as any, // order repository: no earlier order with this idempotency key
       {} as any,
       { findOne: async () => ({ id: 'rest-A1', name: 'Cafe A1' }) } as any,
       { findOne: async () => ({ id: 'tbl-1', tableNumber: 'T01' }) } as any,
@@ -504,9 +511,12 @@ describe('5. P2: Password-Reset Neutral Response & Security', () => {
       resetTokenExpiresAt: null,
     }
 
+    const qbFor = (row: any) => ({ where() { return this }, andWhere() { return this }, getOne: async () => row })
     const mockStaffRepo = {
       findOne: async () => mockStaff,
+      createQueryBuilder: () => qbFor(mockStaff),
       save: async () => mockStaff,
+      manager: { transaction: async (cb: any) => cb({ getRepository: () => ({ save: async () => mockStaff }) }) },
     }
     const mockEmailService = {
       sendTransactionalEmail: async () => ({ delivered: true, provider: 'sendgrid' as const }),
@@ -527,8 +537,20 @@ describe('5. P2: Password-Reset Neutral Response & Security', () => {
     assert.equal(response.success, true)
     // Neutral public message preventing enumeration
     assert.match(response.message, /If the email exists, a password reset link has been dispatched/)
-    // Accurate internal delivered status
-    assert.equal(response.delivered, true)
-    assert.equal(response.deliveryProvider, 'sendgrid')
+    // The original assertion here required the response to carry `delivered: true` and `deliveryProvider: 'sendgrid'`. That contradicted the
+    // later, deliberate hardening (commit c3a8b95, mirrored in security-integration.test.mjs): delivery state must NOT be exposed, because it
+    // reveals whether the account exists. The assertion is therefore inverted (stricter), not removed.
+    assert.equal('delivered' in response, false)
+    assert.equal('deliveryProvider' in response, false)
+
+    // ...and an unknown email gets the identical response (no account enumeration)
+    const unknown = new AuthService(
+      { createQueryBuilder: () => qbFor(null), findOne: async () => null } as any,
+      {} as any,
+      {} as any,
+      mockEmailService as any,
+      mockConfig as any,
+    )
+    assert.deepEqual(await unknown.requestPasswordReset('ghost@example.com'), response)
   })
 })

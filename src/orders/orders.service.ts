@@ -16,8 +16,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import * as crypto from 'crypto';
 import { getSetting } from '../platform/settings.service.js';
-import { resolveFeatureAccess } from '../platform/features.js';
-import { getOrgAccess } from '../subscriptions/subscription-access.js';
+import { decideFeature, getOrgAccess } from '../subscriptions/subscription-access.js';
 import { Order } from './entities/order.entity.js';
 import { OrderItem, SelectedModifierSnapshot } from './entities/order-item.entity.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
@@ -100,7 +99,8 @@ export class OrdersService {
     }
     // Platform feature switch for QR ordering (global kill switch or a per-restaurant override)
     if (restaurant.organizationId) {
-      const q = await resolveFeatureAccess(this.dataSource, restaurant.organizationId, 'QR_ORDERING', true);
+      // QR ordering is a plan feature (plan + platform kill switch + per-restaurant override), decided by the shared resolver
+      const q = await decideFeature(this.dataSource, restaurant.organizationId, 'QR_ORDERING');
       if (!q.allowed) throw new BadRequestException('This outlet is not taking orders right now. Please ask the staff for help.');
     }
     // A lapsed subscription closes the outlet to new guest orders until the owner renews

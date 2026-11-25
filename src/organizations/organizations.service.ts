@@ -11,8 +11,9 @@ import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
 import { Table } from '../tables/entities/table.entity.js';
 import { TableStatus, StaffRole } from '../common/enums/index.js';
 import { CreateOutletDto } from './dto/create-outlet.dto.js';
-import { resolveFeatureAccess } from '../platform/features.js';
 import { EntitlementService } from '../subscriptions/entitlement.service.js';
+import { decideFeature, featureError } from '../subscriptions/subscription-access.js';
+import { assertInitialTablesFit, loadCapacityContext, reserveOutletCapacity, resolveInitialTables } from '../subscriptions/capacity.js';
 import { AuditService } from '../audit/audit.service.js';
 
 @Injectable()
@@ -80,23 +81,6 @@ export class OrganizationsService {
       );
     }
 
-    // Entitlement Check: Verify organization has not exceeded plan outlet limits
-    if (this.entitlementService) {
-      const currentOutletCount = await this.restaurantRepo.count({
-        where: { organizationId: orgId },
-      });
-      const multi = await resolveFeatureAccess(this.dataSource, orgId, 'MULTI_OUTLET', true);
-      if (!multi.allowed && currentOutletCount >= 1) {
-        throw new ForbiddenException('Adding more outlets is currently unavailable for your account.');
-      }
-      const capacity = await this.entitlementService.canAddOutlet(orgId, currentOutletCount);
-      if (!capacity.allowed) {
-        throw new ForbiddenException(
-          `Plan outlet limit reached (${capacity.maxOutlets} outlet maximum). Upgrade your subscription plan to create additional branches.`,
-        );
-      }
-    }
-
     // Check slug collision
     const existing = await this.restaurantRepo.findOne({
       where: { slug: dto.slug },
@@ -107,11 +91,25 @@ export class OrganizationsService {
       );
     }
 
+    // Subscription facts are read BEFORE the transaction takes its connection and lock (see loadCapacityContext)
+    const ctx = (await loadCapacityContext(this.dataSource, orgId))!;
+    const multiOutlet = await decideFeature(this.dataSource, orgId, 'MULTI_OUTLET');
+
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
 
     try {
+      // Plan checks run under the organisation's row lock, in the same transaction as the insert (no count-then-insert race):
+      //  1. the MULTI_OUTLET feature is needed for a second or later outlet (the numeric limit alone never grants it)
+      //  2. the numeric outlet limit
+      //  3. the starting tables must fit the plan's per-outlet table limit (an explicit request over the limit is refused, not trimmed)
+      await reserveOutletCapacity(queryRunner.manager, orgId, ctx, null, async (existing) => {
+        if (existing >= 1 && !multiOutlet.allowed) throw featureError('MULTI_OUTLET', multiOutlet.reason);
+      });
+      const initial = resolveInitialTables(ctx.plan, { indoor: dto.tableCount }, { indoor: 10, outdoor: 0 });
+      assertInitialTablesFit(initial, null);
+
       const outlet = queryRunner.manager.create(Restaurant, {
         organizationId: orgId,
         name: dto.name,
@@ -132,7 +130,7 @@ export class OrganizationsService {
       const savedOutlet = await queryRunner.manager.save(Restaurant, outlet);
 
       // Provision initial tables
-      const tableCount = Math.max(1, Math.min(50, dto.tableCount ?? 10));
+      const tableCount = initial.total;
       const tables: Table[] = [];
       for (let i = 1; i <= tableCount; i++) {
         const tableNum = `T${String(i).padStart(2, '0')}`;

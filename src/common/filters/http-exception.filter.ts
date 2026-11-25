@@ -79,6 +79,8 @@ export class HttpExceptionFilter implements ExceptionFilter {
       error:      errorLabel,
       message:    messages,
       ...(code ? { code } : {}),
+      // Structured, non-sensitive facts for the client (e.g. plan limit numbers); only set deliberately by our own exceptions
+      ...(exRes && typeof exRes === 'object' && (exRes as any).details && typeof (exRes as any).details === 'object' ? { details: (exRes as any).details } : {}),
       // Quote this to support: it finds the exact request in the error log and audit log
       requestId:  currentRequest()?.requestId,
       path:       req.url,

@@ -4,6 +4,8 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Max,
+  MaxLength,
   Min,
 } from 'class-validator';
 
@@ -59,11 +61,13 @@ export class ProvisionRestaurantDto {
   @IsNumber()
   @IsOptional()
   @Min(1)
+  @Max(100)
   indoorTableCount?: number;
 
   @IsNumber()
   @IsOptional()
   @Min(0)
+  @Max(50)
   outdoorTableCount?: number;
 
   // Step 4: Menu Preset Selection
@@ -75,4 +79,10 @@ export class ProvisionRestaurantDto {
   @IsString()
   @IsOptional()
   leadId?: string;
+
+  /** Exceed the trial plan's table limit on purpose: needs the "subscriptions.manage" permission; the reason is written to the audit trail. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  limitOverrideReason?: string;
 }

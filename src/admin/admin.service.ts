@@ -17,7 +17,8 @@ import { Lead } from '../leads/entities/lead.entity.js';
 import { LeadStatus, OrderStatus, StaffRole, TableStatus } from '../common/enums/index.js';
 import { ProvisionRestaurantDto } from './dto/provision-restaurant.dto.js';
 import { UpdateLeadDto } from '../leads/dto/update-lead.dto.js';
-import { ensureTrial } from '../subscriptions/subscription-access.js';
+import { authoriseLimitOverride, ensureTrial, recordLimitOverride, resolveTrialPlan } from '../subscriptions/subscription-access.js';
+import { assertInitialTablesFit, resolveInitialTables } from '../subscriptions/capacity.js';
 import { EventsGateway } from '../events/events.gateway.js';
 import { BCRYPT_COST } from '../common/security/passwords.js';
 import { PasswordLinkService } from '../common/services/password-link.service.js';
@@ -103,7 +104,13 @@ export class AdminService {
     return leadRepo.save(lead);
   }
 
-  async provisionRestaurant(dto: ProvisionRestaurantDto) {
+  async provisionRestaurant(dto: ProvisionRestaurantDto, actor?: any) {
+    // The new restaurant starts on the trial plan: its floor must fit that plan unless an authorised administrator records a reason to exceed it
+    const override = authoriseLimitOverride(actor, dto.limitOverrideReason);
+    const trialPlan = await resolveTrialPlan(this.dataSource);
+    const initialTables = resolveInitialTables(trialPlan, { indoor: dto.indoorTableCount, outdoor: dto.outdoorTableCount }, { indoor: 12, outdoor: 4 });
+    assertInitialTablesFit(initialTables, override);
+
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
@@ -188,8 +195,8 @@ export class AdminService {
       const savedOutlet = await queryRunner.manager.save(Restaurant, outlet);
 
       // 6. Generate Batch Tables (Indoor & Outdoor)
-      const indoorCount = Math.max(1, dto.indoorTableCount ?? 12);
-      const outdoorCount = Math.max(0, dto.outdoorTableCount ?? 4);
+      const indoorCount = initialTables.indoor;
+      const outdoorCount = initialTables.outdoor;
       const createdTables: Table[] = [];
 
       for (let i = 1; i <= indoorCount; i++) {
@@ -358,6 +365,15 @@ export class AdminService {
       // Commit transaction cleanly
       await queryRunner.commitTransaction();
       await ensureTrial(this.dataSource, savedOrg.id).catch(() => undefined);
+      if (override && initialTables.exceeded) {
+        await recordLimitOverride(this.dataSource, {
+          organizationId: savedOrg.id,
+          override,
+          decision: { kind: 'tables', limit: initialTables.limit, current: 0, adding: initialTables.total, allowed: false, remaining: initialTables.limit },
+          restaurantId: savedOutlet.id,
+          context: 'provisioning',
+        });
+      }
       let welcomeLinkSent = false;
       if (useWelcomeLink) {
         welcomeLinkSent = await this.passwordLinks.send(savedSuperOwner, 'WELCOME').then(() => true, () => false);

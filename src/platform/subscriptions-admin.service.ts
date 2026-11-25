@@ -17,9 +17,13 @@ const DAY = 86_400_000;
  */
 export function effectiveStatusSql(alias = 's'): string {
   const grace = Math.max(0, Math.floor(Number(getSetting<number>('subscription.gracePeriodDays') ?? 7)));
+  const live = `${alias}.status IN ('ACTIVE','TRIAL','PAST_DUE','GRACE_PERIOD')`;
+  const graceEnd = `COALESCE(${alias}.grace_period_ends_at, ${alias}.current_period_end + interval '${grace} days')`;
+  // SQL twin of subscription-access.ts `derivedStatus` (same rules, for list/count queries). A live test compares the two.
   return `(CASE
-    WHEN ${alias}.status IN ('ACTIVE','TRIAL','PAST_DUE','GRACE_PERIOD') AND ${alias}.current_period_end < now()
-      THEN (CASE WHEN now() < COALESCE(${alias}.grace_period_ends_at, ${alias}.current_period_end + interval '${grace} days') THEN 'GRACE_PERIOD' ELSE 'EXPIRED' END)
+    WHEN ${live} AND ${alias}.status IN ('PAST_DUE','GRACE_PERIOD') AND ${alias}.grace_period_ends_at IS NOT NULL AND ${alias}.grace_period_ends_at <= now() THEN 'EXPIRED'
+    WHEN ${live} AND ${alias}.current_period_end < now() AND COALESCE(${alias}.cancel_at_period_end, false) THEN 'EXPIRED'
+    WHEN ${live} AND ${alias}.current_period_end < now() THEN (CASE WHEN now() < ${graceEnd} THEN 'GRACE_PERIOD' ELSE 'EXPIRED' END)
     ELSE ${alias}.status::text END)`;
 }
 
@@ -261,8 +265,10 @@ export class SubscriptionsAdminService {
         [orgId],
       ),
       this.ds.query(
+        // seats only: not the kitchen-station system account, the owner or platform administrators (see subscriptions/capacity.ts)
         `SELECT COALESCE(MAX(c),0)::int AS n FROM (SELECT COUNT(*) c FROM staff st JOIN restaurants r ON r.id = st.restaurant_id
-          WHERE r.organization_id = $1 AND st.is_active = true GROUP BY r.id) x`,
+          WHERE r.organization_id = $1 AND st.is_active = true AND st.is_platform_admin = false
+            AND st.role NOT IN ('SUPER_OWNER','PLATFORM_SUPER_ADMIN') AND LOWER(st.email) NOT LIKE '%@stations.pangat.app' GROUP BY r.id) x`,
         [orgId],
       ),
     ]);

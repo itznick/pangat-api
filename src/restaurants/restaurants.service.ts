@@ -18,10 +18,20 @@ import { UpdateSettingsDto } from './dto/update-settings.dto.js';
 import { CreateStaffDto } from './dto/create-staff.dto.js';
 import { AuditService } from '../audit/audit.service.js';
 import { EntitlementService } from '../subscriptions/entitlement.service.js';
+import { isSystemAccountEmail, loadCapacityContext, reserveStaffSeat } from '../subscriptions/capacity.js';
 import { BCRYPT_COST } from '../common/security/passwords.js';
 import { assertPasswordAllowed } from '../common/security/password-policy.js';
 import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 import { renderEmail } from '../common/services/email-template.js';
+
+/** Deep copy without `undefined` properties (class-transformer instances carry every declared optional field as undefined). */
+function definedOnly<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(definedOnly) as unknown as T;
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined).map(([k, v]) => [k, definedOnly(v)])) as T;
+  }
+  return value;
+}
 
 @Injectable()
 export class RestaurantsService {
@@ -238,6 +248,11 @@ export class RestaurantsService {
 
   async updateSettings(slug: string, dto: UpdateSettingsDto, actor?: any): Promise<Restaurant> {
     const restaurant = await this.findBySlug(slug);
+    // findBySlug loads the outlet's tables, and Restaurant.tables is a cascading relation: saving the outlet with a stale list would
+    // make TypeORM delete (or re-insert) any table created after the list was read. A settings change must never touch tables, so the
+    // list is set aside for the response and the save only sees the outlet's own columns.
+    const tablesAsRead = restaurant.tables;
+    (restaurant as { tables?: unknown }).tables = undefined;
     const before = { gst: restaurant.gstPercentage, service: restaurant.serviceChargePercentage, upi: restaurant.upiVpa };
     const beforeOps = restaurant.operations;
 
@@ -253,8 +268,11 @@ export class RestaurantsService {
       throw new ForbiddenException('Only the owner can change the UPI ID, GST details or service charge. Ask your owner to update it.');
     }
 
-    const { operations, ...rest } = dto;
+    const { operations: operationsDto, ...rest } = dto;
     Object.assign(restaurant, rest);
+    // The validated DTO is a class instance whose unset optional fields exist as `undefined` properties; spreading them would overwrite the
+    // stored values (a change to the prep time silently un-paused the outlet and reset every day's hours). Only fields actually sent are merged.
+    const operations = operationsDto ? (definedOnly(operationsDto) as NonNullable<typeof operationsDto>) : undefined;
     if (operations) {
       // Merge section by section so a partial update never wipes the rest of the rules
       const current = resolveOperations(restaurant.operations);
@@ -278,6 +296,7 @@ export class RestaurantsService {
       return persisted;
     });
     void this.notifyOwnerOfSensitiveChange(saved, sensitive, actor);
+    saved.tables = tablesAsRead; // same response shape as before
     return saved;
   }
 
@@ -345,6 +364,10 @@ export class RestaurantsService {
     const email = dto.email.trim().toLowerCase();
     assertPasswordAllowed(dto.password, { email, name: dto.name });
 
+    // @stations.pangat.app is reserved for system accounts (they use no seat and are hidden): a person must never be able to use it
+    if (isSystemAccountEmail(email)) {
+      throw new BadRequestException('That email domain is reserved for system accounts. Use the person\'s own email address.');
+    }
     const existing = await this.staffRepo
       .createQueryBuilder('s')
       .where('LOWER(s.email) = :email', { email })
@@ -353,19 +376,8 @@ export class RestaurantsService {
       throw new BadRequestException('A user with this email address already exists');
     }
 
-    // Entitlement Check: Verify staff quota per outlet has not been exceeded
-    if (this.entitlementService && restaurant.organizationId) {
-      const currentStaffCount = await this.staffRepo.count({
-        where: { restaurantId, isActive: true },
-      });
-      const capacity = await this.entitlementService.canAddStaff(restaurant.organizationId, currentStaffCount);
-      if (!capacity.allowed) {
-        throw new ForbiddenException(
-          `Plan staff limit reached (${capacity.maxStaff} staff members maximum per outlet). Upgrade your subscription plan to add more staff.`,
-        );
-      }
-    }
-
+    // Staff routes are owner-only, so there is no platform-administrator path and therefore no limit override for seats
+    const override = null;
     const staff = this.staffRepo.create({
       name: dto.name.trim(),
       email,
@@ -376,7 +388,11 @@ export class RestaurantsService {
       organizationId: restaurant.organizationId,
       restaurantId: restaurant.id,
     });
+    const capacity = await loadCapacityContext(this.staffRepo.manager.connection, restaurant.organizationId); // before the transaction: see loadCapacityContext
     const saved = await this.staffRepo.manager.transaction(async (em) => {
+      // A seat is checked under the outlet's row lock in the same transaction as the insert, so concurrent requests
+      // cannot both take the last seat. System accounts (kitchen station) never count; see subscriptions/capacity.ts.
+      if (restaurant.organizationId) await reserveStaffSeat(em, restaurant.id, capacity, 1, override, 'staff');
       const persisted = await em.getRepository(Staff).save(staff);
       await this.audit(restaurant.id, 'STAFF', persisted.id, 'STAFF_CREATED', actor, { role: persisted.role, email: persisted.email, name: persisted.name }, em, restaurant.organizationId);
       return persisted;
@@ -395,6 +411,7 @@ export class RestaurantsService {
   async updateStaff(restaurantId: string, staffId: string, dto: import('./dto/create-staff.dto.js').UpdateStaffDto, actor: any) {
     const staff = await this.staffOfOutlet(restaurantId, staffId);
     const before = { name: staff.name, phone: staff.phone, role: staff.role, isActive: staff.isActive };
+    let reactivating = false;
     if (staff.id === actor?.id && dto.isActive === false) {
       throw new BadRequestException('You cannot deactivate your own account');
     }
@@ -402,19 +419,16 @@ export class RestaurantsService {
     if (dto.phone !== undefined) staff.phone = dto.phone.trim() || null;
     if (dto.role !== undefined) staff.role = dto.role;
     if (dto.isActive !== undefined) {
-      if (dto.isActive && staff.isActive === false) {
-        const restaurant = await this.ownedOutlet(restaurantId);
-        if (this.entitlementService && restaurant.organizationId) {
-          const count = await this.staffRepo.count({ where: { restaurantId, isActive: true } });
-          const cap = await this.entitlementService.canAddStaff(restaurant.organizationId, count);
-          if (!cap.allowed) throw new ForbiddenException(`Plan staff limit reached (${cap.maxStaff}). Upgrade to reactivate this member.`);
-        }
-      }
+      // re-activation takes a seat again (checked below, under the outlet lock, in the same transaction as the save)
+      reactivating = dto.isActive && staff.isActive === false && !isSystemAccountEmail(staff.email);
       staff.isActive = dto.isActive;
     }
     const roleChanged = before.role !== staff.role;
     const deactivated = before.isActive !== false && staff.isActive === false;
+    const outletForSeat = reactivating ? await this.ownedOutlet(restaurantId) : null;
+    const capacity = outletForSeat ? await loadCapacityContext(this.staffRepo.manager.connection, outletForSeat.organizationId) : null;
     const saved = await this.staffRepo.manager.transaction(async (em) => {
+      if (reactivating && outletForSeat?.organizationId) await reserveStaffSeat(em, restaurantId, capacity, 1, null, 'staff-reactivation');
       const persisted = await em.getRepository(Staff).save(staff);
       const after = { name: persisted.name, phone: persisted.phone, role: persisted.role, isActive: persisted.isActive };
       await this.audit(restaurantId, 'STAFF', staffId, roleChanged ? 'STAFF_ROLE_CHANGED' : deactivated ? 'STAFF_DEACTIVATED' : 'STAFF_UPDATED', actor, { target: persisted.email, before, after }, em, persisted.organizationId);

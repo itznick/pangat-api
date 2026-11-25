@@ -2,7 +2,7 @@ import { runPrivacyRetention } from '../privacy/retention.js';
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { EventsGateway } from '../events/events.gateway.js';
-import { ensureTrial, invalidateOrgAccess } from '../subscriptions/subscription-access.js';
+import { derivedStatus, ensureTrial, invalidateOrgAccess } from '../subscriptions/subscription-access.js';
 import { CommsService } from './comms.service.js';
 import { PlatformEventsService } from './events.service.js';
 import { MetricsService } from './monitoring.service.js';
@@ -110,20 +110,24 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
 
   /** Persist lapsed subscriptions, notify the restaurant, and send trial reminders (each at most once). */
   private async subscriptionSweep() {
-    const grace = Math.max(0, Number(getSetting<number>('subscription.gracePeriodDays') ?? 7));
-    const latest = `SELECT id, organization_id, status, current_period_end, grace_period_ends_at, source FROM (${LATEST_SUB_SQL}) s`;
+    // The status decision is subscription-access.ts `derivedStatus`: the same function the request guards use, so the sweep
+    // only PERSISTS what the guards already enforce (it never changes who has access).
+    const latest = `SELECT id, organization_id, status, current_period_end, grace_period_ends_at, cancel_at_period_end, source FROM (${LATEST_SUB_SQL}) s`;
     const lapsed: any[] = await this.ds.query(
-      `${latest} WHERE status IN ('ACTIVE','TRIAL','PAST_DUE','GRACE_PERIOD') AND current_period_end < now()`,
+      `${latest} WHERE status IN ('ACTIVE','TRIAL','PAST_DUE','GRACE_PERIOD') AND (current_period_end < now() OR (status IN ('PAST_DUE','GRACE_PERIOD') AND grace_period_ends_at IS NOT NULL AND grace_period_ends_at <= now()))`,
     );
     let toGrace = 0, expired = 0;
     for (const s of lapsed) {
-      const graceEnd = s.grace_period_ends_at ? new Date(s.grace_period_ends_at) : new Date(new Date(s.current_period_end).getTime() + grace * 86_400_000);
-      if (new Date() < graceEnd) {
+      const next = derivedStatus({
+        status: s.status, currentPeriodEnd: s.current_period_end, gracePeriodEndsAt: s.grace_period_ends_at, cancelAtPeriodEnd: s.cancel_at_period_end,
+      });
+      if (next === 'GRACE_PERIOD') {
         if (s.status !== 'GRACE_PERIOD') {
+          const graceEnd = s.grace_period_ends_at ? new Date(s.grace_period_ends_at) : new Date(new Date(s.current_period_end).getTime() + Math.max(0, Number(getSetting<number>('subscription.gracePeriodDays') ?? 7)) * 86_400_000);
           await this.ds.query(`UPDATE organization_subscriptions SET status = 'GRACE_PERIOD', grace_period_ends_at = $2, updated_at = now() WHERE id = $1`, [s.id, graceEnd]);
           toGrace++;
         }
-      } else {
+      } else if (next === 'EXPIRED') {
         await this.ds.query(`UPDATE organization_subscriptions SET status = 'EXPIRED', updated_at = now() WHERE id = $1`, [s.id]);
         await this.ds.query(`INSERT INTO subscription_audit_logs (organization_id, action, actor, reason) VALUES ($1,'SUBSCRIPTION_EXPIRED','SYSTEM','Period and grace window ended without renewal')`, [s.organization_id]);
         const org = (await this.ds.query('SELECT name FROM organizations WHERE id = $1', [s.organization_id]))[0];

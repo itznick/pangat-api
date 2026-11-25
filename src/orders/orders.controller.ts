@@ -25,6 +25,7 @@ import { withMessage } from '../common/interceptors/response.interceptor.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 import { RolesGuard } from '../common/guards/roles.guard.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
+import { FeatureGuard, RequireFeature } from '../common/guards/feature.guard.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { StaffRole } from '../common/enums/index.js';
 
@@ -46,7 +47,8 @@ export class OrdersController {
 
   /** Staff live orders listing with filters & pagination */
   @Get()
-  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard, FeatureGuard)
+  @RequireFeature('KDS', { forRoles: [StaffRole.CHEF] }) // the kitchen role only works through the kitchen display; owners/managers/cashiers use the orders screen
   async findAll(
     @Req() req: any,
     @Query('restaurantSlug') restaurantSlug?: string,
@@ -101,7 +103,8 @@ export class OrdersController {
 
   /** KDS & Live status advance: Allowed for Chefs, Stewards, Managers, Owners */
   @Patch(':id/status')
-  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard, FeatureGuard)
+  @RequireFeature('KDS', { forRoles: [StaffRole.CHEF] })
   @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER, StaffRole.CHEF, StaffRole.STEWARD)
   async updateStatus(
     @Param('id') id: string,
@@ -114,7 +117,8 @@ export class OrdersController {
 
   /** KDS ticket regression: Chefs, Managers, Owners returning ticket to earlier stage with reason */
   @Patch(':id/regress-status')
-  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard, FeatureGuard)
+  @RequireFeature('KDS', { forRoles: [StaffRole.CHEF] })
   @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER, StaffRole.CHEF)
   async regressStatus(
     @Param('id') id: string,

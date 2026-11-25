@@ -44,14 +44,17 @@ export class CreatePlanDto {
 
   @IsOptional()
   @IsInt()
+  @Min(-1) // -1 means unlimited
   maxOutlets?: number;
 
   @IsOptional()
   @IsInt()
+  @Min(-1) // -1 means unlimited
   maxTablesPerOutlet?: number;
 
   @IsOptional()
   @IsInt()
+  @Min(-1) // -1 means unlimited
   maxStaffPerOutlet?: number;
 
   @IsOptional()

@@ -22,8 +22,10 @@ export interface DefaultPlan {
 }
 
 const BASE = ['QR_ORDERING', 'KDS'];
-const GROWTH = [...BASE, 'INVENTORY', 'ANALYTICS'];
-const ENTERPRISE = [...GROWTH, 'MULTI_OUTLET', 'ADVANCED_REPORTS'];
+// Growth sells up to 3 outlets, so it carries MULTI_OUTLET explicitly: an outlet limit alone never grants the feature.
+// ADVANCED_REPORTS is deliberately not on any default plan: nothing is built behind it (see FEATURE_CATALOG).
+const GROWTH = [...BASE, 'INVENTORY', 'ANALYTICS', 'MULTI_OUTLET'];
+const ENTERPRISE = [...GROWTH];
 
 export const DEFAULT_PLANS: DefaultPlan[] = [
   {

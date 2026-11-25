@@ -265,7 +265,7 @@ describe('Tenant isolation (tenant B must never reach tenant A)', () => {
   before(async () => {
     aItem = (await firstItems(A.slug))[0];
     order = (await placeOrder(A.slug, [{ menuItemId: aItem.menuItemId, name: aItem.name, price: 1, quantity: 1 }])).data;
-    aTable = (await call('GET', `/tables?restaurantSlug=${A.slug}`)).data[0];
+    aTable = (await call('GET', `/tables?restaurantSlug=${A.slug}`, { token: A.token })).data[0];
   });
 
   const forbidden = (label, r) => assert.ok([403, 404].includes(r.status), `${label}: got ${r.status} ${JSON.stringify(r.body)?.slice(0, 100)}`);
@@ -309,7 +309,8 @@ describe('Tenant isolation (tenant B must never reach tenant A)', () => {
     assert.ok('email' in full.data, 'owner sees the full record');
     const bSees = await call('GET', `/restaurants/${A.slug}`, { token: B.token });
     assert.ok(!('email' in bSees.data), 'another tenant only gets the public view');
-    assert.equal((await call('GET', '/menu/items')).status, 400, 'unscoped menu listing must not dump every tenant');
+    assert.equal((await call('GET', '/menu/items')).status, 401, 'the staff menu listing needs a sign-in');
+    assert.equal((await call('GET', '/menu/items', { token: A.token })).status, 403, 'unscoped menu listing must not dump every tenant');
     assert.equal((await call('GET', `/restaurants/${A.slug}/feedback`)).status, 401);
   });
 
@@ -364,11 +365,11 @@ describe('Order lifecycle, money and ERP links', () => {
 
   it('full dine-in journey: order -> table busy -> KDS advance -> pay -> complete -> table freed; events reach the right rooms', async () => {
     const [it0] = await firstItems(A.slug);
-    const table = (await call('GET', `/tables?restaurantSlug=${A.slug}`)).data.find((t) => t.status === 'VACANT');
+    const table = (await call('GET', `/tables?restaurantSlug=${A.slug}`, { token: A.token })).data.find((t) => t.status === 'VACANT');
     const r = await placeOrder(A.slug, [it0], { orderType: 'DINE_IN', tableNumber: table.tableNumber, customerName: undefined, paymentMethod: 'UPI_INSTANT' });
     assert.equal(r.status, 201, JSON.stringify(r.body));
     const id = r.data.id;
-    assert.equal((await call('GET', `/tables/${table.id}`)).data.status, 'PREPPING');
+    assert.equal((await call('GET', `/tables/${table.id}`, { token: A.token })).data.status, 'PREPPING');
 
     const kds = (await call('POST', '/auth/kds-pin-login', { body: { pinCode: '2468', outletSlug: A.slug } })).data.accessToken;
     assert.equal((await call('PATCH', `/orders/${id}/status`, { token: kds, body: { status: 'PREPARING' } })).status, 200);
@@ -383,7 +384,7 @@ describe('Order lifecycle, money and ERP links', () => {
 
     assert.equal((await call('PATCH', `/orders/${id}/status`, { token: kds, body: { status: 'COMPLETED' } })).status, 403, 'kitchen cannot close an order');
     assert.equal((await call('PATCH', `/orders/${id}/status`, { token: A.token, body: { status: 'COMPLETED' } })).status, 200);
-    assert.equal((await call('GET', `/tables/${table.id}`)).data.status, 'VACANT');
+    assert.equal((await call('GET', `/tables/${table.id}`, { token: A.token })).data.status, 'VACANT');
 
     const audit = (await call('GET', `/restaurants/${A.outlet.id}/audit-logs?limit=100`, { token: A.token })).data.items;
     assert.ok(audit.some((x) => x.entityId === id && x.action === 'PAYMENT_MARKED_PAID'), 'payment must be in the audit trail');

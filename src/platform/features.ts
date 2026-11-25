@@ -1,10 +1,14 @@
 import { DataSource } from 'typeorm';
+import { notifyEntitlementChange } from '../subscriptions/entitlement-events.js';
 
 interface FeatureState { at: number; disabled: Set<string>; overrides: Map<string, string> }
 let state: FeatureState | null = null;
 const TTL = 15_000;
 
-export const invalidateFeatureCache = () => { state = null; };
+export const invalidateFeatureCache = () => {
+  state = null;
+  notifyEntitlementChange(null); // a global switch or an override changed: every live kitchen connection is re-checked
+};
 
 async function load(ds: DataSource): Promise<FeatureState> {
   if (state && Date.now() - state.at < TTL) return state;

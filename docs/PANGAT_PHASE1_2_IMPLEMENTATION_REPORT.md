@@ -5,7 +5,7 @@ Branch `claude/backend-plan-details-mismatch-gfi47m` in both repositories. Every
 
 ## 14. Final recommendation (stated first): **PASS WITH CONDITIONS**
 
-All approved items are implemented and verified (API 459 automated tests + 37 + 17 + 11 + 5 browser checks, see §9). Conditions before merge are in §12–§13: staging verification of the one new background component (the socket re-check timer), a decision on three small items in §12, and your review of two fixes that go beyond the brief (§1, items 7 and 8).
+All approved items are implemented and verified (447 API and 51 web automated tests, plus 64 browser checks across the journeys, all executed and passing; see §9). Conditions before merge are in §12–§13: staging verification of the one new background component (the socket re-check timer), a decision on three small items in §12, and your review of two fixes that go beyond the brief (§1, items 7 and 8).
 
 ---
 

@@ -43,7 +43,7 @@ export class AdminController {
   @Post('provision')
   @RequirePermission('restaurants.provision')
   async provisionRestaurant(@Body() dto: ProvisionRestaurantDto, @Req() req: any) {
-    const result: any = await this.adminService.provisionRestaurant(dto);
+    const result: any = await this.adminService.provisionRestaurant(dto, req.user);
     await this.audit.record(actorOf(req), {
       action: 'RESTAURANT_PROVISIONED', category: 'RESTAURANT', entityType: 'organization', entityId: result.organization.id, entityLabel: result.organization.name,
       organizationId: result.organization.id, summary: `Provisioned ${result.organization.name} (${result.outlet.slug})`,

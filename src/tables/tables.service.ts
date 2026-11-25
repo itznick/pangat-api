@@ -6,7 +6,8 @@ import { Table } from './entities/table.entity.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
 import { Order } from '../orders/entities/order.entity.js';
 import { TableStatus, OrderStatus } from '../common/enums/index.js';
-import { getOrgAccess, getOrgPlan, subscriptionBlockedError } from '../subscriptions/subscription-access.js';
+import { authoriseLimitOverride } from '../subscriptions/subscription-access.js';
+import { loadCapacityContext, reserveTableCapacity } from '../subscriptions/capacity.js';
 import { CreateTableDto } from './dto/create-table.dto.js';
 
 @Injectable()
@@ -71,21 +72,6 @@ export class TablesService {
       throw new NotFoundException(`Restaurant with ID '${dto.restaurantId}' not found`);
     }
 
-    // Plan limit on floor tables per outlet
-    if (restaurant.organizationId && this.dataSource) {
-      const plan = await getOrgPlan(this.dataSource, restaurant.organizationId);
-      const access = await getOrgAccess(this.dataSource, restaurant.organizationId);
-      if (access.blocked) throw subscriptionBlockedError(access.reason || 'Subscription inactive');
-      if (plan && plan.maxTablesPerOutlet !== -1) {
-        const count = await this.tableRepo.count({ where: { restaurantId: restaurant.id } });
-        if (count >= plan.maxTablesPerOutlet) {
-          throw new ForbiddenException(
-            `Plan limit reached (${plan.maxTablesPerOutlet} tables per outlet). Upgrade your plan to add more tables.`,
-          );
-        }
-      }
-    }
-
     const cleanNum = dto.tableNumber.trim().toUpperCase();
     const existing = await this.tableRepo.findOne({
       where: {
@@ -97,6 +83,9 @@ export class TablesService {
       throw new BadRequestException(`Table '${cleanNum}' already exists for this outlet`);
     }
 
+    // Only a platform administrator can exceed the plan, and only with a recorded reason (refused loudly for anyone else)
+    const override = authoriseLimitOverride(actor, dto.limitOverrideReason);
+
     const table = this.tableRepo.create({
       restaurantId: dto.restaurantId,
       tableNumber: cleanNum,
@@ -104,7 +93,12 @@ export class TablesService {
       qrCodeUrl: `/r/${restaurant.slug}/t/${cleanNum}`,
     });
 
+    // Subscription facts are read before the transaction (see loadCapacityContext): the transaction then needs only its own connection
+    const ctx = this.dataSource ? await loadCapacityContext(this.dataSource, restaurant.organizationId) : null;
     return this.tableRepo.manager.transaction(async (em) => {
+      // The plan limit is checked under the outlet's row lock, in the same transaction as the insert: two simultaneous
+      // requests cannot both pass the count, and an outlet that is already over its limit cannot add another table
+      await reserveTableCapacity(em, restaurant.id, ctx, 1, override, 'table');
       const persisted = await em.getRepository(Table).save(table);
       await this.auditService?.record({
         restaurantId: restaurant.id, organizationId: restaurant.organizationId, entityType: 'TABLE', entityId: persisted.id, action: 'TABLE_ADDED',

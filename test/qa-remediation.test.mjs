@@ -96,8 +96,13 @@ describe('QA Remediation — Priority 1: Security & Database Safety', () => {
     };
 
     const mockDataSource = {
+      query: async () => [], // organisation lifecycle, feature switches and overrides: nothing special
       getRepository: (entity) => ({
         findOne: async ({ where }) => {
+          // the subscription layer (kitchen display is a plan feature): an active subscription whose plan includes KDS
+          if (entity?.name === 'OrganizationSubscription') {
+            return { status: 'ACTIVE', currentPeriodEnd: new Date(Date.now() + 86_400_000), plan: { features: ['QR_ORDERING', 'KDS'] } };
+          }
           const slug = where?.slug ?? where[0]?.slug;
           if (slug === 'outlet-a') return outletA;
           if (slug === 'outlet-b') return outletB;

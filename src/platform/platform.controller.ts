@@ -19,6 +19,7 @@ import { MonitoringService } from './monitoring.service.js';
 import { JobsService } from './jobs.service.js';
 import { ExportsService } from './exports.service.js';
 import { SupportService, TICKET_CATEGORIES, TICKET_PRIORITIES, TICKET_STATUSES } from './support.service.js';
+import { FEATURE_CATALOG, isFeatureAvailable } from '../subscriptions/subscription-access.js';
 import { invalidateFeatureCache } from './features.js';
 import {
   AckDto, AdminCreateDto, AdminUpdateDto, AnnouncementDto, AssignDto, CancelSubDto, ChangePlanDto, ExtendDto, FeatureOverrideDto, FlagDto, MarkReadDto,
@@ -238,7 +239,9 @@ export class PlatformController {
   }
 
   private async featureCatalog() {
-    return this.ds.query(`SELECT f.feature_key, f.enabled, f.description, f.updated_by, f.updated_at, (SELECT COUNT(*)::int FROM org_feature_overrides o WHERE o.feature_key = f.feature_key) AS overrides FROM feature_flags f ORDER BY f.feature_key`);
+    const rows: any[] = await this.ds.query(`SELECT f.feature_key, f.enabled, f.description, f.updated_by, f.updated_at, (SELECT COUNT(*)::int FROM org_feature_overrides o WHERE o.feature_key = f.feature_key) AS overrides FROM feature_flags f ORDER BY f.feature_key`);
+    // `available` = something real sits behind the key; unavailable keys are shown but cannot be sold (plans reject them)
+    return rows.map((r) => ({ ...r, available: isFeatureAvailable(r.feature_key), label: FEATURE_CATALOG[r.feature_key]?.label ?? r.feature_key, note: FEATURE_CATALOG[r.feature_key]?.note ?? null }));
   }
   @Get('feature-flags') @RequirePermission('settings.view')
   async flags() {

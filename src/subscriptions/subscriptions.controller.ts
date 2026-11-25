@@ -200,6 +200,9 @@ export class SubscriptionsController {
       action: dto.isActive === false ? 'PLAN_RETIRED' : 'PLAN_UPDATED', category: 'PLAN', entityType: 'plan', entityId: plan.id, entityLabel: plan.code,
       summary: `Updated plan ${plan.code}: ${Object.keys(changes).join(', ') || 'no field changes'}`, changes,
     });
-    return withMessage(plan, `Plan '${plan.name}' updated successfully`);
+    // Lowering a limit never deletes anything: report who is now over it so the operator can act (they cannot add more until within limits)
+    const limitsTouched = ['maxOutlets', 'maxTablesPerOutlet', 'maxStaffPerOutlet'].some((k) => k in changes);
+    const overLimit = limitsTouched ? await this.subscriptionsService.organisationsOverPlanLimits(plan.id) : [];
+    return withMessage({ ...plan, overLimitOrganisations: overLimit }, `Plan '${plan.name}' updated successfully`);
   }
 }

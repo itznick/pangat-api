@@ -37,7 +37,8 @@ import { AuditService } from '../audit/audit.service.js';
 import { PlatformAuditService } from '../platform/audit.service.js';
 import { currentRequest } from '../common/request-context.js';
 import { renderEmail } from '../common/services/email-template.js';
-import { ensureTrial } from '../subscriptions/subscription-access.js';
+import { decideFeature, ensureTrial, featureError, resolveTrialPlan } from '../subscriptions/subscription-access.js';
+import { assertInitialTablesFit, assertSeatsFit, isSystemAccountEmail, resolveInitialTables } from '../subscriptions/capacity.js';
 import { recordLoginEvent, LoginMeta } from '../platform/login-events.js';
 import { resolvePlatformPermissions } from '../platform/permissions.js';
 import { accountBlockedError, getOrgLifecycle, maintenanceError } from '../platform/org-status.js';
@@ -456,6 +457,12 @@ export class AuthService {
     }
     this.pinLimiter.succeed(clientKey);
 
+    // The kitchen display is a plan feature: a correct PIN does not open it when the plan, a platform switch or an override says no
+    if (outlet.organizationId) {
+      const kds = await decideFeature(this.dataSource, outlet.organizationId, 'KDS');
+      if (!kds.allowed) throw featureError('KDS', kds.reason);
+    }
+
     if (!matched.pinHash) {
       await this.staffRepo.update(matched.id, { pinHash: await bcrypt.hash(cleanPin, BCRYPT_COST), pinCode: null });
     }
@@ -591,6 +598,13 @@ export class AuthService {
         throw new HttpException({ message: 'That code is wrong or has expired. Request a new one.', code: 'EMAIL_OTP_INVALID' }, HttpStatus.BAD_REQUEST);
       }
     }
+    // The new organisation starts on the trial plan, so that plan's limits apply to what it creates right now:
+    // the requested floor (indoor + outdoor together) and any store manager must fit before anything is written.
+    const trialPlan = await resolveTrialPlan(this.dataSource);
+    const initialTables = resolveInitialTables(trialPlan, { indoor: dto.indoorTableCount, outdoor: dto.outdoorTableCount }, { indoor: 12, outdoor: 4 });
+    assertInitialTablesFit(initialTables, null);
+    assertSeatsFit(trialPlan, dto.teamMode === 'with_team' && dto.storeManager?.email ? 1 : 0, null);
+
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
@@ -666,8 +680,8 @@ export class AuthService {
       }, queryRunner.manager);
 
       // 6. Generate Batch Tables (Indoor & Outdoor)
-      const indoorCount = Math.max(1, dto.indoorTableCount ?? 12);
-      const outdoorCount = Math.max(0, dto.outdoorTableCount ?? 4);
+      const indoorCount = initialTables.indoor;
+      const outdoorCount = initialTables.outdoor;
       const createdTables: Table[] = [];
 
       for (let i = 1; i <= indoorCount; i++) {
@@ -815,6 +829,7 @@ export class AuthService {
       // 8. Optional Store Manager
       if (dto.teamMode === 'with_team' && dto.storeManager?.email) {
         const mgrEmail = dto.storeManager.email.trim().toLowerCase();
+        if (isSystemAccountEmail(mgrEmail)) throw new BadRequestException('That email domain is reserved for system accounts.');
         if (!dto.storeManager.password || dto.storeManager.password.length < 8) {
           throw new BadRequestException('Store manager needs a password of at least 8 characters');
         }

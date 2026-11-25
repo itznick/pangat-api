@@ -11,6 +11,7 @@ import { ModifierType } from '../common/enums/index.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
 import { CreateItemDto, UpdateItemDto } from './dto/create-item.dto.js';
 import { CreateCategoryDto } from './dto/create-category.dto.js';
+import { decideFeature, getOrgAccess } from '../subscriptions/subscription-access.js';
 
 @Injectable()
 export class MenuService {
@@ -27,6 +28,22 @@ export class MenuService {
     @Optional()
     private readonly eventsGateway?: EventsGateway,
   ) {}
+
+  /**
+   * Whether guests may order: the outlet's own switches/hours AND the subscription (QR_ORDERING in the plan, platform switches,
+   * lapsed subscription). The menu itself stays readable; ordering is what the plan sells.
+   */
+  private async orderingFor(restaurant: Restaurant) {
+    const own = getOrderingStatus(restaurant.operations);
+    if (!restaurant.organizationId) return own;
+    const ds = this.restaurantRepo.manager.connection;
+    const [feature, access] = await Promise.all([
+      decideFeature(ds, restaurant.organizationId, 'QR_ORDERING'),
+      getOrgAccess(ds, restaurant.organizationId),
+    ]);
+    if (feature.allowed && !access.blocked) return own;
+    return { ...own, accepting: false, reason: 'closed' as const, message: 'This outlet is not taking orders right now. Please ask a staff member.' };
+  }
 
   async getPublicMenu(restaurantSlug: string) {
     const restaurant = await this.restaurantRepo.findOne({
@@ -58,7 +75,7 @@ export class MenuService {
         serviceChargePercentage: Number(restaurant.serviceChargePercentage ?? 0),
         isVegOnly: restaurant.isVegOnly,
         operations: resolveOperations(restaurant.operations),
-        ordering: getOrderingStatus(restaurant.operations),
+        ordering: await this.orderingFor(restaurant),
       },
       categories: categories.map((c) => ({
         id: c.id,

@@ -1,24 +1,26 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // src/subscriptions/entitlement.service.ts
+//
+// Injectable facade over the ONE implementation of subscription rules in `subscription-access.ts`.
+// It holds no rules of its own: status, grace handling, feature membership and limit arithmetic all come from the same
+// pure functions the request guards use, so a service call and a guard can never disagree.
+//
+// Differences from the guards, kept on purpose:
+//  * It reads through TypeORM repositories (so it can be unit-tested with fakes); the guards read through the DataSource.
+//  * It NEVER writes. Persisting a lapsed status (TRIAL/ACTIVE -> GRACE_PERIOD -> EXPIRED) is the hourly sweep's job
+//    (platform/jobs.service.ts, which uses the same `derivedStatus`). A read must not change data.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { OrganizationSubscription } from './entities/organization-subscription.entity.js';
 import { SubscriptionPlan } from './entities/subscription-plan.entity.js';
 import { SubscriptionStatus } from '../common/enums/index.js';
-import { getSetting } from '../platform/settings.service.js';
+import { derivedStatus, evaluateAccess, evaluateLimit, limitFor, planHasFeature, type LimitKind } from './subscription-access.js';
 
 @Injectable()
 export class EntitlementService {
-  private readonly logger = new Logger(EntitlementService.name);
-
-  // Default grace period window after period end before feature cutoff (7 days)
-  private get GRACE_PERIOD_DAYS(): number {
-    return Number(getSetting<number>('subscription.gracePeriodDays') ?? 7);
-  }
-
   constructor(
     @InjectRepository(OrganizationSubscription)
     private readonly subRepo: Repository<OrganizationSubscription>,
@@ -26,134 +28,45 @@ export class EntitlementService {
     private readonly planRepo: Repository<SubscriptionPlan>,
   ) {}
 
-  /**
-   * Resolve active subscription with grace period and expiry evaluation.
-   */
+  /** The organisation's latest subscription with the status it effectively has right now (in memory only; nothing is saved). */
   async getEffectiveSubscription(organizationId: string): Promise<OrganizationSubscription | null> {
-    const sub = await this.subRepo.findOne({
-      where: { organizationId },
-      relations: { plan: true },
-      order: { createdAt: 'DESC' },
-    });
-
-    if (!sub) {
-      return null;
-    }
-
-    const now = new Date();
-
-    // Check if subscription period has ended
-    if (sub.currentPeriodEnd && new Date(sub.currentPeriodEnd) < now) {
-      const graceEnd = sub.gracePeriodEndsAt
-        ? new Date(sub.gracePeriodEndsAt)
-        : new Date(new Date(sub.currentPeriodEnd).getTime() + this.GRACE_PERIOD_DAYS * 86_400_000);
-
-      if (now < graceEnd) {
-        if (sub.status !== SubscriptionStatus.GRACE_PERIOD && sub.status !== SubscriptionStatus.PAST_DUE) {
-          sub.status = SubscriptionStatus.GRACE_PERIOD;
-          sub.gracePeriodEndsAt = graceEnd;
-          await this.subRepo.save(sub);
-        }
-      } else {
-        if (sub.status !== SubscriptionStatus.EXPIRED && sub.status !== SubscriptionStatus.HALTED) {
-          sub.status = SubscriptionStatus.EXPIRED;
-          await this.subRepo.save(sub);
-        }
-      }
-    }
-
-    return sub;
+    const sub = await this.subRepo.findOne({ where: { organizationId }, relations: { plan: true }, order: { createdAt: 'DESC' } });
+    if (!sub) return null;
+    const status = derivedStatus(sub);
+    if (status === sub.status) return sub;
+    const view = Object.assign(Object.create(Object.getPrototypeOf(sub)), sub) as OrganizationSubscription;
+    view.status = status as SubscriptionStatus;
+    return view;
   }
 
-  /**
-   * Verify if the organization is entitled to use a specific feature module.
-   */
+  /** Is the plan feature available to this organisation (plan membership while the subscription is usable)? Kill switches and overrides are applied by `decideFeature`. */
   async isFeatureEntitled(organizationId: string, feature: string): Promise<boolean> {
     const sub = await this.getEffectiveSubscription(organizationId);
-    if (!sub || !sub.plan) {
-      return false;
-    }
-
-    // HALTED or EXPIRED subscriptions allow billing/export only
-    if (sub.status === SubscriptionStatus.EXPIRED || sub.status === SubscriptionStatus.HALTED) {
-      return false;
-    }
-
-    // Active, Trial, or Grace Period permits entitled plan features
-    const planFeatures = Array.isArray(sub.plan.features)
-      ? sub.plan.features
-      : String(sub.plan.features || '').split(',').map((s) => s.trim());
-
-    return planFeatures.includes(feature) || planFeatures.includes('*');
+    if (!sub?.plan) return false;
+    if (evaluateAccess(sub).blocked) return false;
+    return planHasFeature(sub.plan, feature);
   }
 
-  /**
-   * Check if organization has capacity to add another outlet branch.
-   */
+  private async capacity(organizationId: string, kind: LimitKind, current: number) {
+    const sub = await this.getEffectiveSubscription(organizationId);
+    if (!sub?.plan) return { allowed: false, limit: 0 };
+    if (evaluateAccess(sub).blocked) return { allowed: false, limit: limitFor(sub.plan, kind) };
+    const d = evaluateLimit(sub.plan, kind, current, 1);
+    return { allowed: d.allowed, limit: d.limit };
+  }
+
   async canAddOutlet(organizationId: string, currentOutletCount: number): Promise<{ allowed: boolean; maxOutlets: number }> {
-    const sub = await this.getEffectiveSubscription(organizationId);
-    if (!sub || !sub.plan) {
-      return { allowed: false, maxOutlets: 0 };
-    }
-
-    if (sub.status === SubscriptionStatus.EXPIRED || sub.status === SubscriptionStatus.HALTED) {
-      return { allowed: false, maxOutlets: sub.plan.maxOutlets };
-    }
-
-    if (sub.plan.maxOutlets === -1) {
-      return { allowed: true, maxOutlets: -1 };
-    }
-
-    return {
-      allowed: currentOutletCount < sub.plan.maxOutlets,
-      maxOutlets: sub.plan.maxOutlets,
-    };
+    const c = await this.capacity(organizationId, 'outlets', currentOutletCount);
+    return { allowed: c.allowed, maxOutlets: c.limit };
   }
 
-  /**
-   * Check if outlet has capacity to add another floor table.
-   */
   async canAddTable(organizationId: string, currentTableCount: number): Promise<{ allowed: boolean; maxTables: number }> {
-    const sub = await this.getEffectiveSubscription(organizationId);
-    if (!sub || !sub.plan) {
-      return { allowed: false, maxTables: 0 };
-    }
-
-    if (sub.status === SubscriptionStatus.EXPIRED || sub.status === SubscriptionStatus.HALTED) {
-      return { allowed: false, maxTables: sub.plan.maxTablesPerOutlet };
-    }
-
-    if (sub.plan.maxTablesPerOutlet === -1) {
-      return { allowed: true, maxTables: -1 };
-    }
-
-    return {
-      allowed: currentTableCount < sub.plan.maxTablesPerOutlet,
-      maxTables: sub.plan.maxTablesPerOutlet,
-    };
+    const c = await this.capacity(organizationId, 'tables', currentTableCount);
+    return { allowed: c.allowed, maxTables: c.limit };
   }
 
-  /**
-   * Check if outlet has capacity to add another staff member based on plan maxStaffPerOutlet.
-   */
   async canAddStaff(organizationId: string, currentStaffCount: number): Promise<{ allowed: boolean; maxStaff: number }> {
-    const sub = await this.getEffectiveSubscription(organizationId);
-    if (!sub || !sub.plan) {
-      return { allowed: false, maxStaff: 0 };
-    }
-
-    if (sub.status === SubscriptionStatus.EXPIRED || sub.status === SubscriptionStatus.HALTED) {
-      return { allowed: false, maxStaff: sub.plan.maxStaffPerOutlet || 5 };
-    }
-
-    const limit = sub.plan.maxStaffPerOutlet;
-    if (limit === -1 || limit === null || limit === undefined) {
-      return { allowed: true, maxStaff: -1 };
-    }
-
-    return {
-      allowed: currentStaffCount < limit,
-      maxStaff: limit,
-    };
+    const c = await this.capacity(organizationId, 'staff', currentStaffCount);
+    return { allowed: c.allowed, maxStaff: c.limit };
   }
 }

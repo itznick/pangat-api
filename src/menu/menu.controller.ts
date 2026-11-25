@@ -20,6 +20,7 @@ import { withMessage } from '../common/interceptors/response.interceptor.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 import { RolesGuard } from '../common/guards/roles.guard.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
+import { FeatureGuard, RequireFeature } from '../common/guards/feature.guard.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { StaffRole } from '../common/enums/index.js';
 import { publicMenuCache } from '../common/cache/ttl-cache.js';
@@ -45,7 +46,8 @@ export class MenuController {
 
   /** Mark item available or out of stock: Allowed for Chefs, Managers, Owners */
   @Patch('items/:id/availability')
-  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard, FeatureGuard)
+  @RequireFeature('KDS', { forRoles: [StaffRole.CHEF] })
   @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER, StaffRole.CHEF)
   async updateAvailability(
     @Param('id') id: string,

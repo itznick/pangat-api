@@ -15,7 +15,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import * as crypto from 'crypto';
-import { invalidateOrgAccess } from './subscription-access.js';
+import { FEATURE_CATALOG, advertisedFeatures, getEntitlements, invalidateOrgAccess, isFeatureAvailable } from './subscription-access.js';
 import { SubscriptionPlan } from './entities/subscription-plan.entity.js';
 import { OrganizationSubscription } from './entities/organization-subscription.entity.js';
 import { SubscriptionInvoice } from './entities/subscription-invoice.entity.js';
@@ -156,6 +156,8 @@ export class SubscriptionsService implements OnModuleInit {
 
       return {
         ...p,
+        // customers only ever see features that exist; the platform console (includeInactive) sees the raw list so it can fix plans
+        features: includeInactive ? p.features : advertisedFeatures(p.features),
         basePricePaise: basePaise,
         maxStaffPerOutlet: p.maxStaffPerOutlet ?? 5,
         sacCode: p.sacCode || null,
@@ -190,6 +192,7 @@ export class SubscriptionsService implements OnModuleInit {
       throw new BadRequestException(`Plan code '${dto.code}' already exists`);
     }
 
+    this.assertSellableFeatures(dto.features, []);
     const basePaise = dto.basePricePaise ?? Math.round(Number(dto.basePrice) * 100);
     const basePrice = dto.basePrice !== undefined ? Number(dto.basePrice) : Math.round(basePaise) / 100;
 
@@ -215,8 +218,41 @@ export class SubscriptionsService implements OnModuleInit {
     return this.planRepo.save(plan);
   }
 
+  /** A feature key must be a known one; a key whose feature is not built can stay on a plan that already has it but cannot be newly added. */
+  private assertSellableFeatures(requested: string[] | undefined, current: string[]) {
+    for (const k of requested ?? []) {
+      if (k === '*') continue;
+      if (!FEATURE_CATALOG[k]) throw new BadRequestException(`Unknown plan feature '${k}'`);
+      if (!isFeatureAvailable(k) && !current.includes(k)) {
+        throw new BadRequestException(`'${k}' is not available yet (${FEATURE_CATALOG[k].note || 'not built'}), so it cannot be added to a plan.`);
+      }
+    }
+  }
+
+  /** Organisations whose current usage exceeds this plan's limits. Existing data is never deleted; they simply cannot add more until they are within limits. */
+  async organisationsOverPlanLimits(planId: string) {
+    return this.dataSource.query(
+      `WITH latest AS (SELECT DISTINCT ON (organization_id) organization_id, plan_id FROM organization_subscriptions ORDER BY organization_id, created_at DESC),
+            p AS (SELECT * FROM subscription_plans WHERE id = $1)
+       SELECT o.id AS organization_id, o.name,
+              (SELECT COUNT(*)::int FROM restaurants r WHERE r.organization_id = o.id) AS outlets,
+              COALESCE((SELECT MAX(c) FROM (SELECT COUNT(*) c FROM tables t JOIN restaurants r ON r.id = t.restaurant_id WHERE r.organization_id = o.id GROUP BY r.id) x),0)::int AS max_tables_in_an_outlet,
+              COALESCE((SELECT MAX(c) FROM (SELECT COUNT(*) c FROM staff st JOIN restaurants r ON r.id = st.restaurant_id
+                        WHERE r.organization_id = o.id AND st.is_active AND NOT st.is_platform_admin AND st.role NOT IN ('SUPER_OWNER','PLATFORM_SUPER_ADMIN')
+                          AND LOWER(st.email) NOT LIKE '%@stations.pangat.app' GROUP BY r.id) x),0)::int AS max_staff_in_an_outlet
+       FROM latest l JOIN organizations o ON o.id = l.organization_id, p
+       WHERE l.plan_id = p.id AND (
+         (p.max_outlets <> -1 AND (SELECT COUNT(*) FROM restaurants r WHERE r.organization_id = o.id) > p.max_outlets)
+         OR (p.max_tables_per_outlet <> -1 AND EXISTS (SELECT 1 FROM tables t JOIN restaurants r ON r.id = t.restaurant_id WHERE r.organization_id = o.id GROUP BY r.id HAVING COUNT(*) > p.max_tables_per_outlet))
+         OR (p.max_staff_per_outlet <> -1 AND EXISTS (SELECT 1 FROM staff st JOIN restaurants r ON r.id = st.restaurant_id WHERE r.organization_id = o.id AND st.is_active AND NOT st.is_platform_admin
+              AND st.role NOT IN ('SUPER_OWNER','PLATFORM_SUPER_ADMIN') AND LOWER(st.email) NOT LIKE '%@stations.pangat.app' GROUP BY r.id HAVING COUNT(*) > p.max_staff_per_outlet)))`,
+      [planId],
+    );
+  }
+
   async updatePlan(id: string, dto: UpdatePlanDto): Promise<SubscriptionPlan> {
     const plan = await this.findPlanById(id);
+    if (dto.features !== undefined) this.assertSellableFeatures(dto.features, Array.isArray(plan.features) ? plan.features : []);
 
     if (dto.name !== undefined) plan.name = dto.name.trim();
     if (dto.description !== undefined) plan.description = dto.description?.trim() || null;
@@ -270,10 +306,15 @@ export class SubscriptionsService implements OnModuleInit {
     const taxAmount = Math.round(base * (taxRate / 100) * 100) / 100;
     const totalPayable = Math.round((base + taxAmount) * 100) / 100;
 
+    const entitlements = await getEntitlements(this.dataSource, organizationId);
+
     return {
       subscription: sub,
+      // what this organisation may actually use right now (plan + platform switches + per-restaurant overrides); the web console renders from this
+      entitlements,
       plan: {
         ...sub.plan,
+        features: advertisedFeatures(sub.plan.features),
         pricing: {
           basePrice: base,
           taxPercentage: taxRate,

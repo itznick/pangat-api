@@ -75,7 +75,23 @@ Non-public plan rows, hand-assigned, audited, visible in a read-only Super Admin
 **Not done / pending CA and founders:** SAC value and GST confirmation; PDF tax invoice; invoices for manual or offline payments; credit notes for subscription refunds; registration/e-invoicing status; the Razorpay subscription integration itself. **Paid subscription collection remains disabled and unbuilt**; a test proves no checkout endpoint exists and that a plan request changes nothing. Restaurant food-order payment gateway work is separate and untouched.
 
 ## 13. Tests executed (all local, fresh throwaway PostgreSQL 16)
-RESULTS_PLACEHOLDER
+All runs on PostgreSQL 16 on a **fresh database**, a locally built API, local only. Baseline on the **unmodified** code was run first: every suite was green (integration 53, phase1 36, phase1.1 7, phase1.2 28, final 4, compliance 14, platform 43).
+
+| Suite (final code) | Tests | Pass | Fail |
+|---|---:|---:|---:|
+| API unit (`npm test`, includes 36 new commercial unit tests) | 302 | 302 | 0 |
+| `test:commercial` (new, live) | 32 | 32 | 0 |
+| `test:integration` | 53 | 53 | 0 |
+| `test:phase1` | 36 | 36 | 0 |
+| `test:phase1_1` | 7 | 7 | 0 |
+| `test:phase1_2` | 28 | 28 | 0 |
+| `test:phase1_final` | 4 | 4 | 0 |
+| `test:compliance` | 14 | 14 | 0 |
+| `test:platform` | 43 | 43 | 0 |
+| Web `npm test` (51 existing + 31 new) | 82 | 82 | 0 |
+| API `nest build`; web `tsc -b` + `vite build` | succeed | | |
+
+**Honest notes.** (1) Earlier iterations of my new live tests failed 5 times; every failure was either a wrong expectation in my test (KDS login returns 200; 25 tables cannot be created at sign-up under the 20-table trial; a manager must change a temporary password first; a down-migration test that needs a production-shaped starting state) or a real defect I then fixed (capacity watch flagging every single-outlet restaurant; a state code silently truncated instead of rejected). (2) Three existing tests were **adapted, not weakened**, because the trial default deliberately changed (two teardowns that pinned the setting to `GROWTH` now restore the default; the platform charge test now puts the paying customer on a priced plan); `subscriptions.test.mjs` gained an invoice-counter stub and new assertions. No assertion was removed. (3) The claims-guard test was proven to fail when a banned claim is reintroduced. (4) Web lint: 69 errors before and after (unchanged, not gated in CI). Not run: web `test:uat`, load tests, any production or staging environment.
 
 ## 14. Browser responsive results (Chromium via Playwright, built app, local API)
 - **Landing page at 360, 390, 768, 1024 and 1440 px:** no horizontal overflow at any width; four plan cards present, laid out in 1 / 1 / 2 / 2 / 4 columns, all inside the viewport; monthly prices ₹699 / ₹1,299 / ₹2,499 / ₹4,999 and annual prices ₹6,990 / ₹12,990 / ₹24,990 / ₹49,990 with the exact savings after switching; GST note visible; Enterprise "Talk to us" opens the lead form with "Talk to us about Enterprise"; Founding 10 not rendered; no console errors and no failed requests. Screenshots at 1440 and 360 were inspected; an alignment flaw in the Enterprise price row was found and fixed.

@@ -24,6 +24,15 @@ import { assertPasswordAllowed } from '../common/security/password-policy.js';
 import { EmailDeliveryService } from '../common/services/email-delivery.service.js';
 import { renderEmail } from '../common/services/email-template.js';
 
+/** Deep copy without `undefined` properties (class-transformer instances carry every declared optional field as undefined). */
+function definedOnly<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(definedOnly) as unknown as T;
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined).map(([k, v]) => [k, definedOnly(v)])) as T;
+  }
+  return value;
+}
+
 @Injectable()
 export class RestaurantsService {
   constructor(
@@ -259,8 +268,11 @@ export class RestaurantsService {
       throw new ForbiddenException('Only the owner can change the UPI ID, GST details or service charge. Ask your owner to update it.');
     }
 
-    const { operations, ...rest } = dto;
+    const { operations: operationsDto, ...rest } = dto;
     Object.assign(restaurant, rest);
+    // The validated DTO is a class instance whose unset optional fields exist as `undefined` properties; spreading them would overwrite the
+    // stored values (a change to the prep time silently un-paused the outlet and reset every day's hours). Only fields actually sent are merged.
+    const operations = operationsDto ? (definedOnly(operationsDto) as NonNullable<typeof operationsDto>) : undefined;
     if (operations) {
       // Merge section by section so a partial update never wipes the rest of the rules
       const current = resolveOperations(restaurant.operations);

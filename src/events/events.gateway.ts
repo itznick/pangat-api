@@ -9,7 +9,7 @@ import {
   MessageBody,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { Logger } from '@nestjs/common';
+import { Logger, OnModuleDestroy } from '@nestjs/common';
 
 import { JwtService } from '@nestjs/jwt';
 import { DataSource } from 'typeorm';
@@ -17,7 +17,8 @@ import * as crypto from 'crypto';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
 import { Order } from '../orders/entities/order.entity.js';
 import { Staff } from '../auth/entities/staff.entity.js';
-import { decideFeature } from '../subscriptions/subscription-access.js';
+import { decideFeature, getOrgAccess } from '../subscriptions/subscription-access.js';
+import { onEntitlementChange } from '../subscriptions/entitlement-events.js';
 
 @WebSocketGateway({
   cors: {
@@ -27,7 +28,7 @@ import { decideFeature } from '../subscriptions/subscription-access.js';
     credentials: true,
   },
 })
-export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
   @WebSocketServer()
   server: Server;
 
@@ -35,10 +36,110 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly connectedClients = new Set<string>();
   private readonly outletRooms = new Map<string, Set<string>>();
 
+  /**
+   * Live-feed access is not trusted forever. Sockets in the kitchen room are tracked here and re-checked:
+   *  - at once when something that decides entitlement changes (subscription, plan edit, global switch, per-restaurant override:
+   *    the same signals that invalidate the entitlement caches), debounced so a burst of changes costs one check per organisation;
+   *  - periodically (SOCKET_REVALIDATE_MS, default 30 s) as the safety net for changes nobody announced (a period ending by itself,
+   *    a direct database edit, a deactivated or password-changed account).
+   * Cost: one entitlement lookup per ORGANISATION with kitchen sockets and one batched staff lookup per pass, never one per socket or event.
+   */
+  private readonly kitchenSockets = new Map<string, { orgId: string; userId: string; iat: number; role: string }>();
+  private readonly timers: NodeJS.Timeout[] = [];
+  private pending = new Set<string | null>();
+  private debounce: NodeJS.Timeout | null = null;
+  private readonly unsubscribe: () => void;
+
   constructor(
     private readonly jwtService: JwtService,
     private readonly dataSource: DataSource,
-  ) {}
+  ) {
+    this.unsubscribe = onEntitlementChange((orgId) => this.scheduleRevalidation(orgId));
+    const every = Math.max(500, Number(process.env.SOCKET_REVALIDATE_MS) || 30_000);
+    const t = setInterval(() => void this.revalidateAll(true), every);
+    t.unref();
+    this.timers.push(t);
+  }
+
+  onModuleDestroy() {
+    this.unsubscribe();
+    this.timers.forEach((t) => clearInterval(t));
+    if (this.debounce) clearTimeout(this.debounce);
+  }
+
+  private scheduleRevalidation(orgId: string | null) {
+    this.pending.add(orgId);
+    if (this.debounce) return;
+    this.debounce = setTimeout(() => {
+      this.debounce = null;
+      const todo = this.pending;
+      this.pending = new Set();
+      void (todo.has(null) ? this.revalidateAll(false) : this.revalidateOrgs([...todo] as string[]));
+    }, 150);
+    this.debounce.unref();
+  }
+
+  /** Orgs that currently have kitchen sockets. */
+  private orgsWithKitchenSockets(): string[] {
+    return [...new Set([...this.kitchenSockets.values()].map((v) => v.orgId))];
+  }
+
+  private async revalidateAll(includeStaff: boolean) {
+    try {
+      await this.revalidateOrgs(this.orgsWithKitchenSockets());
+      if (includeStaff) await this.revalidateStaff();
+    } catch (e) {
+      this.logger.warn(`Kitchen socket re-check failed: ${(e as Error).message}`);
+    }
+  }
+
+  /** Re-decide KDS access for each organisation that has live kitchen sockets and revoke those that lost it. */
+  private async revalidateOrgs(orgIds: string[]) {
+    for (const orgId of orgIds) {
+      if (![...this.kitchenSockets.values()].some((v) => v.orgId === orgId)) continue;
+      let reason: string | null = null;
+      try {
+        const [feature, access] = await Promise.all([decideFeature(this.dataSource, orgId, 'KDS'), getOrgAccess(this.dataSource, orgId)]);
+        if (!feature.allowed) reason = feature.reason;
+        else if (access.blocked) reason = 'SUBSCRIPTION';
+      } catch (e) {
+        this.logger.warn(`Could not re-check KDS access for ${orgId}: ${(e as Error).message}`);
+        continue; // never revoke (or grant) on a failed lookup; the next pass tries again
+      }
+      if (!reason) continue;
+      for (const [id, meta] of [...this.kitchenSockets.entries()]) {
+        if (meta.orgId === orgId) this.revokeKitchen(id, reason);
+      }
+    }
+  }
+
+  /** Deactivated, deleted or password-changed accounts lose the kitchen feed too (one batched query for all tracked sockets). */
+  private async revalidateStaff() {
+    if (this.kitchenSockets.size === 0) return;
+    const ids = [...new Set([...this.kitchenSockets.values()].map((v) => v.userId))];
+    const rows: Array<{ id: string; is_active: boolean; password_changed_at: Date | null }> = await this.dataSource.query(
+      'SELECT id, is_active, password_changed_at FROM staff WHERE id = ANY($1::uuid[])',
+      [ids],
+    );
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    for (const [sid, meta] of [...this.kitchenSockets.entries()]) {
+      const r = byId.get(meta.userId);
+      const stale = !r || r.is_active === false || (r.password_changed_at && meta.iat && meta.iat < Math.floor(new Date(r.password_changed_at).getTime() / 1000));
+      if (stale) this.revokeKitchen(sid, 'ACCOUNT');
+    }
+  }
+
+  /** Take a socket out of every kitchen room, tell it why, and cut the connection when it belongs to a kitchen-only (CHEF) session. */
+  private revokeKitchen(socketId: string, reason: string) {
+    const meta = this.kitchenSockets.get(socketId);
+    this.kitchenSockets.delete(socketId);
+    const socket = this.server?.sockets?.sockets?.get(socketId);
+    if (!socket) return;
+    for (const room of [...socket.rooms]) if (room.startsWith('kds:')) socket.leave(room);
+    socket.emit('access:revoked', { feature: 'KDS', reason, message: 'The live kitchen display is no longer available for this restaurant.' });
+    this.logger.warn(`Kitchen feed revoked for socket ${socketId} (${reason})`);
+    if (meta?.role === 'CHEF') socket.disconnect(true); // a kitchen-only session has nothing else to do here
+  }
 
   /** Staff sockets present their JWT in the handshake; diners connect anonymously and prove ownership per order. */
   handleConnection(client: Socket) {
@@ -64,6 +165,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   handleDisconnect(client: Socket) {
     this.connectedClients.delete(client.id);
+    this.kitchenSockets.delete(client.id);
     for (const [slug, sockets] of this.outletRooms.entries()) {
       sockets.delete(client.id);
       if (sockets.size === 0) {
@@ -106,15 +208,24 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (kind === 'admin' && client.data.user?.role === 'CHEF') {
       return { status: 'denied', reason: 'unauthorized' };
     }
-    // The kitchen display is a plan feature: the live kitchen feed is refused (not just hidden) when the plan, a platform switch or an override says no
+    // The kitchen display is a plan feature: the live kitchen feed is refused (not just hidden) when the plan, a platform switch or an override
+    // says no, and when the subscription has lapsed. The decision is re-made later (see kitchenSockets) so a grant is never permanent.
+    let kitchenOrg: string | null = null;
     if (kind === 'kds' && !client.data.user?.isPlatformAdmin) {
       const outlet = await this.dataSource.getRepository(Restaurant).findOne({ where: { slug } });
-      if (outlet?.organizationId && !(await decideFeature(this.dataSource, outlet.organizationId, 'KDS')).allowed) {
-        return { status: 'denied', reason: 'feature_unavailable' };
+      if (outlet?.organizationId) {
+        const [feature, access] = await Promise.all([decideFeature(this.dataSource, outlet.organizationId, 'KDS'), getOrgAccess(this.dataSource, outlet.organizationId)]);
+        if (!feature.allowed) return { status: 'denied', reason: 'feature_unavailable' };
+        if (access.blocked) return { status: 'denied', reason: 'subscription_inactive' };
+        kitchenOrg = outlet.organizationId;
       }
     }
     const room = `${kind}:${slug}`;
     client.join(room);
+    if (kitchenOrg) {
+      const u = client.data.user;
+      this.kitchenSockets.set(client.id, { orgId: kitchenOrg, userId: u.id, iat: u.iat, role: u.role });
+    }
     if (!this.outletRooms.has(slug)) {
       this.outletRooms.set(slug, new Set());
     }
@@ -163,7 +274,9 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (order.trackingToken && given.length === order.trackingToken.length) {
       allowed = crypto.timingSafeEqual(Buffer.from(given), Buffer.from(order.trackingToken));
     }
-    if (!allowed && client.data?.user && (await this.stillValid(client))) {
+    // The order room carries the full, unredacted order: the kitchen role (which is redacted by design) never gets in through its staff
+    // credentials; diners still get in with the order's private tracking token.
+    if (!allowed && client.data?.user && client.data.user.role !== 'CHEF' && (await this.stillValid(client))) {
       const u = client.data.user;
       if (u.isPlatformAdmin || u.restaurantId === order.restaurantId) {
         allowed = true;

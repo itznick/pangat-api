@@ -37,7 +37,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { PlatformAuditService } from '../platform/audit.service.js';
 import { currentRequest } from '../common/request-context.js';
 import { renderEmail } from '../common/services/email-template.js';
-import { decideFeature, ensureTrial, featureError, resolveTrialPlan } from '../subscriptions/subscription-access.js';
+import { decideFeature, ensureTrial, featureError, getOrgAccess, resolveTrialPlan, subscriptionBlockedError } from '../subscriptions/subscription-access.js';
 import { assertInitialTablesFit, assertSeatsFit, isSystemAccountEmail, resolveInitialTables } from '../subscriptions/capacity.js';
 import { recordLoginEvent, LoginMeta } from '../platform/login-events.js';
 import { resolvePlatformPermissions } from '../platform/permissions.js';
@@ -461,6 +461,8 @@ export class AuthService {
     if (outlet.organizationId) {
       const kds = await decideFeature(this.dataSource, outlet.organizationId, 'KDS');
       if (!kds.allowed) throw featureError('KDS', kds.reason);
+      const access = await getOrgAccess(this.dataSource, outlet.organizationId);
+      if (access.blocked) throw subscriptionBlockedError(access.reason || 'Subscription inactive'); // a lapsed subscription opens no new kitchen session
     }
 
     if (!matched.pinHash) {

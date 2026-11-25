@@ -254,8 +254,9 @@ describe('Error responses do not leak internals', () => {
     assert.deepEqual(Object.keys(r.body.details).sort(), ['current', 'limit', 'limitKind', 'requested']);
     const f = await call('GET', `/inventory/ingredients?restaurantId=${o.outlet.id}`, { token: o.token });
     assert.deepEqual(Object.keys(f.body.details), ['feature']);
-    const bad = await call('GET', '/tables?restaurantId=not-a-uuid');
+    const bad = await call('GET', '/tables?restaurantId=not-a-uuid', { token: o.token });
     assert.doesNotMatch(String(bad.body.message), /invalid input syntax|select|postgres|uuid/i, 'the database error text is never echoed');
-    assert.ok(bad.status === 500 || bad.status === 400, 'a malformed id is rejected (today as a generic 500: see the report)');
+    assert.equal(bad.status, 400, 'a malformed id is a 400 (it was a generic 500 before Phase 1.2)');
+    assert.equal((await call('GET', '/tables?restaurantId=not-a-uuid')).status, 401, 'and anonymous callers get no validation hints at all');
   });
 });

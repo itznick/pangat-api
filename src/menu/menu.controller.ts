@@ -21,6 +21,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 import { RolesGuard } from '../common/guards/roles.guard.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { FeatureGuard, RequireFeature } from '../common/guards/feature.guard.js';
+import { UuidInputGuard } from '../common/guards/uuid-input.guard.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { StaffRole } from '../common/enums/index.js';
 import { publicMenuCache } from '../common/cache/ttl-cache.js';
@@ -37,8 +38,13 @@ export class MenuController {
     return withMessage(data, 'Public menu retrieved successfully');
   }
 
-  /** Staff & Diner items list */
+  /**
+   * Staff item list (the diner's source is GET /menu/public/:slug): signed-in staff of the outlet only.
+   * Scoping by TenantGuard; the kitchen role needs it for the sold-out switch, floor staff for walk-in orders.
+   */
   @Get('items')
+  @UseGuards(JwtAuthGuard, RolesGuard, UuidInputGuard, TenantGuard)
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER, StaffRole.CHEF, StaffRole.STEWARD, StaffRole.CASHIER)
   async getAllItems(@Query('restaurantId') restaurantId?: string) {
     const items = await this.menuService.getAllItems(restaurantId);
     return withMessage(items, 'Menu items retrieved successfully');

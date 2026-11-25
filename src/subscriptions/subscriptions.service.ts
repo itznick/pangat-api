@@ -30,6 +30,7 @@ import {
   SubscriptionStatus,
 } from '../common/enums/index.js';
 import { EntitlementService } from './entitlement.service.js';
+import { notifyEntitlementChange } from './entitlement-events.js';
 import { DEFAULT_PLANS } from './default-plans.js';
 import { getSetting } from '../platform/settings.service.js';
 import { PlatformEventsService } from '../platform/events.service.js';
@@ -275,7 +276,9 @@ export class SubscriptionsService implements OnModuleInit {
     if (dto.trialDays !== undefined) plan.trialDays = dto.trialDays;
     if (dto.isPublic !== undefined) plan.isPublic = dto.isPublic;
 
-    return this.planRepo.save(plan);
+    const saved = await this.planRepo.save(plan);
+    notifyEntitlementChange(null); // limits and features of every subscriber of this plan may have changed
+    return saved;
   }
 
   /**

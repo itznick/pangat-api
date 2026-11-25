@@ -7,6 +7,7 @@ import { SubscriptionStatus } from '../common/enums/index.js';
 import { getSetting } from '../platform/settings.service.js';
 import { getOrgLifecycle } from '../platform/org-status.js';
 import { resolveFeatureAccess } from '../platform/features.js';
+import { notifyEntitlementChange } from './entitlement-events.js';
 
 const graceDays = () => Number(getSetting<number>('subscription.gracePeriodDays') ?? 7);
 const TTL_MS = 20_000;
@@ -210,6 +211,7 @@ export async function getOrgAccess(dataSource: DataSource, organizationId: strin
 /** Call after any subscription change so the new state applies immediately. */
 export function invalidateOrgAccess(organizationId: string) {
   cache.delete(organizationId);
+  notifyEntitlementChange(organizationId); // live kitchen connections are re-checked at once
 }
 
 export function subscriptionBlockedError(reason: string) {

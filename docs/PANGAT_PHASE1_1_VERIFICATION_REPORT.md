@@ -10,7 +10,7 @@ Phase 1's design holds, and I re-verified every journey in a real browser (37/37
 
 | # | Severity | Defect | Origin | Status |
 |---|---|---|---|---|
-| V1 | **High** | **Database deadlocks under mixed load**: the Phase 1 capacity lock (`SELECT … FOR UPDATE` on the outlet row) deadlocked with the foreign-key locks taken by orders, audit rows and settings saves (14 deadlock errors, HTTP 500s on `POST /tables`, `POST /orders`, `PATCH …/settings`). | **Phase 1** | **Fixed** (`FOR NO KEY UPDATE`); 28/28 repeated stress runs clean, DB deadlock counter asserted |
+| V1 | **High** | **Database deadlocks under mixed load**: the Phase 1 capacity lock (`SELECT … FOR UPDATE` on the outlet row) deadlocked with the foreign-key locks taken by orders, audit rows and settings saves (14 deadlock errors, HTTP 500s on `POST /tables`, `POST /orders`, `PATCH …/settings`). | **Phase 1** | **Fixed** (`FOR NO KEY UPDATE`); 25 consecutive stress runs clean after the fix, DB deadlock counter asserted |
 | V2 | **High** | **Saving outlet settings can silently delete (or re-insert) tables created at the same moment.** Reproduced: 25 concurrent table adds + 25 settings saves left **13 of 26** tables. | **Pre-existing** (the settings code is unchanged), but it makes Phase 1's "exact limit" guarantee untrue under concurrency | **Fixed** in `restaurants.service.ts` `updateSettings`; **needs your explicit review (outside Phase 1 scope)** |
 | V3 | Medium | A kitchen-role (CHEF) token could join the **admin** socket room: a way around the KDS gate, and it receives the unredacted order feed (customer details, amounts) the kitchen is meant never to see. | Pre-existing (PII), Phase 1 gate bypass | **Fixed** (admin room refused for the kitchen role) |
 | V4 | Medium | Migration 017 was **not safe to run twice**: after an operator deliberately removed a key a plan originally had, a re-run granted it back. | Phase 1 | **Fixed** (guarded one-time backfill) |
@@ -44,7 +44,7 @@ All other claims I spot-checked (limit definitions, seat definition, error codes
 ## 3. Independent code review findings
 
 **Transactions and locks.** All four table-creation sites and both staff-creation sites take their lock and count inside the writing transaction (`capacity.ts`); outlet creation locks the organisation row. Subscription facts are loaded *before* the transaction (no second pool connection while holding a lock). Verified by reading and by bursts of 8 and 40 parallel requests against a pool of 15.
-- **V1 (found, fixed):** lock mode. `FOR UPDATE` conflicts with the `FOR KEY SHARE` that Postgres takes on a parent row for every child insert (orders, audit rows, tables, staff). Under mixed load this produced cycles such as *settings save ↔ table insert ↔ audit insert ↔ capacity lock*. `FOR NO KEY UPDATE` still serialises capacity checks and row updates but not child inserts. After the fix: 0 new deadlocks in the Postgres log, `pg_stat_database.deadlocks` unchanged across the stress test (now asserted), 28/28 repeated runs of the mixed test green (previously ≈ 50 % red).
+- **V1 (found, fixed):** lock mode. `FOR UPDATE` conflicts with the `FOR KEY SHARE` that Postgres takes on a parent row for every child insert (orders, audit rows, tables, staff). Under mixed load this produced cycles such as *settings save ↔ table insert ↔ audit insert ↔ capacity lock*. `FOR NO KEY UPDATE` still serialises capacity checks and row updates but not child inserts. After the fix: 0 new deadlocks in the Postgres log, `pg_stat_database.deadlocks` unchanged across the stress test (now asserted), 25 consecutive runs of the mixed test green after the fix (previously ≈ 50 % red).
 - **Lock ordering:** table/staff transactions lock one `restaurants` row; outlet creation locks one `organizations` row then inserts a new `restaurants` row. I found no path that takes the organisation lock while holding an outlet lock, or the reverse. This is review plus stress evidence, not a proof.
 - **V2 (found, fixed):** `RestaurantsService.updateSettings` loads the outlet *with* its `tables` (cascading relation) and saves the entity back. If a table was created between load and save, TypeORM's relation diff issued `DELETE FROM tables …` or re-inserted rows (PK violations). Reproduced without the fix: **19 failures / 13 of 26 tables remaining**; with the fix: pass. Fix: the list is detached for the save and re-attached to the response (same shape as before). This is a behaviour-preserving fix but it is in code Phase 1 did not own: please review.
 - **V3 (found, fixed):** `EventsGateway.joinOutletRoom('admin')` accepted any signed-in staff of the outlet. A CHEF could therefore bypass the KDS gate and read the unredacted admin feed. Admin room now refuses the kitchen role. The web admin console never joins it as a chef (checked).
@@ -195,7 +195,7 @@ Limits of this UAT, stated plainly:
 | web `npm test` | 44 | 44 | 0 | 0 |
 | web `tsc -b`, `npm run build`; API `nest build` | succeed | – | – | – |
 | Browser UAT (`test/uat/*`) | 37 checks | 37 | 0 | – |
-| Repeated stress: mixed-operation test | 28 runs | 28 | 0 | – |
+| Repeated stress: mixed-operation test, after the fixes | 25 runs | 25 | 0 | – |
 
 Notes:
 - `test/security-integration.test.ts` **can** be run (`node --experimental-strip-types --test …`): 17 tests, **12 pass, 5 fail**. The same file at the **original** commit `1f03dbf` gives the identical 5 failures (verified in a temporary worktree): it is a stale duplicate of `security-integration.test.mjs` (whose mocks no longer match the code) and is not part of any npm script. The `.mjs` sibling runs in `npm test` and passes. Not caused by Phase 1.
@@ -234,7 +234,7 @@ Checked and **not** vulnerable: cross-tenant table/staff creation (403), owner-v
 ## 10. Remaining risks and unverified areas
 
 - **Never run against Neon/staging**; only a local Postgres 16. Neon pooling, latency and `statement_timeout` could change lock behaviour: run the stress test (`test:phase1_1`) on staging.
-- Lock-ordering safety is established by review and stress, not proof. The 28-run stress covers tables, staff, outlets, guest orders, status changes, settings saves and billing reads on one organisation; it does not cover inventory deduction, refunds or privacy jobs at the same time.
+- Lock-ordering safety is established by review and stress, not proof. The 25-run stress covers tables, staff, outlets, guest orders, status changes, settings saves and billing reads on one organisation; it does not cover inventory deduction, refunds or privacy jobs at the same time.
 - Sockets already joined keep their feed after a plan change until reconnect (not tested).
 - Multi-instance deployment (two API processes) was not tested: the access cache (20 s) and flag cache (15 s) are per process, and Socket.IO has no shared adapter.
 - Payment gateway, e-mail and WhatsApp paths were out of scope and not exercised.

@@ -28,6 +28,7 @@ import { ReceiveStockDto } from './dto/receive-stock.dto.js';
 import { StockMovementQueryDto } from './dto/stock-movement-query.dto.js';
 import { CreateRecipeDto } from './dto/create-recipe.dto.js';
 import { AuditAction, StockMovementType, UnitOfMeasure } from '../common/enums/index.js';
+import { decideFeature, getOrgAccess } from '../subscriptions/subscription-access.js';
 
 @Injectable()
 export class InventoryService {
@@ -79,7 +80,27 @@ export class InventoryService {
     return result;
   }
 
+  /**
+   * Is Inventory currently usable by the organisation that owns this outlet?
+   * Plan + platform kill switch + per-restaurant override are decided by the shared resolver (`decideFeature`), and a lapsed
+   * subscription counts as "not entitled". An outlet with no organisation (legacy rows) has no plan, so nothing changes for it.
+   * Stock is only ever moved automatically while this is true: an organisation that lost Inventory (downgrade, expiry, a
+   * switched-off feature) must not keep having stock deducted, dishes auto-hidden, or movements written behind a locked screen.
+   */
+  async isInventoryEntitled(restaurantId: string): Promise<boolean> {
+    if (!restaurantId) return true;
+    const outlet = await this.restaurantRepo.findOne({ where: { id: restaurantId } });
+    const orgId = outlet?.organizationId;
+    if (!orgId) return true;
+    if ((await getOrgAccess(this.dataSource, orgId)).blocked) return false;
+    return (await decideFeature(this.dataSource, orgId, 'INVENTORY')).allowed;
+  }
+
   async deductInventoryForOrder(...args: Parameters<InventoryService['_deductInventoryForOrder']>): ReturnType<InventoryService['_deductInventoryForOrder']> {
+    if (!(await this.isInventoryEntitled(args[0] as string))) {
+      this.logger.debug(`Inventory deduction skipped for restaurant ${String(args[0])}: Inventory is not available to this organisation`);
+      return;
+    }
     const result = await this._deductInventoryForOrder(...args);
     await this.syncDishAvailability(args[0] as string);
     return result;
@@ -92,6 +113,10 @@ export class InventoryService {
   }
 
   async adjustInventoryForOrderEdit(...args: Parameters<InventoryService['_adjustInventoryForOrderEdit']>): ReturnType<InventoryService['_adjustInventoryForOrderEdit']> {
+    if (!(await this.isInventoryEntitled(args[0] as string))) {
+      this.logger.debug(`Inventory adjustment for an order edit skipped for restaurant ${String(args[0])}: Inventory is not available`);
+      return;
+    }
     const result = await this._adjustInventoryForOrderEdit(...args);
     await this.syncDishAvailability(args[0] as string);
     return result;
@@ -105,6 +130,8 @@ export class InventoryService {
   async syncDishAvailability(restaurantId: string): Promise<void> {
     if (!restaurantId) return;
     try {
+      // Without Inventory the automatic hiding/showing of dishes must not run (the manager can still switch dishes by hand)
+      if (!(await this.isInventoryEntitled(restaurantId))) return;
       const slug = (await this.restaurantRepo.findOne({ where: { id: restaurantId } }))?.slug || '';
       const recipes = await this.recipeRepo.find({
         where: { restaurantId, isActive: true },

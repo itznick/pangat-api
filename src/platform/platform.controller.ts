@@ -125,7 +125,15 @@ export class PlatformController {
   }
   @Get('subscription-plans') @RequirePermission('subscriptions.view')
   async plans() {
-    return withMessage({ plans: await this.subs.plansWithUsage(), features: await this.featureCatalog() }, 'Plans');
+    return withMessage({ plans: await this.subs.plansWithUsage(), features: await this.featureCatalog(), trial: await this.subs.trialConfiguration() }, 'Plans');
+  }
+  @Get('subscriptions/capacity') @RequirePermission('subscriptions.view')
+  async capacity() {
+    return withMessage(await this.subs.capacityWatch(), 'Restaurants close to or over their plan limits');
+  }
+  @Get('subscriptions/founding') @RequirePermission('subscriptions.view')
+  async founding() {
+    return withMessage(await this.subs.foundingGrants(), 'Founding 10 grants');
   }
   @Get('restaurants/:id/subscription-history') @RequirePermission('subscriptions.view')
   async subHistory(@Param('id', uuid) id: string) {

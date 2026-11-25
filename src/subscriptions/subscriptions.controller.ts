@@ -4,6 +4,7 @@
 
 import {
   Body,
+  ConflictException,
   Controller,
   HttpCode,
   Get,
@@ -26,6 +27,13 @@ import { StaffRole } from '../common/enums/index.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
 import { PlatformAdminGuard, RequirePermission } from '../platform/guards.js';
 import { actorOf, PlatformAuditService } from '../platform/audit.service.js';
+
+export class UpdateBillingProfileDto {
+  @IsOptional() @IsString() @MaxLength(200) legalName?: string | null;
+  @IsOptional() @IsString() @MaxLength(500) address?: string | null;
+  @IsOptional() @IsString() @MaxLength(2) stateCode?: string | null;
+  @IsOptional() @IsString() @MaxLength(15) gstin?: string | null;
+}
 
 export class RequestPlanChangeDto {
   @IsString()
@@ -108,6 +116,21 @@ export class SubscriptionsController {
     return withMessage(result, 'Webhook processed successfully');
   }
 
+  // ── Billing profile: the recipient of Pangat's tax invoices and the place of supply ───────────
+  @Get('billing-profile')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
+  async billingProfile(@Req() req: any) {
+    return withMessage(await this.subscriptionsService.getBillingProfile(req.user.organizationId), 'Billing details');
+  }
+
+  @Patch('billing-profile')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(StaffRole.SUPER_OWNER)
+  async updateBillingProfile(@Req() req: any, @Body() dto: UpdateBillingProfileDto) {
+    return withMessage(await this.subscriptionsService.updateBillingProfile(req.user.organizationId, dto, req.user), 'Billing details saved');
+  }
+
   // ── Owner self-service ────────────────────────────────────────────────────
   @Post('cancel')
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -187,22 +210,39 @@ export class SubscriptionsController {
   @RequirePermission('plans.manage')
   async updatePlan(@Param('id') id: string, @Body() dto: UpdatePlanDto, @Req() req: any) {
     const before = await this.subscriptionsService.findPlanById(id);
+    const { acknowledgeSubscriberImpact, ...changes0 } = dto as UpdatePlanDto & Record<string, unknown>;
     const prev: Record<string, unknown> = {};
-    for (const k of Object.keys(dto)) prev[k] = (before as any)[k];
-    const plan = await this.subscriptionsService.updatePlan(id, dto);
+    for (const k of Object.keys(changes0)) prev[k] = (before as any)[k];
+
+    // A plan row that customers are or have been on is a commercial record: its price, interval and GST rate are not edited in place.
+    // (Limits and features stay editable, exactly as before: the response lists who is now over a limit.)
+    const history = await this.subscriptionsService.planSubscriberHistory(id);
+    const termsChanged =
+      (changes0.basePrice !== undefined && Number(changes0.basePrice) !== Number(before.basePrice)) ||
+      (changes0.basePricePaise !== undefined && Number(changes0.basePricePaise) !== Number(before.basePricePaise)) ||
+      (changes0.billingInterval !== undefined && changes0.billingInterval !== before.billingInterval) ||
+      (changes0.taxPercentage !== undefined && Number(changes0.taxPercentage) !== Number(before.taxPercentage));
+    if (termsChanged && history.everSubscribed > 0 && acknowledgeSubscriberImpact !== true) {
+      throw new ConflictException({
+        message: `${history.everSubscribed} restaurant${history.everSubscribed === 1 ? ' is' : 's are'} (or have been) on this plan. Do not change its price in place: create a new plan and move the customer to it. Send acknowledgeSubscriberImpact to override deliberately.`,
+        code: 'PLAN_HAS_SUBSCRIBERS',
+        details: { everSubscribed: history.everSubscribed, currentSubscribers: history.currentSubscribers },
+      });
+    }
+    const plan = await this.subscriptionsService.updatePlan(id, changes0 as UpdatePlanDto);
     const changes: Record<string, { from: unknown; to: unknown }> = {};
-    for (const k of Object.keys(dto)) {
+    for (const k of Object.keys(changes0)) {
       const a = JSON.stringify(prev[k]);
       const b = JSON.stringify((plan as any)[k]);
       if (a !== b) changes[k] = { from: prev[k], to: (plan as any)[k] };
     }
     await this.platformAudit.record(actorOf(req), {
-      action: dto.isActive === false ? 'PLAN_RETIRED' : 'PLAN_UPDATED', category: 'PLAN', entityType: 'plan', entityId: plan.id, entityLabel: plan.code,
-      summary: `Updated plan ${plan.code}: ${Object.keys(changes).join(', ') || 'no field changes'}`, changes,
+      action: changes0.isActive === false ? 'PLAN_RETIRED' : 'PLAN_UPDATED', category: 'PLAN', entityType: 'plan', entityId: plan.id, entityLabel: plan.code,
+      summary: `Updated plan ${plan.code}: ${Object.keys(changes).join(', ') || 'no field changes'}${history.everSubscribed ? ` (${history.currentSubscribers} current, ${history.everSubscribed} ever subscribed${termsChanged ? '; commercial terms changed with explicit acknowledgement' : ''})` : ''}`, changes,
     });
     // Lowering a limit never deletes anything: report who is now over it so the operator can act (they cannot add more until within limits)
     const limitsTouched = ['maxOutlets', 'maxTablesPerOutlet', 'maxStaffPerOutlet'].some((k) => k in changes);
     const overLimit = limitsTouched ? await this.subscriptionsService.organisationsOverPlanLimits(plan.id) : [];
-    return withMessage({ ...plan, overLimitOrganisations: overLimit }, `Plan '${plan.name}' updated successfully`);
+    return withMessage({ ...plan, overLimitOrganisations: overLimit, subscriberImpact: history }, `Plan '${plan.name}' updated successfully`);
   }
 }

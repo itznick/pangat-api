@@ -1,141 +1,138 @@
-# Pangat — Phase 2 Technical Dependencies
+# Pangat — Phase 2 Technical Dependencies — Revision 2
 
-**Status:** proposal. Everything marked *proposed* below is design only; no schema, endpoint or configuration has been created.
-**Companion documents:** `PANGAT_PHASE2_PRODUCT_READINESS_AUDIT.md` (findings, `F-nn`) and `PANGAT_PHASE2_ROADMAP.md` (items, `P0-n` / `P1-n`, phases `PR-n`).
+**Status:** proposal, with one update. **Revision 3:** migrations **018** (commercial plan catalogue) and **019** (billing profile, invoice series) now exist in the API repository and are tested locally, but are **not applied to any shared or production database**. Because the commercial work took migration numbers 018 and 019, the Phase 2 proposals below that were numbered 018–021 shift to **020 and later**. Everything else marked *proposed* is design only.
+**Companions:** Audit (`F-nn`), Roadmap (`P0-n`, `P1-n`, phases `PR-n`), and the PR-0B commercial documents.
 **Baseline:** API `977c93a`, web `0beb1c8`.
 
 ---
 
-## 1. Dependency map between roadmap items
+## 1. Dependency map (corrected)
 
 ```
-PR-0 decisions (G1..G8, facts)
-   │
-   ├─► P0-1 UPI payee + DTO regex ─────────────┐
-   ├─► P0-2 stable idempotency keys ───────────┤
-   │        └─► P0-4 staff entry ──────────────┤
-   │                                           ▼
-   ├─► P0-7 safety net (baseline, CI+DB, staging, hosting) ──► every later PR is tested here
-   │                                           │
-   ├─► P0-3 kitchen reliability                │
-   ├─► P0-8 manual-UPI claim (needs P0-1) [skip if G1=online first]
-   ├─► P0-5 pilot ops (alerts need email provider; G4)
-   ├─► P0-6 truthful copy (needs G2)
-   └─► P0-9 staging UAT ◄── all of the above ──► PILOT GO / NO-GO
+PR-0 decisions, investigation of pangat@icici, Razorpay open questions + Partner Dashboard access
+PR-0B commercial approval  (parallel; blocks P0-6b, P1-2, any published price)
 
-Razorpay track (starts when partner access exists; never blocks the pilot unless G1=yes)
-   Partner approval + sandbox creds + answers (G8)
-        └─► P1-1A Connect ─► P1-1B Pay ─► P1-1C Refund ─► P1-1D Reconcile ─► P1-1E Live pilot
-                               ▲ needs G6 (release rule) and P0-7 (CI/staging)
-   Pangat's own Razorpay keys + plan mapping + CA input ─► P1-2 subscription billing (needs G2 settled)
+M1 operational mitigation (now)      M2 tiny web-only UPI-button removal (only if real-diner exposure possible)
+                                │
+                                ▼
+ P0-7a  SAFETY NET MVP (CI with Postgres + staging)   ◄── GATE: nothing below merges before this is green
+                                │
+          ┌─────────────────────┼───────────────────────────────┐
+          ▼                     ▼                               ▼
+ P0-10 atomic refund /     P0-3 kitchen reliability       P0-5 onboarding + alert policy
+ mark-paid + concurrency   (web only)                      (needs email provider)
+ (migration 018)
+          │
+          ├─► P0-1 UPI payee + VPA confirmation (migration 019) ─► P0-8 claim endpoint (migration 020, log redaction first)
+          ├─► P0-2 stable keys (web)  ─► P0-4 staff entry
+          │
+          ▼
+ P0-7b baseline + drift check ─► P0-6b final copy (needs PR-0B) ─► P0-9 STAGING UAT ─► PILOT GO / NO-GO
 
-P1-6 PWA/service worker ─► P1-4 push notifications
-P0-5 alerts ─► P1-9 plan change → ticket
-P1-3 CSV import ◄── G7 ;  P1-10 order hardening ◄── P0-7 + pilot metrics
+Razorpay for restaurants (P1-1) — needs: P0-7a, P0-10, G6, Partner Dashboard access, [Open] answers
+   1A Connect ─► 1B Pay ─► 1C Refund ─► 1D Reconcile ─► 1E Live pilot
+Pangat subscription billing (P1-2) — needs: PR-0B approval, F-40 fixes, CA input, Pangat's own Razorpay account
+   (separate integration from restaurant OAuth; different credentials, different webhook)
+P1-6 PWA ─► P1-4 push ;  P0-5 ─► P1-9 ;  G7 ─► P1-3 ;  P0-8 redaction ─► P1-17
 ```
-Hard sequencing rules: P0-7 before anything that changes order, payment or schema paths; P0-1/P0-2 before P0-4 and P0-8; P1-1A before 1B; 1B before 1C/1D; G6 before 1B starts.
+**Hard rules**
+1. **P0-7a precedes every change to order, payment or schema paths.** The only exception is M2: a removal of UI buttons, no API/schema/logic, verified on a preview.
+2. P0-10 precedes P0-8 (claims rely on atomic mark-paid) and any gateway work (a webhook will race a cashier).
+3. Every migration is rehearsed **up/down/up on a staging copy of production** before merge (the `docs/staging/migration_017_check.sh` pattern).
+4. P1-2 does not start before PR-0B approval **and** the F-40 invoice fixes are designed.
 
 ---
 
 ## 2. External dependencies
 
-| Dependency | Needed for | Status / unknown | Risk if late |
+| Dependency | Needed for | Status | Notes |
 |---|---|---|---|
-| **Razorpay Technology Partner approval**, OAuth client id/secret, redirect URI registration, **sandbox/test-mode partner access** | P1-1 | The partner reply was not available to this audit (G8) | The whole restaurant-payments track waits; code can be built against fixtures but not proven |
-| Razorpay merchant onboarding by each restaurant (KYC, activation, settlement account) | P1-1E | Restaurant's responsibility; lead time unknown | A pilot restaurant may not be able to take online payment immediately; keep counter/UPI path |
-| Pangat's own Razorpay live account + plan ids | P1-2 | Plans carry `razorpay_plan_id` fields but values unknown | Subscription billing blocked; manual invoicing continues |
-| Pangat GST registration and invoice format (SAC, e-invoicing applicability) via CA | P1-2 invoice PDF | `sacCode` exists on plans; legal format not reviewed | Invoices not compliant |
-| Brevo (or any SMTP/API provider): verified sender, ideally domain authentication (SPF/DKIM) | P0-5 alerts, welcome links, OTP, P1-4 summaries | Provider configured in production? unknown | Mail lands in spam or is not sent; alerts silently skipped |
-| Render API tier / always-on | P0-7, jobs, sockets | Unknown (G5) | Cold starts on first order; lost sweeps |
-| Neon: plan limits, autosuspend, branch quota, PITR window | P0-7 staging, backups | Unknown | Staging branch unavailable; cold-start latency |
-| Netlify branch/preview deploys | staging web | Likely available | — |
-| GitHub Actions minutes + Postgres service container | P0-7, P1-12 | Free tier sufficient | — |
-| Free object storage | P1-3 photos | Choose later | Photos deferred; emoji stays |
-| Real devices (Android phone, iPhone, kitchen tablet) | P0-3, P0-9 | Founders' hardware | Reliability claims unproven |
-| Lawyer/CA sign-off (`docs/COMPLIANCE.md` open questions) | before scale | Pending | Not a pilot blocker, but a scale blocker |
+| **Razorpay Technology Partner response** | P1-1 design | **Received.** Confirms model (§8.1) | Technical answers still **[Open]** (§8.2) |
+| **Razorpay Partner Dashboard access** | Building and testing OAuth in test mode | **Outstanding (required)** | Without it P1-1 cannot be built or verified |
+| Razorpay sandbox behaviour for orders, payments, refunds, webhooks via OAuth | P1-1B…1D | **[Open]** | Partner Dashboard access is confirmed as required for the OAuth test flow; the rest is unconfirmed |
+| Restaurants' own active Razorpay accounts, KYC and activation | P1-1E | Restaurant's responsibility **[Confirmed]** | A pilot restaurant may not be ready; counter/UPI path remains |
+| Pangat's own Razorpay merchant account, plan ids, webhook | P1-2 | Separate integration **[Confirmed]** | Different credentials and webhook from restaurant OAuth |
+| CA: GST registration, SAC, invoice format, place of supply, refund/credit-note policy | P1-2, PR-0B | Pending | Also confirms any regulatory obligations; the Razorpay model does not by itself remove them |
+| Legal: terms with restaurants, privacy for payment data, advertising/pricing claims | Before P0-6b and P1-1E | Pending | |
+| Brevo or SMTP: verified sender (ideally SPF/DKIM) | P0-5 alerts, welcome links, OTP | Production status unknown | Alerts are only as reliable as this; failure must be visible (P0-5) |
+| Render API tier (always-on) | P0-7a, jobs, sockets, retries of alerts | Unknown (G5) | Alert retries and sweeps run in-process |
+| Neon plan limits, branching, PITR | P0-7a staging, backups | Unknown | |
+| GitHub Actions with a Postgres service container | P0-7a | Free | |
+| Real devices (Android, iPhone, kitchen tablet) | P0-3, P0-9 | Founders' hardware | |
+| A person with production DB access | P0-7b dump; read-only exposure queries (§3 of roadmap); duplicate-bill check before the unique index | Founder/DBA | I have not accessed any database |
+| Founders' bank/UPI statements | `pangat@icici` investigation | Founders | Do not assume ownership |
 
 ---
 
 ## 3. Proposed database changes (none applied)
 
-All new migrations follow the existing rules: numbered, additive, idempotent, one transaction, auto-applied from 009+ with the advisory lock, a matching `.down.sql` that never drops data-bearing columns, and rehearsed with the existing `docs/staging/*` scripts on a copy first. Next number is **018**.
+Rules: numbered, additive, idempotent, one transaction, auto-applied from 009+ under the advisory lock, `.down.sql` that never drops data-bearing columns, rehearsed on staging. Next number is **018**. Order below follows the roadmap sequence.
 
-### 3.1 Phase 0 / P0
-| Migration | Change | Item | Notes |
-|---|---|---|---|
-| `000_baseline.sql` (docs/rebuild artefact, **not auto-applied**: the runner starts at 009) | Schema-only dump of production's core tables (`organizations`, `restaurants`, `staff`, `tables`, `menu_categories`, `menu_items`, `modifiers`, `orders`, `order_items`, `leads`, …) | P0-7 | Reviewed by a human; sanitised; CI builds a fresh DB from `000` + `009…` and diffs it with the entity-synchronised schema |
-| `018_order_payment_claim.sql` | `ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_claimed_at timestamptz;` | P0-8 | Nullable, no default, no backfill, no index needed |
-| (optional) `019_restaurant_golive.sql` | `ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS qr_kit_opened_at timestamptz;` | P0-5 | Only if the checklist should remember "QR kit opened"; otherwise skip |
+| # | Migration | Change | Roadmap | Safety notes |
+|---|---|---|---|---|
+| — | `000_baseline.sql` (documentation/rebuild artefact; **never run on production**; runner starts at 009) | Reviewed schema-only dump of core tables | P0-7b | CI drift check |
+| **018** | `018_atomic_refunds.sql` | `order_refunds` table; `UNIQUE (order_id, idempotency_key)`; partial unique index `uq_tax_documents_bill_per_order ON tax_documents(order_id) WHERE kind='BILL'`; `CHECK (refund_amount <= total_amount)` on `orders` | P0-10 | **Pre-check (read-only, human):** no existing duplicate BILL rows per order and no order violating the CHECK; the migration must be written to fail safely (not create the index) and report if duplicates exist. Existing refunds are not backfilled |
+| **019** | `019_upi_vpa_confirmation.sql` | `restaurants.upi_vpa_confirmed_at timestamptz`, `upi_vpa_confirmed_by uuid` | P0-1 | Existing outlets default **unconfirmed** (UPI stays off for them until confirmed: intended) |
+| **020** | `020_payment_claim.sql` | `orders.payment_claimed_at timestamptz` | P0-8 | Nullable, no default; add to kitchen redaction list in code |
+| **021** | `021_alert_deliveries.sql` | `platform_event_deliveries` (below); optional `platform_events.ack_reminder_sent_at` | P0-5 | Retention via the existing log-retention job |
+| (opt.) | `022_go_live.sql` | `restaurants.qr_kit_opened_at timestamptz` | P0-5 | Only if the checklist should remember it |
 
-### 3.2 P1 — Razorpay for restaurants (proposed DDL, to be refined after the partner reply)
+**Proposed DDL, P0-10 (sketch)**
 ```sql
--- One row per connected restaurant (outlet) or organisation; tokens encrypted with the existing AES-256-GCM helper
-CREATE TABLE IF NOT EXISTS restaurant_payment_accounts (
-  id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_id    uuid NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
-  restaurant_id      uuid REFERENCES restaurants(id) ON DELETE RESTRICT,   -- NULL = organisation-wide
-  provider           varchar(20) NOT NULL DEFAULT 'razorpay',
-  provider_account_id varchar(100) NOT NULL,                              -- Razorpay merchant/account id
-  public_key         varchar(100),                                         -- checkout key for that merchant [verify]
-  access_token_enc   text NOT NULL,
-  refresh_token_enc  text,
-  token_expires_at   timestamptz,
-  scopes             text[],
-  mode               varchar(10) NOT NULL DEFAULT 'test',                 -- test | live
-  status             varchar(20) NOT NULL DEFAULT 'CONNECTED',            -- CONNECTED | NEEDS_RECONNECT | REVOKED
-  connected_by       uuid REFERENCES staff(id),
-  connected_at       timestamptz NOT NULL DEFAULT now(),
-  revoked_at         timestamptz,
-  UNIQUE (provider, provider_account_id)
-);
-
--- Many attempts per order; the order keeps its existing payment_status as the summary
-CREATE TABLE IF NOT EXISTS order_payments (
-  id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  order_id            varchar(20) NOT NULL REFERENCES orders(id) ON DELETE RESTRICT,
-  restaurant_id       uuid NOT NULL REFERENCES restaurants(id) ON DELETE RESTRICT,
-  payment_account_id  uuid NOT NULL REFERENCES restaurant_payment_accounts(id),
-  provider_order_id   varchar(100) NOT NULL,
-  provider_payment_id varchar(100),
-  amount_paise        bigint NOT NULL CHECK (amount_paise > 0),   -- from the SERVER-computed order total
-  currency            char(3) NOT NULL DEFAULT 'INR',
-  status              varchar(20) NOT NULL DEFAULT 'CREATED',     -- CREATED | AUTHORIZED | CAPTURED | FAILED | EXPIRED
-  method              varchar(20),
-  failure_reason      text,
-  verified_at         timestamptz,                                 -- set only after server-side fetch/verification
-  captured_at         timestamptz,
-  created_at          timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (provider_order_id),
-  UNIQUE (provider_payment_id)
-);
-CREATE INDEX IF NOT EXISTS idx_order_payments_order ON order_payments (order_id);
-CREATE INDEX IF NOT EXISTS idx_order_payments_pending ON order_payments (status, created_at) WHERE status IN ('CREATED','AUTHORIZED');
-
 CREATE TABLE IF NOT EXISTS order_refunds (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  order_payment_id   uuid NOT NULL REFERENCES order_payments(id) ON DELETE RESTRICT,
-  provider_refund_id varchar(100) UNIQUE,
-  amount_paise       bigint NOT NULL CHECK (amount_paise > 0),
-  status             varchar(20) NOT NULL DEFAULT 'PENDING',     -- PENDING | PROCESSED | FAILED
+  order_id           varchar(20) NOT NULL REFERENCES orders(id) ON DELETE RESTRICT,
+  order_payment_id   uuid NULL,                         -- NULL for manual (cash/UPI/bank) refunds; set for gateway refunds later (FK added with P1-1)
+  idempotency_key    varchar(100) NOT NULL,
+  request_hash       char(64) NOT NULL,                 -- same key + different payload => 409, never a silent replay
+  method             varchar(20) NOT NULL,              -- COUNTER_CASH | MANUAL | GATEWAY
+  amount             numeric(10,2) NOT NULL CHECK (amount > 0),
   reason             text NOT NULL,
-  idempotency_key    varchar(100) NOT NULL UNIQUE,
   credit_note_number varchar(32),
-  requested_by       uuid REFERENCES staff(id),
-  created_at         timestamptz NOT NULL DEFAULT now()
+  provider_refund_id varchar(100) UNIQUE,               -- gateway refunds
+  status             varchar(20) NOT NULL DEFAULT 'SETTLED',  -- SETTLED | PENDING | FAILED
+  requested_by       uuid,
+  created_at         timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (order_id, idempotency_key)
 );
 ```
-- **Orders:** if G6 = model B, either (i) a new `orders.order_status` value `AWAITING_PAYMENT` (enum change; every status switch in KDS/admin/reports must be audited), or (ii) preferably a boolean `orders.released_to_kitchen boolean NOT NULL DEFAULT true`, so that all existing rows and the existing flows are unchanged and only gateway-checkout orders are created with `false`. Option (ii) is the lower-risk migration.
-- **Webhook ledger:** reuse the existing `webhook_events` table (it already has `provider`, `event_id`, `status`, `signature_valid`, `payment_id`, `organization_id`) rather than a new one; add `account_id` if needed.
-- **Money type:** new tables use integer paise; `orders` keeps `decimal(10,2)`. Convert at one boundary function and unit-test it (rounding at ₹0.005).
+**Proposed DDL, P0-5 alert deliveries (sketch)**
+```sql
+CREATE TABLE IF NOT EXISTS platform_event_deliveries (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_id        uuid NOT NULL REFERENCES platform_events(id) ON DELETE CASCADE,
+  channel         varchar(10) NOT NULL DEFAULT 'EMAIL',
+  recipient       varchar(180) NOT NULL,
+  status          varchar(24) NOT NULL,   -- PENDING | SENT | FAILED | SKIPPED_NO_PROVIDER | SUPPRESSED_DUPLICATE | DIGESTED
+  attempts        int NOT NULL DEFAULT 0,
+  last_error      text,
+  provider_message_id varchar(150),
+  next_retry_at   timestamptz,
+  last_attempt_at timestamptz,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_ped_pending ON platform_event_deliveries (status, next_retry_at) WHERE status IN ('PENDING','FAILED');
+```
 
-### 3.3 P1 — other
-| Item | Change |
+### 3.1 Razorpay for restaurants (P1-1; refined after the open answers)
+`restaurant_payment_accounts` (encrypted OAuth tokens, merchant/account id, mode, status), `order_payments` (many attempts per order; integer paise; unique provider order and payment ids; `verified_at` set only after server-side verification), and `order_refunds.order_payment_id` foreign key. `orders.released_to_kitchen boolean NOT NULL DEFAULT true` (preferred over a new status value) for model B. Webhook ledger reuses `webhook_events`. DDL as in Revision 1 of this document, adjusted so `order_refunds` is the one refund table for manual **and** gateway refunds.
+
+### 3.2 Commercial / billing changes (implemented in Revision 3; see Implementation Report)
+| Change | State |
 |---|---|
-| P1-2 | `subscription_invoices.pdf_key varchar(200)` (optional; PDFs can also be generated on demand). Existing columns already hold `razorpay_subscription_id/customer_id/payment_id/invoice_id`. |
-| P1-3 | `menu_items.image_url varchar(20)` → `varchar(500)` (widening is a safe, metadata-only change in Postgres); optionally `image_key`. |
-| P1-4 | `push_subscriptions(id, staff_id, restaurant_id, endpoint, p256dh, auth, created_at)`; summary opt-in on outlet `operations` JSON. |
-| P1-7 | `tables.session_secret` (only if the rotating-QR approach is chosen). |
-| P1-8 | Extend `restaurants.operations` JSON; no DDL. |
+| `018_commercial_plans.sql` (+ down): 17 new plan rows (4 plans × monthly/annual, `PANGAT_TRIAL`, 8 Founding rows); hides the six historical public plans once, recording previous visibility in `plan_visibility_backfills` | Implemented, tested, **not applied to production** |
+| `019_billing_profile_invoice_series.sql` (+ down): four nullable billing columns on `organizations`; `subscription_invoice_sequences` | Implemented, tested, **not applied to production** |
+| Quarterly interval | **Dropped** (not offered) |
+| Subscription invoice PDF, credit notes for subscription refunds, SAC value | Pending (CA / build) |
+| `menu_items.image_url` widen; `push_subscriptions`; `tables.session_secret` | Later |
+
+---|---|---|
+| Plan **data** rows (public Starter/Growth/Group, `TRIAL`, founding rows), `subscription.defaultTrialPlanCode`, trial days | Commercial plan | PR-0B (data, no migration) |
+| Allow a `QUARTERLY` interval: code enum change, plus DDL **only if** the production column is a Postgres enum. Migration 005 created `billing_interval` as `VARCHAR(20)`, while TypeORM-synchronised databases get an enum; **check the real production column type first** | Quarterly pricing | P1-16 |
+| Billing profile on `organizations`: legal name, address, `billing_state_code`, `billing_gstin` | Place of supply and invoice recipient | P1-2 / F-40 |
+| `subscription_invoice_sequences(fiscal_year PK, last_value)` and an invoice-number function replacing the timestamp-random generator; character limit 16 | Consecutive serials (F-40) | P1-2 |
+| `subscription_invoices.pdf_key` (optional) and subscription credit notes | Documents | P1-2 |
+| `menu_items.image_url` widen; `push_subscriptions`; `tables.session_secret` | P1-3 / P1-4 / P1-7 | later |
 
 ---
 
@@ -143,20 +140,17 @@ CREATE TABLE IF NOT EXISTS order_refunds (
 
 | Endpoint | Auth | Item |
 |---|---|---|
+| `POST /orders/:id/refund` (existing) | owner/manager | **Re-implemented atomically** in P0-10 (lock, unique key, replay, 409 on payload mismatch) |
+| `PATCH /orders/:id/mark-paid` (existing) | cashier+ | Atomic re-read under lock; one bill per order |
+| `POST /restaurants/:id/upi/confirm` | owner | P0-1 |
+| `POST /orders/:id/payment-claimed` body `{ token }` (token never in URL), throttled, idempotent, eligible orders only, never marks paid | tracking token | P0-8 |
 | `GET /restaurants/:id/readiness` | owner/manager | P0-5 |
-| `POST /orders/:id/payment-claimed?token=` | tracking token, throttled | P0-8 |
 | `POST /admin/provision` + optional `kitchenPin` | platform admin | P0-5 |
-| `GET /payments/connect/start` → 302 to Razorpay with signed `state` | owner | P1-1A |
-| `GET /payments/connect/callback` | Razorpay redirect, `state`-verified | P1-1A |
-| `POST /payments/connect/disconnect`, `GET /payments/account` | owner | P1-1A |
-| `POST /orders/:id/pay` (creates Razorpay order on the merchant's account) | tracking token | P1-1B |
-| `POST /orders/:id/pay/verify` | tracking token | P1-1B |
-| `POST /payments/webhook/razorpay` (separate from the subscription webhook; maps `account_id` → restaurant) | HMAC | P1-1B |
-| `POST /orders/:id/refund` (gateway path: extends existing endpoint) | owner/manager | P1-1C |
-| Job: `payments-reconcile` (in `jobs.service.ts`) | system | P1-1D |
-| `POST /subscriptions/checkout` (create subscription / link) | owner | P1-2 |
+| Super Admin: alert deliveries list, retry, failure indicator | platform admin | P0-5 |
+| `GET/POST /payments/connect/*`, `POST /orders/:id/pay`, `POST /orders/:id/pay/verify`, `POST /payments/webhook/razorpay` | per P1-1 | P1-1 |
+| `POST /subscriptions/checkout` (Pangat's own account) | owner | P1-2 |
 
-Rule for all payment endpoints: the amount is **always** recomputed from the stored order; the client may send an order id, never an amount; the payment is **verified by fetching it from Razorpay with the merchant's token** (and signature where applicable) before any state change; state change + bill number + audit + socket emit happen in **one transaction** (as `markPaid` already does).
+Payment endpoint rules (all): amount recomputed from the stored order; payment verified by fetching it from Razorpay with the merchant's token (and signature where applicable) **before** any state change; state change + bill number + audit + socket emit in **one** transaction; credentials never in URLs or logs.
 
 ---
 
@@ -164,83 +158,77 @@ Rule for all payment endpoints: the amount is **always** recomputed from the sto
 
 | Name | Where | Item |
 |---|---|---|
-| `RAZORPAY_PARTNER_CLIENT_ID`, `RAZORPAY_PARTNER_CLIENT_SECRET`, `RAZORPAY_OAUTH_REDIRECT_URI` | env or encrypted platform setting (preferred: same store as `gateway.razorpayWebhookSecret`) | P1-1A |
-| `RAZORPAY_PARTNER_WEBHOOK_SECRET` (order-payment webhook) | encrypted platform setting | P1-1B |
-| `PLATFORM_SETTINGS_KEY` | **must be set explicitly** before storing OAuth tokens, so that rotating `JWT_SECRET` can never make stored tokens unreadable (already advised in `.env.example`) | P1-1A |
-| Pangat's own `RAZORPAY_KEY_ID/KEY_SECRET` and webhook secret | encrypted platform setting | P1-2 |
-| `support.whatsapp` (platform setting) | registry | P0-5 |
-| `general.selfSignupEnabled=false` | Super Admin setting | P0-5 |
-| `notifications.emailAlerts=true`, `notifications.alertEmails=<founders>` | Super Admin setting | P0-5 |
-| `VAPID_PUBLIC_KEY/PRIVATE_KEY` | env | P1-4 |
-| Per-outlet payment mode flag (`operations.payments.gateway`, default false) | outlet settings | P1-1B |
-
-Secrets are never put in the repo or in PR text; OAuth tokens are encrypted at rest with the existing AES-256-GCM helper and never returned by any API.
+| `notifications.emailAlerts=true`, `notifications.alertEmails`, event toggles (`notifications.event.<TYPE>`) | Super Admin settings | P0-5 |
+| New: alert burst threshold, retry schedule, reminder hours, hourly email cap | settings registry | P0-5 |
+| `general.selfSignupEnabled=false` | setting | P0-5 |
+| `support.whatsapp` | setting | P0-5 |
+| Outlet `payments.upi` (existing), **UPI confirmation** (new column) | outlet | P0-1 |
+| `subscription.defaultTrialDays`, `subscription.defaultTrialPlanCode`, `subscription.gracePeriodDays`, `billing.supplierStateCode`, `billing.invoicePrefix` | settings (existing) | PR-0B |
+| Partner OAuth client id/secret, redirect URI; partner/merchant webhook secret | encrypted platform settings | P1-1 |
+| `PLATFORM_SETTINGS_KEY` set explicitly **before** storing OAuth tokens | env | P1-1A |
+| Pangat's own Razorpay key id/secret and webhook secret | encrypted platform settings | P1-2 |
+| VAPID keys | env | P1-4 |
 
 ---
 
 ## 6. Test strategy and regression map
 
-### 6.1 What protects what today
-| Area | Existing protection |
+### 6.1 Protection today
+Tenancy/roles: `authorization`, `phase1-final-role-isolation`, `integration.e2e`, `security-integration.test.ts` (17). Entitlements and revocation: `phase1-entitlements.e2e` (36), `phase1-1-*`, `phase1-2-*` (28), `subscriptions.test`. Orders and inventory: `order-lifecycle`, `order-types`, `inventory`, `recipes-deductions`, `qa-remediation`. Compliance: `compliance.e2e` (14), `billing`, `privacy`, `audit`. Platform: `platform-control.e2e` (43, fresh DB). Web: 51 unit tests. **Only the unit suites currently run in CI** (re-run for this audit: API 266/266, web 51/51).
+
+### 6.2 New tests per phase
+| Phase | Tests |
 |---|---|
-| Tenancy / roles | `authorization.test.mjs`, `phase1-final-role-isolation`, `integration.e2e`, `security-integration.test.ts` (17) |
-| Entitlements, revocation | `phase1-entitlements.e2e` (36), `phase1-1-verification` (7), `phase1-2-*` (28), `subscriptions.test` |
-| Orders and inventory | `order-lifecycle`, `order-types`, `inventory`, `recipes-deductions`, `qa-remediation` |
-| Compliance and bills | `compliance.e2e` (14), `billing.test`, `privacy.test`, `audit.test` |
-| Platform console | `platform-control.e2e` (43; needs a **fresh** DB) |
-| Web | 51 unit tests; Playwright UAT scripts (local, desktop) |
+| PR-1 | CI job itself: DB suites on a fresh database each run, serial; staging smoke |
+| **PR-2 (P0-10)** | **Concurrency suite (Postgres):** 10 identical parallel refunds → 1 refund / 1 credit note / 1 audit; same key different payload → 409; 10 distinct keys cannot exceed the total; 10 parallel mark-paid → 1 bill document and one serial; mark-paid vs cancel; rollback consumes no serial; **mutation checks** (drop the lock/unique constraint → tests fail) |
+| PR-3 | UPI URI builder; VPA validator; unconfirmed outlet cannot take UPI; tracking payload shows only its own outlet's destination; VPA change resets confirmation; stable-key helper |
+| PR-4 | Reconnect/visibility refetch and merge (unit + Playwright); wake-lock fallback |
+| PR-5 | Staff entry error path; stable key; limiter not consumed by staff |
+| **PR-6 (claim)** | Wrong/missing/foreign token; ineligible states; idempotent repeat; throttling; **`payment_status`, `bill_number`, `settled_at` unchanged and no `order:paid`**; admin room updated, kitchen room redacted; tokens absent from captured logs |
+| **PR-7 (alerts)** | Event created once per trigger; duplicate suppression; provider failure recorded and retried; recovery marks SENT; digest on burst; no provider → SKIPPED and banner; Super Admin shows failures and Retry |
+| P1-1 | Signed webhook fixtures (captured/failed/refunded/unknown-account/duplicate/out-of-order), tamper tests, token refresh/revocation, reconciliation of a lost webhook, sandbox end to end, mutation checks; **gateway refund concurrency reuses the P0-10 suite** |
+| P1-2 | Sequential invoice numbers under concurrency; place-of-supply split (intra/inter-state); buyer GSTIN; sandbox charge/fail/halt; credit note |
 
-### 6.2 What each phase must add
-| Phase | New tests |
-|---|---|
-| PR-1 | Unit: UPI URI builder; stable-key helper. E2E: DTO regex; duplicate submit → one order |
-| PR-2 | The CI job itself; schema-drift check; staging smoke |
-| PR-3 | Unit: ticket merge/de-dupe; Playwright: socket drop/restore shows missed order; wake-lock fallback |
-| PR-4/5 | E2E: staff-entry failure path; `payment-claimed` auth/idempotency; no change to `payment_status` |
-| PR-6 | E2E: provision with and without `kitchenPin` (existing payload must still work); readiness booleans; event + email stub on lead/ticket/plan request |
-| P1-1 | Signed webhook fixtures (follow the existing `whsec_test_*` pattern) for captured/failed/refunded/unknown-account/duplicate/out-of-order; amount-tamper and cross-restaurant order id rejected; token refresh and revocation; reconciliation on a "lost webhook"; sandbox end-to-end; **mutation checks** on verification (remove the amount check → a test must fail), as Phase 1 did |
-| P1-2 | Sandbox: authenticate → charge → fail → grace → halt; invoice number sequence; duplicate event |
+### 6.3 Regression hot-spots
+`orders.service.ts` (create, markPaid, cancel, processRefund, syncTableStatus): add behaviour as **new methods or thin wrappers**, change money paths only in P0-10 with the full suite; `tenant.guard.ts`/`subscription-access.ts` (every write); `events.gateway.ts` and the kitchen redaction **deny-list** (every new order field needs a decision); KDS/admin stores; provisioning and onboarding (keep new fields optional, keep the old payload tested); migrations (one concern per file); reports money rules (golden-data tests); `PlatformEventsService` (alerts must never break the originating request: failures are recorded, not thrown).
 
-### 6.3 Regression hot-spots (touch with care, one concern per PR)
-1. `orders.service.ts` (1,287 lines): `create`, `markPaid`, `cancelOrder`, `processRefund`, `syncTableStatus`. Online payment must be added as a *new method path*, not by editing these in place.
-2. `tenant.guard.ts` and `subscription-access.ts`: any change affects every write endpoint.
-3. `events.gateway.ts`: rooms and revocation; new events must be emitted to the same rooms.
-4. `useKdsStore` / `useAdminStore`: reconnect logic changes touch live ordering for every restaurant.
-5. `provisioning` (`admin.service.ts`) and `auth.onboard`: operator-critical; keep every new field optional.
-6. Migrations: one change per file, rehearsed on a staging copy with `migration_017_check.sh`-style up/down/up scripts.
-7. Reports money rules: change only with golden-data tests.
-
-### 6.4 CI wiring (P0-7)
-Postgres service container → build API → start with `THROTTLE_DISABLED=true`, a test `PLATFORM_BOOTSTRAP_SECRET`, `RAZORPAY_WEBHOOK_SECRET=whsec_test_123` and a **freshly created database per job** → run suites serially → upload results. `npm audit` and gitleaks stay as they are. Web: add `lint` (warn-only first), then Playwright journeys (P1-12).
+### 6.4 CI wiring (P0-7a)
+Postgres service container → build API → start with `THROTTLE_DISABLED=true`, a test `PLATFORM_BOOTSTRAP_SECRET`, `RAZORPAY_WEBHOOK_SECRET=whsec_test_123` and a **fresh database per job** → run suites serially. Web: add lint warn-only; Playwright journeys in P1-12.
 
 ---
 
 ## 7. Operational dependencies and failure modes
-
 | Concern | Today | Needed |
 |---|---|---|
-| Single API process holds sockets, limiters, caches, jobs | Fine for one instance | Never scale to two instances without Redis/adapter and a job leader (P2) |
-| Sleeping API | Unknown | Verify (G5); uptime ping + always-on if needed |
-| Neon cold start / connection limits | Pool `max: 15`, idle 30 s | Verify plan limits; use the direct (non-pooled) endpoint for migrations (documented in Phase 1) |
-| Email down | Welcome link falls back to showing a temporary password once; OTP only enforced when a provider exists | Alert when provider fails (P1-11) |
-| Webhook missed or out of order | Ledgered; subscription path idempotent | Reconciliation job for order payments (P1-1D) |
-| Backups | Neon-side; restore drill documented | Run the drill once for real before pilot (P0-7) |
-| Secrets rotation | `JWT_SECRET` fallback for settings key | Set `PLATFORM_SETTINGS_KEY` explicitly before storing OAuth tokens |
+| Single API process holds sockets, limiters, caches, jobs, **alert retries** | Fine for one instance | No second instance without Redis/adapter and a job leader (P2) |
+| Sleeping API | Unknown (G5) | Verify; always-on if needed. A sleeping API also pauses alert retries |
+| Email provider down | Failure currently invisible | **Recorded, retried, shown in Super Admin** (P0-5) |
+| Webhook missed | Ledgered (subscription path) | Reconciliation for order payments (P1-1D) |
+| Secrets rotation | `JWT_SECRET` fallback for settings key | Set `PLATFORM_SETTINGS_KEY` explicitly before OAuth tokens |
+| Logs contain tokens | Query strings logged on errors | Redact (P0-8 prerequisite) |
 
 ---
 
-## 8. Questions to put to Razorpay (answers freeze the P1-1 design)
+## 8. Razorpay
 
-1. **OAuth:** authorisation URL, required scopes for *create order, fetch payment, refund, read settlements*, code → token exchange, access-token lifetime, refresh-token rotation, behaviour on revocation, and the event sent when a merchant disconnects the app.
-2. **Test mode:** is there a sandbox for the *partner/OAuth* flow, and can webhooks be exercised there?
-3. **Verification:** with an OAuth-connected merchant (Pangat holds no key secret), what is the supported way to verify a checkout payment: signature scheme and key, or API fetch with the merchant token? What is the checkout `key` to use?
-4. **Webhooks:** are they registered once per partner application or per merchant? How is the originating merchant identified (`account_id`)? Signing secret model?
-5. **Orders/refunds:** can Pangat create orders and issue refunds with the merchant's token? Refund speed/partial refunds/idempotency (receipt, notes).
-6. **Settlement and fees:** funds settle directly to the restaurant (the "pure platform" model); who bears MDR on UPI and cards; any partner fee; GST on fees. (This decides whether "keep 100%" can remain on the landing page.)
-7. **Regulatory:** confirm the pure-platform model leaves Pangat outside payment-aggregator scope and what Razorpay requires of Pangat (terms, data handling, PCI scope for hosted checkout). Confirm independently with the CA/lawyer.
-8. **Subscriptions for Pangat itself:** Subscriptions vs Payment Links for the first cycle, mandate flow for UPI AutoPay/cards, trial-then-charge support, GST invoice generation by Razorpay or by Pangat.
+### 8.1 Confirmed (from the partner response)
+Technology Partner / Pure Platform model with OAuth · restaurants are merchants of record · restaurants connect **their own active Razorpay accounts** · settlements go **directly to the restaurant's registered bank account** · **Razorpay Route is not required** · each restaurant handles its **own KYC and activation** · **Partner Dashboard access is required** for the test-mode OAuth flow · standard pricing **2% plus GST**, **T+2 working-day settlement subject to the restaurant's approved settlement schedule** · Pangat's own SaaS collection is a **separate integration using Pangat's own merchant account**.
+
+### 8.2 Open technical questions (do not design around guesses)
+1. OAuth scopes for create order, fetch payment, refund; access-token lifetime; refresh rotation; revocation behaviour and event.
+2. Sandbox: does test-mode via the Partner Dashboard cover orders, payments, refunds and **webhooks** end to end?
+3. Verification of a checkout payment for an OAuth-connected merchant (signature scheme and key vs API fetch with the merchant token); which checkout key to use.
+4. Webhooks: partner-level or per-merchant registration; merchant identification (`account_id`); signing secret.
+5. Does 2% apply to UPI as well as cards? Any partner share or fee payable to Pangat? GST on fees?
+6. Refund API under the merchant token; idempotency; timelines; failure events.
+7. Disputes/chargebacks: notifications, merchant-of-record responsibilities.
+8. Partner terms on advertising payments, token storage and data handling.
+9. For Pangat's own account: Subscriptions vs Payment Links, UPI AutoPay/card mandates, trial-then-charge, invoice responsibilities.
+
+### 8.3 Regulatory caution
+The model is described as merchant-of-record with direct settlement; **that does not automatically remove all of Pangat's regulatory obligations.** Independent CA and legal confirmation is a dependency of P1-1E and P1-2, not an assumption.
 
 ---
 
 ## 9. Open items summary
-Facts needed from founders (VPA ownership, production plan prices, hosting tiers, support number, email provider status), decisions G1–G8 in the roadmap, the Razorpay partner reply, and a human to take the production schema-only dump for `000_baseline.sql`. I have not attempted any of these and will not without your approval.
+Founder decisions G1–G10 and C1–C15; `pangat@icici` investigation; Partner Dashboard access and Razorpay technical answers; CA/legal confirmation; production facts (plan rows, tiers, email provider, support number); a human to run the read-only production checks and take the schema dump. I have run none of these and will not without your approval.

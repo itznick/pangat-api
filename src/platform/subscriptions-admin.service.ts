@@ -8,6 +8,7 @@ import { invalidateOrgAccess } from '../subscriptions/subscription-access.js';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service.js';
 import { AuditActor, PlatformAuditService } from './audit.service.js';
 import { getSetting } from './settings.service.js';
+import { TRIAL_PLAN_CODE, planFamilyOf, planGroupOf } from '../subscriptions/default-plans.js';
 
 const DAY = 86_400_000;
 
@@ -281,11 +282,86 @@ export class SubscriptionsAdminService {
     const rows = await this.ds.query(
       `SELECT p.id AS plan_id, ${effectiveStatusSql('s')} AS status, COUNT(*)::int AS n FROM (${LATEST_SUB_SQL}) s JOIN subscription_plans p ON p.id = s.plan_id GROUP BY 1,2`,
     );
-    return plans.map((p: any) => {
-      const mine = rows.filter((r: any) => r.plan_id === p.id);
-      const by: Record<string, number> = {};
-      for (const r of mine) by[r.status] = r.n;
-      return { ...p, subscribers: { total: mine.reduce((a: number, r: any) => a + r.n, 0), byStatus: by } };
+    const ever = await this.ds.query(`SELECT plan_id, COUNT(DISTINCT organization_id)::int AS n FROM organization_subscriptions GROUP BY 1`);
+    return Promise.all(
+      plans.map(async (p: any) => {
+        const mine = rows.filter((r: any) => r.plan_id === p.id);
+        const by: Record<string, number> = {};
+        for (const r of mine) by[r.status] = r.n;
+        const total = mine.reduce((a: number, r: any) => a + r.n, 0);
+        // a plan nobody is on cannot have anybody over its limits: skip the query
+        const overLimit = total > 0 ? (await this.subs.organisationsOverPlanLimits(p.id)).length : 0;
+        return {
+          ...p,
+          group: planGroupOf(p.code),
+          family: planFamilyOf(p.code),
+          everSubscribed: ever.find((e: any) => e.plan_id === p.id)?.n ?? 0,
+          overLimitCount: overLimit,
+          subscribers: { total, byStatus: by },
+        };
+      }),
+    );
+  }
+
+  /** The trial as configured right now (platform settings + the trial plan row), so the console can show what a new restaurant gets. */
+  async trialConfiguration() {
+    const code = String(getSetting('subscription.defaultTrialPlanCode') || TRIAL_PLAN_CODE);
+    const plan = await this.ds.query(`SELECT code, name, trial_days, max_outlets, max_tables_per_outlet, max_staff_per_outlet, features, is_public, is_active FROM subscription_plans WHERE code = $1`, [code]);
+    return {
+      planCode: code,
+      graceDays: Number(getSetting('subscription.gracePeriodDays') ?? 7),
+      reminderDays: Number(getSetting('subscription.trialReminderDays') ?? 3),
+      defaultTrialDays: Number(getSetting('subscription.defaultTrialDays') ?? 14),
+      plan: plan[0] ?? null,
+      planFound: Boolean(plan[0]),
+    };
+  }
+
+  /**
+   * Restaurants that are close to (>= 80%) or over a limit of the plan they are on. Over a limit is not an error: nothing is
+   * ever deleted, they just cannot add more until they are within it. Shown so a founder can talk to them before they hit a wall.
+   */
+  async capacityWatch() {
+    const rows = await this.ds.query(
+      `WITH latest AS (${LATEST_SUB_SQL}),
+            usage AS (
+              SELECT l.organization_id, p.id AS plan_id, p.code AS plan_code, p.name AS plan_name,
+                     p.max_outlets, p.max_tables_per_outlet, p.max_staff_per_outlet,
+                     (SELECT COUNT(*) FROM restaurants r WHERE r.organization_id = l.organization_id)::int AS outlets,
+                     COALESCE((SELECT MAX(c) FROM (SELECT COUNT(*) c FROM tables t JOIN restaurants r ON r.id = t.restaurant_id WHERE r.organization_id = l.organization_id GROUP BY r.id) x),0)::int AS tables_peak,
+                     COALESCE((SELECT MAX(c) FROM (SELECT COUNT(*) c FROM staff st JOIN restaurants r ON r.id = st.restaurant_id
+                               WHERE r.organization_id = l.organization_id AND st.is_active AND NOT st.is_platform_admin
+                                 AND st.role NOT IN ('SUPER_OWNER','PLATFORM_SUPER_ADMIN') AND LOWER(st.email) NOT LIKE '%@stations.pangat.app' GROUP BY r.id) x),0)::int AS staff_peak
+              FROM latest l JOIN subscription_plans p ON p.id = l.plan_id)
+       SELECT u.*, o.name AS organization_name
+       FROM usage u JOIN organizations o ON o.id = u.organization_id
+       WHERE (u.max_outlets > 1 AND u.outlets >= 0.8 * u.max_outlets) OR (u.max_outlets > 0 AND u.outlets > u.max_outlets)
+          OR (u.max_tables_per_outlet > 0 AND u.tables_peak >= 0.8 * u.max_tables_per_outlet)
+          OR (u.max_staff_per_outlet > 0 AND u.staff_peak >= 0.8 * u.max_staff_per_outlet)
+       ORDER BY o.name LIMIT 200`,
+    );
+    return rows.map((r: any) => {
+      const kinds = [
+        ['Outlets', r.outlets, r.max_outlets],
+        ['Tables (busiest outlet)', r.tables_peak, r.max_tables_per_outlet],
+        ['Staff (busiest outlet)', r.staff_peak, r.max_staff_per_outlet],
+      ] as const;
+      // A single-outlet plan with its one outlet is normal, not a warning: outlets flag only when the plan allows several (>= 80%) or when over the limit
+      const flags = kinds
+        .filter(([label, used, limit]) => Number(limit) > 0 && (Number(used) > Number(limit) || (Number(used) >= 0.8 * Number(limit) && (label !== 'Outlets' || Number(limit) > 1))))
+        .map(([label, used, limit]) => ({ label, used: Number(used), limit: Number(limit), over: Number(used) > Number(limit) }));
+      return { organizationId: r.organization_id, organizationName: r.organization_name, planCode: r.plan_code, planName: r.plan_name, flags, over: flags.some((f) => f.over) };
     });
+  }
+
+  /** The Founding 10 programme: who is on a FOUNDING_* plan, and how many of the ten places are taken. Read-only; nothing is ever granted from here. */
+  async foundingGrants() {
+    const rows = await this.ds.query(
+      `SELECT o.id AS organization_id, o.name AS organization_name, p.code AS plan_code, p.name AS plan_name, p.base_price::float AS base_price, p.billing_interval,
+              ${effectiveStatusSql('s')} AS status, s.source, s.assigned_by, s.created_at AS assigned_at, s.current_period_start, s.current_period_end
+       FROM (${LATEST_SUB_SQL}) s JOIN subscription_plans p ON p.id = s.plan_id JOIN organizations o ON o.id = s.organization_id
+       WHERE p.code LIKE 'FOUNDING\\_%' ESCAPE '\\' ORDER BY s.created_at`,
+    );
+    return { slotsTotal: 10, slotsUsed: rows.length, grants: rows };
   }
 }

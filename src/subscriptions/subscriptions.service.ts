@@ -31,7 +31,8 @@ import {
 } from '../common/enums/index.js';
 import { EntitlementService } from './entitlement.service.js';
 import { notifyEntitlementChange } from './entitlement-events.js';
-import { DEFAULT_PLANS } from './default-plans.js';
+import { DEFAULT_PLANS, TRIAL_PLAN_CODE } from './default-plans.js';
+import { fiscalYearOf } from '../billing/document-numbers.js';
 import { getSetting } from '../platform/settings.service.js';
 import { PlatformEventsService } from '../platform/events.service.js';
 
@@ -92,6 +93,8 @@ export class SubscriptionsService implements OnModuleInit {
           sacCode: null,
           razorpayPlanId: null,
           isActive: true,
+          isPublic: p.isPublic,
+          trialDays: p.trialDays,
         }),
       );
     }
@@ -251,6 +254,16 @@ export class SubscriptionsService implements OnModuleInit {
     );
   }
 
+  /** How many organisations are on this plan now, and how many have EVER been on it (history counts: a sold plan is a commercial record). */
+  async planSubscriberHistory(planId: string): Promise<{ everSubscribed: number; currentSubscribers: number }> {
+    const [r] = await this.dataSource.query(
+      `SELECT (SELECT COUNT(DISTINCT organization_id) FROM organization_subscriptions WHERE plan_id = $1)::int AS ever,
+              (SELECT COUNT(*) FROM (SELECT DISTINCT ON (organization_id) organization_id, plan_id FROM organization_subscriptions ORDER BY organization_id, created_at DESC) l WHERE l.plan_id = $1)::int AS current`,
+      [planId],
+    );
+    return { everSubscribed: r?.ever ?? 0, currentSubscribers: r?.current ?? 0 };
+  }
+
   async updatePlan(id: string, dto: UpdatePlanDto): Promise<SubscriptionPlan> {
     const plan = await this.findPlanById(id);
     if (dto.features !== undefined) this.assertSellableFeatures(dto.features, Array.isArray(plan.features) ? plan.features : []);
@@ -295,7 +308,7 @@ export class SubscriptionsService implements OnModuleInit {
 
     // If new organization has no subscription, initialize 14-day TRIAL on Growth plan
     if (!sub) {
-      sub = await this.startTrial(organizationId, String(getSetting('subscription.defaultTrialPlanCode') || 'GROWTH'));
+      sub = await this.startTrial(organizationId, String(getSetting('subscription.defaultTrialPlanCode') || TRIAL_PLAN_CODE));
     }
 
     const invoices = await this.invoiceRepo.find({
@@ -333,7 +346,7 @@ export class SubscriptionsService implements OnModuleInit {
   /**
    * Provision or reset a 14-day trial subscription.
    */
-  async startTrial(organizationId: string, planCode = 'GROWTH', trialDaysOverride?: number, source = 'TRIAL', actor?: string): Promise<OrganizationSubscription> {
+  async startTrial(organizationId: string, planCode: string = TRIAL_PLAN_CODE, trialDaysOverride?: number, source = 'TRIAL', actor?: string): Promise<OrganizationSubscription> {
     let plan = await this.planRepo.findOne({ where: { code: planCode, isActive: true } });
     if (!plan) {
       // Self-heal an empty or partially seeded catalogue, then fall back to the cheapest monthly plan
@@ -516,7 +529,8 @@ export class SubscriptionsService implements OnModuleInit {
           this.invoiceRepo.create({
             organizationId,
             subscriptionId: sub.id,
-            invoiceNumber: this.nextInvoiceNumber(),
+            // A failed attempt is NOT a tax invoice and must not consume a statutory serial: it carries a plain reference instead
+            invoiceNumber: `ATTEMPT-${String(paymentId || crypto.randomBytes(6).toString('hex')).slice(-30)}`,
             billingPeriodStart: sub.currentPeriodStart,
             billingPeriodEnd: sub.currentPeriodEnd,
             baseAmount: taxes.baseRupees,
@@ -613,13 +627,17 @@ export class SubscriptionsService implements OnModuleInit {
         // Generate verified Invoice with integer paise precision and place-of-supply breakdown
         const basePaise = Number(sub.plan.basePricePaise) || Math.round(Number(sub.plan.basePrice) * 100);
         const taxRate = Number(sub.plan.taxPercentage || 18.00);
-        const buyerState = subEntity?.notes?.stateCode || paymentEntity?.notes?.stateCode || null;
-        const buyerGstin = subEntity?.notes?.buyerGstin || paymentEntity?.notes?.buyerGstin || null;
+        // The customer's own billing profile decides the place of supply; gateway notes are only a fallback for customers without one
+        const org = await this.orgRepo.findOne({ where: { id: organizationId } });
+        const buyerState = org?.billingStateCode || subEntity?.notes?.stateCode || paymentEntity?.notes?.stateCode || null;
+        const buyerGstin = org?.billingGstin || subEntity?.notes?.buyerGstin || paymentEntity?.notes?.buyerGstin || null;
 
         const taxes = this.calculateTaxes(basePaise, taxRate, buyerState);
-        const invoiceNumber = this.nextInvoiceNumber();
 
-        const invoice = this.invoiceRepo.create({
+        // Number and invoice are written in ONE transaction: a failed insert does not burn a serial
+        const invoice = await this.inTransaction(async (em) => {
+          const invoiceNumber = await this.nextInvoiceNumber(em);
+          const created = this.invoiceRepo.create({
           organizationId,
           subscriptionId: sub.id,
           invoiceNumber,
@@ -642,9 +660,10 @@ export class SubscriptionsService implements OnModuleInit {
           razorpayInvoiceId: invoiceEntity?.id || null,
           paymentMethod: paymentEntity?.method || null,
           paidAt: new Date(),
+          });
+          return em ? em.getRepository(SubscriptionInvoice).save(created) : this.invoiceRepo.save(created);
         });
-
-        await this.invoiceRepo.save(invoice);
+        const invoiceNumber = invoice.invoiceNumber;
 
         await this.recordAudit(
           organizationId,
@@ -699,9 +718,77 @@ export class SubscriptionsService implements OnModuleInit {
     return { status: 'processed', eventId, event, organizationId };
   }
 
-  private nextInvoiceNumber(): string {
-    const prefix = String(getSetting('billing.invoicePrefix') || 'PANGAT-INV');
-    return `${prefix}-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+  /**
+   * Pangat's own tax-invoice number: a CONSECUTIVE serial, unique per financial year, at most 16 characters (CGST Rule 46):
+   * `PGT/2627/000042`. The counter is incremented in the same transaction as the invoice insert (pass the transaction's `em`),
+   * so a rolled-back invoice does not consume a number. The old generator (timestamp + random, ~27 characters) is gone.
+   * Existing invoices keep the numbers they were issued with.
+   */
+  async nextInvoiceNumber(runner?: { query: (sql: string, params?: any[]) => Promise<any> }, when = new Date()): Promise<string> {
+    const fy = fiscalYearOf(when);
+    const rows = await (runner ?? this.dataSource).query(
+      `INSERT INTO subscription_invoice_sequences (fiscal_year, last_value) VALUES ($1, 1)
+       ON CONFLICT (fiscal_year) DO UPDATE SET last_value = subscription_invoice_sequences.last_value + 1
+       RETURNING last_value`,
+      [fy],
+    );
+    const serial = Number((Array.isArray(rows) ? rows[0] : rows)?.last_value);
+    if (!Number.isFinite(serial)) throw new Error('Could not allocate an invoice number');
+    // the prefix is operator-editable: keep only characters allowed on an invoice number and leave room for the rest (4 + / + 4 + / + 6 = 16)
+    const configured = String(getSetting('billing.invoicePrefix') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+    const prefix = configured || 'PGT';
+    const number = `${prefix}/${fy}/${String(serial).padStart(6, '0')}`;
+    if (number.length > 16) throw new Error(`Invoice number ${number} is longer than 16 characters (the serial has overflowed)`);
+    return number;
+  }
+
+  /** Run `work` in one database transaction when a real connection is available (it always is in the app; unit tests pass a bare stub). */
+  private async inTransaction<T>(work: (em: any | undefined) => Promise<T>): Promise<T> {
+    const ds: any = this.dataSource;
+    return typeof ds?.transaction === 'function' ? ds.transaction((em: any) => work(em)) : work(undefined);
+  }
+
+  // ── Billing profile (recipient of the tax invoice, place of supply) ───────────
+
+  async getBillingProfile(organizationId: string) {
+    const org = await this.orgRepo.findOne({ where: { id: organizationId } });
+    if (!org) throw new NotFoundException('Organisation not found');
+    return {
+      legalName: org.billingLegalName ?? null,
+      address: org.billingAddress ?? null,
+      stateCode: org.billingStateCode ?? null,
+      gstin: org.billingGstin ?? null,
+      supplierStateCode: String(getSetting('billing.supplierStateCode') || '27'),
+    };
+  }
+
+  async updateBillingProfile(
+    organizationId: string,
+    dto: { legalName?: string | null; address?: string | null; stateCode?: string | null; gstin?: string | null },
+    actor: { email?: string },
+  ) {
+    const org = await this.orgRepo.findOne({ where: { id: organizationId } });
+    if (!org) throw new NotFoundException('Organisation not found');
+    const clean = (v: unknown, max: number) => (v === undefined ? undefined : v === null || String(v).trim() === '' ? null : String(v).trim().slice(0, max));
+    const legalName = clean(dto.legalName, 200);
+    const address = clean(dto.address, 500);
+    const stateCode = clean(dto.stateCode, 20); // never truncate: a malformed value must be rejected, not silently shortened
+    const gstin = dto.gstin === undefined ? undefined : clean(dto.gstin, 40)?.toUpperCase() ?? null;
+    if (stateCode && !/^(0[1-9]|[1-2][0-9]|3[0-8]|97|99)$/.test(stateCode)) throw new BadRequestException('State code must be a 2-digit GST state code, for example 27 for Maharashtra');
+    // a GSTIN begins with its state code: if both are given they must agree (place of supply follows the registration)
+    const effectiveState = stateCode === undefined ? org.billingStateCode : stateCode;
+    if (gstin) {
+      if (!/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(gstin)) throw new BadRequestException('Enter a valid 15-character GSTIN');
+      if (effectiveState && gstin.slice(0, 2) !== effectiveState) throw new BadRequestException('The GSTIN does not match the state code: its first two digits are the state');
+    }
+    if (legalName !== undefined) org.billingLegalName = legalName;
+    if (address !== undefined) org.billingAddress = address;
+    if (stateCode !== undefined) org.billingStateCode = stateCode;
+    else if (gstin) org.billingStateCode = org.billingStateCode ?? gstin.slice(0, 2);
+    if (gstin !== undefined) org.billingGstin = gstin;
+    await this.orgRepo.save(org);
+    await this.recordAudit(organizationId, 'BILLING_PROFILE_UPDATED', `OWNER:${actor?.email || 'unknown'}`, 'Billing details updated', undefined, { stateCode: org.billingStateCode, gstinSet: Boolean(org.billingGstin) });
+    return this.getBillingProfile(organizationId);
   }
 
   // ── Manual billing & self-service ───────────────────────────────────────────

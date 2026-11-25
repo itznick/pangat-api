@@ -108,7 +108,7 @@ before(async () => {
   ADMIN_FIN = { email: fe, token: chg.data.accessToken };
 });
 after(async () => {
-  for (const k of settingsTouched) await call('PUT', '/admin/settings', { token: ADMIN.token, body: { changes: { [k]: k === 'subscription.defaultTrialPlanCode' ? 'GROWTH' : null } } });
+  for (const k of settingsTouched) await call('PUT', '/admin/settings', { token: ADMIN.token, body: { changes: { [k]: null } } });
   for (const k of ['QR_ORDERING', 'KDS', 'MULTI_OUTLET']) await call('PATCH', `/admin/feature-flags/${k}`, { token: ADMIN.token, body: { enabled: true } });
   await db.query('UPDATE subscription_plans SET is_active = false WHERE code = ANY($1)', [plansMade]);
   await db.end();

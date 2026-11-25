@@ -314,7 +314,8 @@ describe('Payments & financial management (only verified gateway events create m
   });
 
   it('a signed charge creates ONE paid invoice (idempotent) and moves the restaurant to ACTIVE', async () => {
-    await db.query(`UPDATE organization_subscriptions SET razorpay_subscription_id = $2 WHERE organization_id = $1`, [A.orgId, `sub_pay_${run}`]);
+    // A customer who pays is on a priced plan (a new restaurant's free trial plan costs nothing): the charge invoices that plan's price, GROWTH 2,999 + 18% GST = 3,538.82
+    await db.query(`UPDATE organization_subscriptions SET razorpay_subscription_id = $2, plan_id = (SELECT id FROM subscription_plans WHERE code = 'GROWTH') WHERE organization_id = $1`, [A.orgId, `sub_pay_${run}`]);
     const p = pay(`pay_ok_${run}`, A.orgId);
     const r1 = await hook('subscription.charged', p, `evt_ch_${run}`);
     assert.ok(r1.status < 300, JSON.stringify(r1.body));

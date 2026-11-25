@@ -82,4 +82,12 @@ export class UpdatePlanDto {
   @IsOptional()
   @IsBoolean()
   isPublic?: boolean;
+
+  /**
+   * Required to change the price, billing interval or GST rate of a plan that any organisation is, or has ever been, subscribed to.
+   * The safe route is a NEW plan row (and moving the customer by an audited plan change); this flag is the deliberate exception.
+   */
+  @IsOptional()
+  @IsBoolean()
+  acknowledgeSubscriberImpact?: boolean;
 }

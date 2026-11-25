@@ -26,6 +26,20 @@ export class Organization {
   @Column({ name: 'owner_id', type: 'uuid', nullable: true })
   ownerId: string | null;
 
+  /** Billing profile: who Pangat's tax invoices are addressed to, and where the supply is made (place of supply). All optional. */
+  @Column({ name: 'billing_legal_name', type: 'varchar', length: 200, nullable: true })
+  billingLegalName: string | null;
+
+  @Column({ name: 'billing_address', type: 'text', nullable: true })
+  billingAddress: string | null;
+
+  /** GST state code of the recipient (2 digits, e.g. 27 = Maharashtra). Drives CGST+SGST (same state as the supplier) versus IGST. */
+  @Column({ name: 'billing_state_code', type: 'varchar', length: 2, nullable: true })
+  billingStateCode: string | null;
+
+  @Column({ name: 'billing_gstin', type: 'varchar', length: 15, nullable: true })
+  billingGstin: string | null;
+
   /** Account lifecycle: ACTIVE | SUSPENDED | DEACTIVATED (set by platform admins) */
   @Column({ type: 'varchar', length: 20, default: 'ACTIVE' })
   status: string;

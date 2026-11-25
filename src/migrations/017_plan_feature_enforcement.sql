@@ -11,34 +11,47 @@
 --
 -- Additive, idempotent and reversible: every change is recorded in plan_feature_backfills, which the .down.sql uses to undo exactly it.
 -- ─────────────────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS plan_feature_backfills (
-  plan_id   uuid        NOT NULL,
-  feature   varchar(50) NOT NULL,
-  migration varchar(20) NOT NULL,
-  added_at  timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (plan_id, feature, migration)
-);
-
+-- A one-time backfill: if its record table already exists the migration has run before, and re-running must not grant anything again
+-- (an operator may have removed a key on purpose since). The whole file is therefore a single guarded block.
 DO $$
 DECLARE f text;
 BEGIN
+  IF to_regclass('public.plan_feature_backfills') IS NOT NULL THEN
+    RAISE NOTICE 'Migration 017 was already applied: nothing to do';
+    RETURN;
+  END IF;
+
+  CREATE TABLE plan_feature_backfills (
+    plan_id   uuid        NOT NULL,
+    feature   varchar(50) NOT NULL,
+    migration varchar(20) NOT NULL,
+    added_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (plan_id, feature, migration)
+  );
+
+  -- Each statement updates ONLY the plans whose record row it inserts in this very run. Running the file again (or after an
+  -- operator deliberately removed a key) inserts nothing, so nothing is granted a second time.
   FOREACH f IN ARRAY ARRAY['QR_ORDERING', 'KDS'] LOOP
-    INSERT INTO plan_feature_backfills (plan_id, feature, migration)
-      SELECT id, f, '017' FROM subscription_plans
-      WHERE NOT (f = ANY (string_to_array(COALESCE(features::text, ''), ','))) AND COALESCE(features::text, '') NOT LIKE '%*%'
-      ON CONFLICT DO NOTHING;
+    WITH added AS (
+      INSERT INTO plan_feature_backfills (plan_id, feature, migration)
+        SELECT id, f, '017' FROM subscription_plans
+        WHERE NOT (f = ANY (string_to_array(COALESCE(features::text, ''), ','))) AND COALESCE(features::text, '') NOT LIKE '%*%'
+        ON CONFLICT DO NOTHING
+        RETURNING plan_id
+    )
     UPDATE subscription_plans p
        SET features = CASE WHEN COALESCE(p.features::text, '') = '' THEN f ELSE p.features::text || ',' || f END
-     WHERE EXISTS (SELECT 1 FROM plan_feature_backfills b WHERE b.plan_id = p.id AND b.feature = f AND b.migration = '017')
-       AND NOT (f = ANY (string_to_array(COALESCE(p.features::text, ''), ',')));
+      FROM added a WHERE p.id = a.plan_id;
   END LOOP;
 
-  INSERT INTO plan_feature_backfills (plan_id, feature, migration)
-    SELECT id, 'MULTI_OUTLET', '017' FROM subscription_plans
-    WHERE max_outlets <> 1 AND NOT ('MULTI_OUTLET' = ANY (string_to_array(COALESCE(features::text, ''), ','))) AND COALESCE(features::text, '') NOT LIKE '%*%'
-    ON CONFLICT DO NOTHING;
+  WITH added AS (
+    INSERT INTO plan_feature_backfills (plan_id, feature, migration)
+      SELECT id, 'MULTI_OUTLET', '017' FROM subscription_plans
+      WHERE max_outlets <> 1 AND NOT ('MULTI_OUTLET' = ANY (string_to_array(COALESCE(features::text, ''), ','))) AND COALESCE(features::text, '') NOT LIKE '%*%'
+      ON CONFLICT DO NOTHING
+      RETURNING plan_id
+  )
   UPDATE subscription_plans p
      SET features = CASE WHEN COALESCE(p.features::text, '') = '' THEN 'MULTI_OUTLET' ELSE p.features::text || ',MULTI_OUTLET' END
-   WHERE EXISTS (SELECT 1 FROM plan_feature_backfills b WHERE b.plan_id = p.id AND b.feature = 'MULTI_OUTLET' AND b.migration = '017')
-     AND NOT ('MULTI_OUTLET' = ANY (string_to_array(COALESCE(p.features::text, ''), ',')));
+    FROM added a WHERE p.id = a.plan_id;
 END $$;

@@ -256,6 +256,9 @@ describe('Table limits at every creation path', () => {
     const a = await db.query(`SELECT actor, reason FROM subscription_audit_logs WHERE organization_id = $1 AND action = 'PLAN_LIMIT_OVERRIDDEN'`, [o.orgId]);
     assert.equal(a.rowCount, 1);
     assert.match(a.rows[0].actor, /^ADMIN:root-p1-/);
+    const pa = await db.query(`SELECT actor_email, reason FROM platform_audit_logs WHERE organization_id = $1 AND action = 'PLAN_LIMIT_OVERRIDDEN'`, [o.orgId]);
+    assert.equal(pa.rowCount, 1, 'also in the platform Audit log');
+    assert.match(pa.rows[0].reason, /patio/);
   });
 });
 
@@ -674,37 +677,45 @@ describe('Migration 017 (plan feature backfill)', () => {
   const read = async (f) => (await fs).readFileSync(new URL(`../src/migrations/${f}`, import.meta.url), 'utf8');
   const feats = async (id) => (await db.query('SELECT features FROM subscription_plans WHERE id = $1', [id])).rows[0].features.split(',').filter(Boolean).sort();
 
-  it('adds the keys that used to be implicitly granted, never touches ADVANCED_REPORTS, is idempotent and reverses exactly', async () => {
-    const mk = async (code, features, outlets) =>
-      (await db.query(
-        `INSERT INTO subscription_plans (code, name, billing_interval, base_price, max_outlets, max_tables_per_outlet, features) VALUES ($1,$1,'MONTHLY',1,$2,5,$3) RETURNING id`,
-        [`MIG${run}${code}`.toUpperCase(), outlets, features],
-      )).rows[0].id;
-    const legacySingle = await mk('a', 'INVENTORY', 1);
-    const legacyMulti = await mk('b', 'QR_ORDERING,ANALYTICS', 3);
-    const wildcard = await mk('c', '*', 5);
-    const alreadyOk = await mk('d', 'QR_ORDERING,KDS', 1);
+  it('adds the keys that used to be implicitly granted, never touches ADVANCED_REPORTS, runs once, never re-grants, and reverses exactly', async () => {
     const up = await read('017_plan_feature_enforcement.sql');
     const down = await read('017_plan_feature_enforcement.down.sql');
-    await db.query('BEGIN');
+    await db.query('BEGIN'); // everything below is rolled back: the shared database is left exactly as it was
     try {
+      await db.query(down); // the API already applied 017 at boot: undo it inside this transaction to test from the legacy state
+      const mk = async (code, features, outlets) =>
+        (await db.query(
+          `INSERT INTO subscription_plans (code, name, billing_interval, base_price, max_outlets, max_tables_per_outlet, features) VALUES ($1,$1,'MONTHLY',1,$2,5,$3) RETURNING id`,
+          [`MIG${run}${code}`.toUpperCase(), outlets, features],
+        )).rows[0].id;
+      const legacySingle = await mk('a', 'INVENTORY', 1);
+      const legacyMulti = await mk('b', 'QR_ORDERING,ANALYTICS', 3);
+      const wildcard = await mk('c', '*', 5);
+      const alreadyOk = await mk('d', 'QR_ORDERING,KDS', 1);
+      const withAdvanced = await mk('e', 'QR_ORDERING,ADVANCED_REPORTS', 1);
       await db.query(up);
       assert.deepEqual(await feats(legacySingle), ['INVENTORY', 'KDS', 'QR_ORDERING'], 'single-outlet plan: QR + KDS, no MULTI_OUTLET');
       assert.deepEqual(await feats(legacyMulti), ['ANALYTICS', 'KDS', 'MULTI_OUTLET', 'QR_ORDERING'], 'a plan that already sold several outlets gets MULTI_OUTLET');
       assert.deepEqual(await feats(wildcard), ['*'], 'a wildcard plan is untouched');
       assert.deepEqual(await feats(alreadyOk), ['KDS', 'QR_ORDERING'], 'nothing duplicated');
-      for (const id of [legacySingle, legacyMulti, wildcard, alreadyOk]) assert.ok(!(await feats(id)).includes('ADVANCED_REPORTS'));
-      await db.query(up); // running it again changes nothing
-      assert.deepEqual(await feats(legacyMulti), ['ANALYTICS', 'KDS', 'MULTI_OUTLET', 'QR_ORDERING']);
+      assert.deepEqual(await feats(withAdvanced), ['ADVANCED_REPORTS', 'KDS', 'QR_ORDERING'], 'ADVANCED_REPORTS is neither added nor removed');
+      // an operator removes a key on purpose; running the file again must not grant it back (even a key the plan had before 017)
+      await db.query(`UPDATE subscription_plans SET features = 'QR_ORDERING' WHERE id = $1`, [alreadyOk]);
+      await db.query(`UPDATE subscription_plans SET features = replace(features, ',KDS', '') WHERE id = $1`, [legacySingle]);
+      await db.query(up);
+      assert.deepEqual(await feats(alreadyOk), ['QR_ORDERING'], 'a second run changes nothing');
+      assert.deepEqual(await feats(legacySingle), ['INVENTORY', 'QR_ORDERING']);
       await db.query(down);
       assert.deepEqual(await feats(legacySingle), ['INVENTORY'], 'down removes exactly what up added');
       assert.deepEqual(await feats(legacyMulti), ['ANALYTICS', 'QR_ORDERING']);
-      assert.deepEqual(await feats(alreadyOk), ['KDS', 'QR_ORDERING'], 'and keeps what was there before');
+      assert.deepEqual(await feats(withAdvanced), ['ADVANCED_REPORTS', 'QR_ORDERING']);
+      assert.deepEqual(await feats(alreadyOk), ['QR_ORDERING'], 'the operator\'s own edit survives the rollback');
       assert.equal((await db.query(`SELECT to_regclass('plan_feature_backfills') AS t`)).rows[0].t, null, 'the record table is gone');
+      await db.query(down); // rolling back twice is harmless
     } finally {
-      await db.query('ROLLBACK'); // leave the shared database exactly as it was
+      await db.query('ROLLBACK');
     }
-    await db.query('DELETE FROM subscription_plans WHERE code LIKE $1', [`MIG${run}%`.toUpperCase()]);
+    assert.ok((await db.query(`SELECT to_regclass('plan_feature_backfills') AS t`)).rows[0].t, 'boot-time application is intact after the test');
   });
 });
 

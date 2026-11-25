@@ -101,6 +101,11 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!(await this.stillValid(client)) || !(await this.canJoinOutlet(client, slug))) {
       return { status: 'denied', reason: 'unauthorized' };
     }
+    // The admin feed carries the full order (customer details and amounts). The kitchen role is redacted by design and only ever gets
+    // the kitchen room, so it can never use this room to read what it may not, or to keep a live feed when the kitchen display is off.
+    if (kind === 'admin' && client.data.user?.role === 'CHEF') {
+      return { status: 'denied', reason: 'unauthorized' };
+    }
     // The kitchen display is a plan feature: the live kitchen feed is refused (not just hidden) when the plan, a platform switch or an override says no
     if (kind === 'kds' && !client.data.user?.isPlatformAdmin) {
       const outlet = await this.dataSource.getRepository(Restaurant).findOne({ where: { slug } });

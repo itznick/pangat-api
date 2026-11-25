@@ -171,6 +171,17 @@ export async function recordLimitOverride(
       JSON.stringify({ kind: o.decision.kind, limit: o.decision.limit, current: o.decision.current, adding: o.decision.adding, restaurantId: o.restaurantId ?? null, context: o.context ?? null }),
     ],
   );
+  // ...and in the platform audit log (the console's Audit log page), so an exception is visible where operators look for them
+  await q.query(
+    `INSERT INTO platform_audit_logs (actor_id, actor_name, actor_email, actor_role, action, category, entity_type, entity_id, organization_id, summary, changes, reason)
+     VALUES ($1,$2,$3,'PLATFORM_SUPER_ADMIN','PLAN_LIMIT_OVERRIDDEN','SUBSCRIPTION','organization',$4::varchar,$5::uuid,$6,$7::jsonb,$8)`,
+    [
+      o.override.actorId ?? null, o.override.actorName ?? null, o.override.actorEmail ?? null, o.organizationId, o.organizationId,
+      `Exceeded the plan's ${o.decision.kind} limit (${o.decision.current} in use + ${o.decision.adding} requested, limit ${o.decision.limit}) via ${o.context ?? 'a limit override'}`,
+      JSON.stringify({ kind: o.decision.kind, limit: o.decision.limit, current: o.decision.current, adding: o.decision.adding, restaurantId: o.restaurantId ?? null }),
+      o.override.reason,
+    ],
+  );
 }
 
 /**
@@ -271,7 +282,8 @@ export async function decideFeature(dataSource: DataSource, organizationId: stri
 }
 /** Error for a refused feature: 402 when the PLAN lacks it (upgrade), 403 when it is switched off for the account or platform. */
 export function featureError(feature: string, reason: FeatureDecision['reason']) {
-  const label = feature.replace(/_/g, ' ').toLowerCase();
+  // the human name of the feature ("live kitchen display"), not its code ("kds")
+  const label = (FEATURE_CATALOG[feature]?.label ?? feature.replace(/_/g, ' ')).toLowerCase();
   return new HttpException(
     reason === 'PLAN'
       ? { message: `Your current plan does not include ${label}. Upgrade to unlock it.`, code: 'FEATURE_NOT_IN_PLAN', details: { feature } }
@@ -317,7 +329,12 @@ export async function getEntitlements(dataSource: DataSource, organizationId: st
   };
 }
 
-/** Serialise concurrent changes that share a limit: hold this row lock for the rest of the transaction before counting. */
+/**
+ * Serialise concurrent changes that share a limit: hold this row lock for the rest of the transaction before counting.
+ * FOR NO KEY UPDATE (not FOR UPDATE) on purpose: it queues against other capacity checks and against UPDATEs of the row,
+ * but NOT against the foreign-key checks (FOR KEY SHARE) that every insert of an order, audit row, table or staff row takes on
+ * its parent. FOR UPDATE conflicted with those and produced deadlocks under mixed load (found in Phase 1.1 verification).
+ */
 export async function lockRow(em: EntityManager, table: 'restaurants' | 'organizations', id: string): Promise<void> {
-  await em.query(`SELECT id FROM ${table} WHERE id = $1 FOR UPDATE`, [id]);
+  await em.query(`SELECT id FROM ${table} WHERE id = $1 FOR NO KEY UPDATE`, [id]);
 }

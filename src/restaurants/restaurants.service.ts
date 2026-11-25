@@ -239,6 +239,11 @@ export class RestaurantsService {
 
   async updateSettings(slug: string, dto: UpdateSettingsDto, actor?: any): Promise<Restaurant> {
     const restaurant = await this.findBySlug(slug);
+    // findBySlug loads the outlet's tables, and Restaurant.tables is a cascading relation: saving the outlet with a stale list would
+    // make TypeORM delete (or re-insert) any table created after the list was read. A settings change must never touch tables, so the
+    // list is set aside for the response and the save only sees the outlet's own columns.
+    const tablesAsRead = restaurant.tables;
+    (restaurant as { tables?: unknown }).tables = undefined;
     const before = { gst: restaurant.gstPercentage, service: restaurant.serviceChargePercentage, upi: restaurant.upiVpa };
     const beforeOps = restaurant.operations;
 
@@ -279,6 +284,7 @@ export class RestaurantsService {
       return persisted;
     });
     void this.notifyOwnerOfSensitiveChange(saved, sensitive, actor);
+    saved.tables = tablesAsRead; // same response shape as before
     return saved;
   }
 

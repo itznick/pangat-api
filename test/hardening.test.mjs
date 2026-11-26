@@ -69,6 +69,14 @@ describe('Error filter (S-7)', () => {
 import { resolveDbSsl } from '../dist/common/security/db-ssl.js'
 describe('Database TLS (S-1)', () => {
   const PEM = '-----BEGIN CERTIFICATE-----\\nABC\\n-----END CERTIFICATE-----'
+  it('DATABASE_SSL=false is the only way to run production mode without TLS, and it never overrides a hosted or sslmode=require database', () => {
+    const off = resolveDbSsl({ NODE_ENV: 'production', DATABASE_URL: 'postgres://u@localhost/db', DATABASE_SSL: 'false' })
+    assert.equal(off.ssl, false); assert.match(off.warning, /TLS is OFF/)
+    assert.notEqual(resolveDbSsl({ NODE_ENV: 'production', DATABASE_URL: 'postgres://u@ep-x.neon.tech/db', DATABASE_SSL: 'false' }).ssl, false)
+    assert.notEqual(resolveDbSsl({ NODE_ENV: 'production', DATABASE_URL: 'postgres://u@h/db?sslmode=require', DATABASE_SSL: 'false' }).ssl, false)
+    assert.notEqual(resolveDbSsl({ NODE_ENV: 'production', DATABASE_URL: 'postgres://u@db.internal/x' }).ssl, false) // default stays TLS-on
+    assert.notEqual(resolveDbSsl({ NODE_ENV: 'production', DATABASE_URL: 'postgres://u@db.internal/x', DATABASE_SSL: 'true' }).ssl, false)
+  })
   it('local plain database: no TLS', () => assert.equal(resolveDbSsl({ NODE_ENV: 'development', DATABASE_URL: 'postgres://u@localhost/db' }).ssl, false))
   it('production without a CA keeps working but warns that the certificate is unverified', () => {
     const r = resolveDbSsl({ NODE_ENV: 'production', DATABASE_URL: 'postgres://u@db.internal/x' })

@@ -1,0 +1,18 @@
+# Pangat secret-scan configuration. Extends gitleaks' default rules; nothing is switched off.
+# The only exceptions are specific FAKE credentials that exist so tests can prove behaviour (a wrong password is refused, a token is masked in logs...).
+# They protect nothing: the tests run only against throwaway databases. Real secrets are still caught by every default rule.
+title = "Pangat gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake credentials used only by tests on throwaway databases"
+regexes = [
+  '''Tulsi-Wada-Pune-42''',
+  '''Wrong-pass-123''',
+  '''tok_9f8e7d6c5b4a39281706f5e4d3c2b1a0''',
+  '''Lotus-Bell-Pune-77''',
+  '''Mango-Tree-Kothrud-31''',
+  '''Banyan-Leaf-Wada-58''',
+]

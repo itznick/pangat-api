@@ -17,7 +17,8 @@ scripts/schema/apply-baseline.sh
 # applying it a second time must be refused (never run against a live database)
 if scripts/schema/apply-baseline.sh 2>/dev/null; then echo "FAIL: baseline re-applied onto an existing schema" >&2; exit 1; fi
 [ -f dist/main.js ] || npm run build
-PORT="${PORT:-4100}" NODE_ENV=production JWT_SECRET="$(openssl rand -hex 32)" FRONTEND_URL="http://localhost:5173" \
+# The disposable local database offers no TLS (a CI service container does not); production defaults to TLS and ignores this for hosted databases
+DATABASE_SSL=false PORT="${PORT:-4100}" NODE_ENV=production JWT_SECRET="$(openssl rand -hex 32)" FRONTEND_URL="http://localhost:5173" \
   PLATFORM_BOOTSTRAP_SECRET="$(openssl rand -hex 16)" RAZORPAY_WEBHOOK_SECRET="whsec_$(openssl rand -hex 8)" \
   node dist/main > baseline-check.log 2>&1 &
 PID=$!

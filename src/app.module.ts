@@ -57,6 +57,7 @@ import { PrivacyModule } from './privacy/privacy.module.js';
           DATABASE_URL: dbUrl,
           DATABASE_CA: process.env.DATABASE_CA,
           DATABASE_SSL_REJECT_UNAUTHORIZED: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED,
+          DATABASE_SSL: process.env.DATABASE_SSL,
         });
         if (warning) new Logger('Database').warn(warning);
 

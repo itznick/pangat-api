@@ -1,7 +1,7 @@
 import { EventsGateway } from '../events/events.gateway.js';
 import { AuditService } from '../audit/audit.service.js';
 import { Optional, Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
-import { getOrderingStatus, resolveOperations } from '../restaurants/operations.js';
+import { getOrderingStatus, resolveOperations, upiOffered } from '../restaurants/operations.js';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
 import { MenuItem } from './entities/menu-item.entity.js';
@@ -70,11 +70,12 @@ export class MenuService {
         id: restaurant.id,
         name: restaurant.name,
         slug: restaurant.slug,
-        upiVpa: restaurant.upiVpa,
+        // the UPI ID is only ever sent to guests while the owner has confirmed it and UPI is switched on for this outlet
+        upiVpa: upiOffered(restaurant) ? restaurant.upiVpa : '',
         gstPercentage: Number(restaurant.gstPercentage),
         serviceChargePercentage: Number(restaurant.serviceChargePercentage ?? 0),
         isVegOnly: restaurant.isVegOnly,
-        operations: resolveOperations(restaurant.operations),
+        operations: (() => { const o = resolveOperations(restaurant.operations); return { ...o, payments: { ...o.payments, upi: upiOffered(restaurant) } }; })(),
         ordering: await this.orderingFor(restaurant),
       },
       categories: categories.map((c) => ({

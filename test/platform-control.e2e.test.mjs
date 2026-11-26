@@ -469,7 +469,7 @@ describe('Platform settings & feature access', () => {
 
   it('self sign-up can be closed', async () => {
     await call('PUT', '/admin/settings', { token: OWNER.token, body: { changes: { 'general.selfSignupEnabled': false } } });
-    const r = await call('POST', '/auth/onboard', { body: { brandName: 'Closed', ownerFullName: 'X', mobileNumber: '1', email: `closed-${run}@example.com`, password: PW, outletName: 'x', slug: `closed-${run}`, upiVpa: 'a@b' } });
+    const r = await call('POST', '/auth/onboard', { body: { brandName: 'Closed', ownerFullName: 'X', mobileNumber: '1', email: `closed-${run}@example.com`, password: PW, outletName: 'x', slug: `closed-${run}`, upiVpa: 'ab@upi' } });
     assert.equal(r.status, 403);
     assert.equal(r.body.code, 'SIGNUP_CLOSED');
     await call('PUT', '/admin/settings', { token: OWNER.token, body: { changes: { 'general.selfSignupEnabled': true } } });
@@ -666,7 +666,7 @@ describe('Monitoring, jobs, dashboard and exports', () => {
     assert.equal((await call('GET', '/admin/organizations', { token: OWNER.token })).status, 200);
     assert.equal((await call('GET', '/admin/outlets', { token: OWNER.token })).status, 200);
     assert.equal((await call('GET', '/admin/system-health', { token: OWNER.token })).status, 200);
-    const p = await call('POST', '/admin/provision', { token: OWNER.token, body: { brandName: `Prov ${run}`, ownerFullName: 'Prov Owner', email: `prov-${run}@example.com`, mobileNumber: '9000000000', outletName: 'Main', slug: `prov-${run}`, upiVpa: 'p@upi' } });
+    const p = await call('POST', '/admin/provision', { token: OWNER.token, body: { brandName: `Prov ${run}`, ownerFullName: 'Prov Owner', email: `prov-${run}@example.com`, mobileNumber: '9000000000', outletName: 'Main', slug: `prov-${run}`, upiVpa: 'pp@upi' } });
     assert.equal(p.status, 201, JSON.stringify(p.body));
     const au = await call('GET', `/admin/audit?action=RESTAURANT_PROVISIONED`, { token: OWNER.token });
     assert.ok(au.data.items.length >= 1);

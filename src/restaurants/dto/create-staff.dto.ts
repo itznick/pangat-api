@@ -68,6 +68,13 @@ export class UpdateStaffDto {
   isActive?: boolean;
 }
 
+export class ConfirmUpiDto {
+  /** Must equal the UPI ID currently on file for the outlet */
+  @IsString()
+  @Matches(/^[a-zA-Z0-9._-]{2,64}@[a-zA-Z0-9]{2,32}$/, { message: 'Enter a valid UPI ID such as name@bank' })
+  vpa: string;
+}
+
 export class SetKitchenPinDto {
   @IsString()
   @Matches(/^\d{4,6}$/, { message: 'Kitchen PIN must be 4 to 6 digits' })

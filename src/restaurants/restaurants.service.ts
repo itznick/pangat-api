@@ -5,7 +5,7 @@ import {
   ForbiddenException,
   Optional,
 } from '@nestjs/common';
-import { resolveOperations } from './operations.js';
+import { isValidVpaShape, resolveOperations, upiOffered } from './operations.js';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
@@ -246,6 +246,32 @@ export class RestaurantsService {
     }
   }
 
+  /**
+   * The owner states, in so many words, that this UPI ID belongs to the business and receives its payments. The caller must send the
+   * exact ID on file (so a stale screen cannot confirm an ID that was just changed). Only the owner can do this. Guests are offered UPI
+   * only after this, and changing the ID clears it. A valid FORMAT is not proof of ownership: the real proof is a small test payment,
+   * which the pilot checklist asks for (docs).
+   */
+  async confirmUpi(restaurantId: string, vpa: string, actor?: any) {
+    const restaurant = await this.ownedOutlet(restaurantId);
+    if (actor?.role !== StaffRole.SUPER_OWNER && !actor?.isPlatformAdmin) {
+      throw new ForbiddenException('Only the owner can confirm the UPI ID.');
+    }
+    if (!isValidVpaShape(restaurant.upiVpa)) {
+      throw new BadRequestException('This outlet has no valid UPI ID on file. Enter one in Settings first.');
+    }
+    if (String(vpa || '').trim().toLowerCase() !== restaurant.upiVpa.trim().toLowerCase()) {
+      throw new BadRequestException('The UPI ID you confirmed does not match the one on file. Reload the page and try again.');
+    }
+    restaurant.upiVpaConfirmedAt = new Date();
+    restaurant.upiVpaConfirmedBy = actor?.id ?? null;
+    await this.restaurantRepo.manager.transaction(async (em) => {
+      await em.getRepository(Restaurant).update(restaurant.id, { upiVpaConfirmedAt: restaurant.upiVpaConfirmedAt, upiVpaConfirmedBy: restaurant.upiVpaConfirmedBy });
+      await this.audit(restaurant.id, 'RESTAURANT', restaurant.id, 'UPI_VPA_CONFIRMED', actor, { vpaMasked: RestaurantsService.maskSetting('upiVpa', restaurant.upiVpa) }, em, restaurant.organizationId);
+    });
+    return { confirmed: true, confirmedAt: restaurant.upiVpaConfirmedAt };
+  }
+
   async updateSettings(slug: string, dto: UpdateSettingsDto, actor?: any): Promise<Restaurant> {
     const restaurant = await this.findBySlug(slug);
     // findBySlug loads the outlet's tables, and Restaurant.tables is a cascading relation: saving the outlet with a stale list would
@@ -270,6 +296,12 @@ export class RestaurantsService {
 
     const { operations: operationsDto, ...rest } = dto;
     Object.assign(restaurant, rest);
+    // A different UPI ID is a different destination for guests' money: the owner's confirmation never carries over to it
+    if (rest.upiVpa !== undefined && String(rest.upiVpa).trim().toLowerCase() !== String(before.upi ?? '').trim().toLowerCase()) {
+      restaurant.upiVpa = String(rest.upiVpa).trim();
+      restaurant.upiVpaConfirmedAt = null;
+      restaurant.upiVpaConfirmedBy = null;
+    }
     // The validated DTO is a class instance whose unset optional fields exist as `undefined` properties; spreading them would overwrite the
     // stored values (a change to the prep time silently un-paused the outlet and reset every day's hours). Only fields actually sent are merged.
     const operations = operationsDto ? (definedOnly(operationsDto) as NonNullable<typeof operationsDto>) : undefined;
@@ -309,7 +341,8 @@ export class RestaurantsService {
       branchArea: r.branchArea,
       phone: r.phone,
       isActive: r.isActive,
-      upiVpa: r.upiVpa,
+      // the UPI ID reaches an anonymous caller only while UPI is on for the outlet AND the owner has confirmed it
+      upiVpa: upiOffered(r) ? r.upiVpa : '',
       gstin: r.gstin,
       fssaiLicense: r.fssaiLicense,
       hsnSac: r.hsnSac,

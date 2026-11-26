@@ -30,10 +30,11 @@ export class CreateOutletDto {
   @IsOptional()
   branchArea?: string;
 
+  // Optional at creation: the owner adds and CONFIRMS their own UPI ID later; we never invent one.
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
   @Matches(/^[a-zA-Z0-9._-]{2,64}@[a-zA-Z0-9]{2,32}$/, { message: 'Enter a valid UPI ID such as name@bank' })
-  upiVpa: string;
+  upiVpa?: string;
 
   @IsString()
   @IsOptional()

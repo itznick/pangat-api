@@ -139,6 +139,10 @@ export class Order {
   @Column({ name: 'total_amount', type: 'decimal', precision: 10, scale: 2, transformer: decimalTransformer })
   totalAmount: number;
 
+  /** Hash of the guest's request. Same idempotency key + same request = the original order; same key + a different request = 409. */
+  @Column({ name: 'request_hash', type: 'char', length: 64, nullable: true })
+  requestHash: string | null;
+
   /** Customer idempotency key stored to deduplicate on replay */
   @Column({ name: 'idempotency_key', length: 100, unique: true })
   idempotencyKey: string;

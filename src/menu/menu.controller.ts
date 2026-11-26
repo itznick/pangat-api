@@ -14,7 +14,7 @@ import { UpdateCategoryDto } from './dto/create-category.dto.js';
 import { MenuService } from './menu.service.js';
 import { UpdateAvailabilityDto } from './dto/update-availability.dto.js';
 import { UpdatePriceDto } from './dto/update-price.dto.js';
-import { CreateItemDto, UpdateItemDto } from './dto/create-item.dto.js';
+import { CreateItemDto, ImportMenuDto, UpdateItemDto } from './dto/create-item.dto.js';
 import { CreateCategoryDto } from './dto/create-category.dto.js';
 import { withMessage } from '../common/interceptors/response.interceptor.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
@@ -87,6 +87,15 @@ export class MenuController {
   async createItem(@Body() dto: CreateItemDto, @Req() req: any) {
     const item = await this.menuService.createItem(dto, req?.user);
     return withMessage(item, 'Menu dish created successfully');
+  }
+
+  /** Bulk menu entry from CSV text. Preview by default (dryRun); set dryRun:false to import. Owners and managers only. */
+  @Post('import')
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
+  async importMenu(@Body() dto: ImportMenuDto, @Req() req: any) {
+    const r = await this.menuService.importCsv(dto, req?.user);
+    return withMessage(r, r.dryRun ? 'Preview ready. Nothing has been imported yet.' : `Imported ${r.summary.create} dish${r.summary.create === 1 ? '' : 'es'}.`);
   }
 
   /** Update menu item: Allowed for Owners and Managers */

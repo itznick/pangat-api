@@ -9,7 +9,8 @@ import { MenuCategory } from './entities/menu-category.entity.js';
 import { Modifier } from './entities/modifier.entity.js';
 import { ModifierType } from '../common/enums/index.js';
 import { Restaurant } from '../restaurants/entities/restaurant.entity.js';
-import { CreateItemDto, UpdateItemDto } from './dto/create-item.dto.js';
+import { CreateItemDto, ImportMenuDto, UpdateItemDto } from './dto/create-item.dto.js';
+import { DEFAULT_CATEGORY, normKey, parseMenuCsv } from './menu-import.js';
 import { CreateCategoryDto } from './dto/create-category.dto.js';
 import { decideFeature, getOrgAccess } from '../subscriptions/subscription-access.js';
 
@@ -298,6 +299,95 @@ export class MenuService {
     return this.menuItemRepo.findOne({
       where: { id: savedItem.id },
       relations: { modifiers: true },
+    });
+  }
+
+  /**
+   * Bulk menu entry from a CSV. Safe by construction:
+   *  - `dryRun` validates and previews exactly what would happen and writes nothing;
+   *  - the real import is ONE transaction: all dishes and categories, or none;
+   *  - it is repeatable: a dish that already exists (same category and name) is skipped, so importing the same file twice adds nothing;
+   *  - it only ever creates (and, if asked, re-prices): it never deletes or renames anything.
+   */
+  async importCsv(dto: ImportMenuDto, actor?: any) {
+    let restaurant: Restaurant | null = null;
+    if (dto.restaurantId) restaurant = await this.restaurantRepo.findOne({ where: { id: dto.restaurantId } });
+    else if (dto.restaurantSlug) restaurant = await this.restaurantRepo.findOne({ where: { slug: dto.restaurantSlug } });
+    if (!restaurant) throw new NotFoundException('Restaurant not found for the menu import');
+
+    const parsed = parseMenuCsv(dto.csv);
+    if (parsed.fileErrors.length) throw new BadRequestException({ message: parsed.fileErrors, code: 'MENU_IMPORT_FILE_INVALID' });
+
+    const isPreview = dto.dryRun !== false; // preview is the default: an import must be asked for explicitly
+
+    /** Read the current menu and decide, per row, what would happen. Run INSIDE the locked transaction for a real import. */
+    const planImport = async (em: EntityManager) => {
+      const categories = await em.getRepository(MenuCategory).find({ where: { restaurantId: restaurant!.id } });
+      const items = await em.getRepository(MenuItem).find({ where: { restaurantId: restaurant!.id } }); // soft-deleted dishes are excluded
+      const catByName = new Map(categories.map((c) => [c.name.trim().toLowerCase(), c]));
+      const existing = new Map<string, MenuItem>();
+      for (const it of items) {
+        const c = categories.find((x) => x.id === it.categoryId);
+        existing.set(normKey(c?.name ?? DEFAULT_CATEGORY, it.name), it);
+      }
+      type Plan = { line: number; category: string; name: string; price: number; action: 'create' | 'update' | 'skip'; reason?: string };
+      const plan: Plan[] = [];
+      const seen = new Map<string, number>();
+      for (const r of parsed.rows) {
+        const key = normKey(r.category, r.name);
+        const base = { line: r.line, category: r.category, name: r.name, price: r.price };
+        if (seen.has(key)) { plan.push({ ...base, action: 'skip', reason: `Same dish as line ${seen.get(key)} in this file.` }); continue; }
+        seen.set(key, r.line);
+        const have = existing.get(key);
+        if (!have) plan.push({ ...base, action: 'create' });
+        else if (dto.updatePrices && Number(have.price) !== r.price) plan.push({ ...base, action: 'update', reason: `Price ${Number(have.price)} to ${r.price}.` });
+        else plan.push({ ...base, action: 'skip', reason: 'Already on the menu.' });
+      }
+      const newCategories = [...new Set(parsed.rows.filter((r) => plan.find((p) => p.line === r.line)?.action === 'create').map((r) => r.category))]
+        .filter((name) => !catByName.has(name.trim().toLowerCase()));
+      const summary = {
+        create: plan.filter((p) => p.action === 'create').length,
+        update: plan.filter((p) => p.action === 'update').length,
+        skip: plan.filter((p) => p.action === 'skip').length,
+        errors: parsed.errors.length,
+        newCategories: newCategories.length,
+      };
+      return { categories, catByName, existing, plan, newCategories, summary, preview: { dryRun: isPreview, summary, rows: plan, errors: parsed.errors, newCategories } };
+    };
+
+    if (isPreview) return (await planImport(this.menuItemRepo.manager)).preview;
+    if (parsed.errors.length) {
+      const p = await planImport(this.menuItemRepo.manager);
+      throw new BadRequestException({ message: ['Fix the rows with errors (or remove them) and try again. Nothing was imported.'], code: 'MENU_IMPORT_ROW_ERRORS', details: p.preview });
+    }
+
+    return this.menuItemRepo.manager.transaction(async (em) => {
+      // One import at a time per restaurant: the next one waits, then re-reads the menu and so sees what this one created (no duplicates).
+      await em.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`menu-import:${restaurant!.id}`]);
+      const { categories, catByName, existing, plan, newCategories, summary, preview } = await planImport(em);
+      let sort = categories.reduce((m, c) => Math.max(m, c.sortOrder ?? 0), 0);
+      const created = new Map<string, MenuCategory>();
+      for (const name of newCategories) {
+        const c = await em.getRepository(MenuCategory).save(em.getRepository(MenuCategory).create({ name, restaurantId: restaurant!.id, sortOrder: ++sort }));
+        created.set(name.trim().toLowerCase(), c);
+      }
+      const catId = (name: string) => (catByName.get(name.trim().toLowerCase()) ?? created.get(name.trim().toLowerCase()))!.id;
+      const rowByLine = new Map(parsed.rows.map((r) => [r.line, r]));
+      for (const p of plan) {
+        const r = rowByLine.get(p.line)!;
+        if (p.action === 'create') {
+          await em.getRepository(MenuItem).save(em.getRepository(MenuItem).create({
+            name: r.name, description: r.description, price: r.price, categoryId: catId(r.category), restaurantId: restaurant!.id,
+            isVeg: r.isVeg, isAvailable: r.isAvailable, isPopular: false, imageUrl: '🍽️',
+          }));
+        } else if (p.action === 'update') {
+          const have = existing.get(normKey(r.category, r.name))!;
+          have.price = r.price;
+          await em.getRepository(MenuItem).save(have);
+        }
+      }
+      await this.audit(em, restaurant!.id, 'MENU', restaurant!.id, 'MENU_IMPORTED', actor, { ...summary, updatePrices: !!dto.updatePrices }, restaurant!.organizationId);
+      return { ...preview, dryRun: false };
     });
   }
 

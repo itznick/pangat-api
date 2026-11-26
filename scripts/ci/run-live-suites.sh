@@ -24,7 +24,7 @@ export UAT_API="${UAT_API:-http://localhost:$PORT/api/v1}"
 
 SUITES=("$@")
 if [ ${#SUITES[@]} -eq 0 ]; then
-  SUITES=(test test:integration test:phase1 test:phase1_1 test:phase1_2 test:phase1_final test:platform test:compliance test:commercial test:pilot-payments test:pilot-ops)
+  SUITES=(test test:integration test:phase1 test:phase1_1 test:phase1_2 test:phase1_final test:platform test:compliance test:commercial test:pilot-payments test:pilot-ops test:pilot-roles test:pilot-menu)
 fi
 
 [ -f dist/main.js ] || npm run build

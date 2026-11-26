@@ -23,7 +23,7 @@ export class SupportService {
       [orgId, user.restaurantId ?? null, user.id, user.name, user.email, dto.category, dto.subject.trim(), dto.description.trim(), priority],
     );
     await this.ds.query(`INSERT INTO support_ticket_events (ticket_id, type, author_id, author_name, author_kind, body) VALUES ($1,'CREATED',$2,$3,'MERCHANT',$4)`, [t.id, user.id, user.name, dto.description.trim()]);
-    await this.events.emit('SUPPORT_TICKET', priority === 'URGENT' ? 'CRITICAL' : 'INFO', `New ${dto.category.toLowerCase().replace('_', ' ')}: ${dto.subject.slice(0, 80)}`, `SUP-${t.number} from ${user.name}`, { organizationId: orgId, entityType: 'ticket', entityId: t.id });
+    await this.events.emit('SUPPORT_TICKET', priority === 'URGENT' ? 'CRITICAL' : priority === 'HIGH' ? 'WARNING' : 'INFO', `New ${dto.category.toLowerCase().replace('_', ' ')}: ${dto.subject.slice(0, 80)}`, `SUP-${t.number} from ${user.name}`, { organizationId: orgId, entityType: 'ticket', entityId: t.id });
     return { id: t.id, number: t.number };
   }
 

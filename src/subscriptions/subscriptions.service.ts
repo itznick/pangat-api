@@ -877,6 +877,10 @@ export class SubscriptionsService implements OnModuleInit {
       undefined,
       { requestedPlanCode: plan.code },
     );
+    // The operators must hear about it: recorded in the bell and emailed when alerts are on (a failure here never blocks the owner's request)
+    await this.platformEvents
+      ?.emit('PLAN_CHANGE_REQUESTED', 'INFO', `Plan change requested: ${plan.name}`, `${actor?.email || 'An owner'} asked to move to ${plan.name}.${message ? ` Note: ${message.slice(0, 300)}` : ''}`, { organizationId, entityType: 'organization', entityId: organizationId })
+      .catch(() => undefined);
     return { requested: true, plan: plan.name };
   }
 

@@ -30,6 +30,7 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
   ) {
     this.jobs = [
       { name: 'health-snapshot', label: 'Health sampling', everyMs: 5 * 60_000, firstDelayMs: 20_000, run: () => this.healthSnapshot() },
+      { name: 'alert-retries', label: 'Retry alert emails that failed', everyMs: 2 * 60_000, firstDelayMs: 30_000, run: () => this.events.retryDue() },
       { name: 'subscription-sweep', label: 'Subscription expiry & trial reminders', everyMs: 60 * 60_000, firstDelayMs: 45_000, run: () => this.subscriptionSweep() },
       { name: 'privacy-retention', label: 'Remove old personal details (privacy)', everyMs: 24 * 60 * 60_000, firstDelayMs: 180_000, run: () => runPrivacyRetention(this.ds) },
       { name: 'data-retention', label: 'Log retention cleanup', everyMs: 24 * 60 * 60_000, firstDelayMs: 120_000, run: () => this.retention() },

@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
+import { PlatformEventsService } from '../platform/events.service.js';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { PRIVACY_POLICY_VERSION } from '../platform/compliance.js';
@@ -11,6 +12,7 @@ export class LeadsService {
   constructor(
     @InjectRepository(Lead)
     private readonly leadRepo: Repository<Lead>,
+    @Optional() private readonly events?: PlatformEventsService,
   ) {}
 
   async create(createLeadDto: CreateLeadDto): Promise<Lead> {
@@ -24,7 +26,12 @@ export class LeadsService {
       consentVersion: PRIVACY_POLICY_VERSION,
       consentAt: new Date(),
     });
-    return this.leadRepo.save(lead);
+    const saved = await this.leadRepo.save(lead);
+    // Tell the operators a new lead is waiting (stored in the bell; emailed when alerts are on). A failure here must never lose or delay the lead.
+    await this.events
+      ?.emit('NEW_LEAD', 'INFO', `New lead: ${saved.restaurantName || saved.name}`, `${saved.name}, ${saved.restaurantName || 'restaurant'}${saved.city ? `, ${saved.city}` : ''}. Phone ${saved.phone}. Open Super Admin > Leads.`, { entityType: 'lead', entityId: saved.id })
+      .catch(() => undefined);
+    return saved;
   }
 
   async findAll(): Promise<Lead[]> {

@@ -75,6 +75,16 @@ export class ConfirmUpiDto {
   vpa: string;
 }
 
+export class ConfirmStepDto {
+  /** One of the owner-attested steps; automatic steps are rejected by the service */
+  @IsString()
+  step: string;
+
+  @IsOptional()
+  @IsBoolean()
+  done?: boolean;
+}
+
 export class SetKitchenPinDto {
   @IsString()
   @Matches(/^\d{4,6}$/, { message: 'Kitchen PIN must be 4 to 6 digits' })

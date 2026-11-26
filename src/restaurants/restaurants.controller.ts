@@ -13,7 +13,7 @@ import {
 } from '@nestjs/common';
 import { RestaurantsService } from './restaurants.service.js';
 import { UpdateSettingsDto } from './dto/update-settings.dto.js';
-import { ConfirmUpiDto, CreateStaffDto, UpdateStaffDto, SetKitchenPinDto } from './dto/create-staff.dto.js';
+import { ConfirmStepDto, ConfirmUpiDto, CreateStaffDto, UpdateStaffDto, SetKitchenPinDto } from './dto/create-staff.dto.js';
 import { Throttle } from '@nestjs/throttler';
 import { OptionalJwtAuthGuard } from '../auth/optional-jwt-auth.guard.js';
 import { OrdersService } from '../orders/orders.service.js';
@@ -120,6 +120,21 @@ export class RestaurantsController {
   @Roles(StaffRole.SUPER_OWNER)
   async confirmUpi(@Param('id') id: string, @Body() dto: ConfirmUpiDto, @Req() req: any) {
     return withMessage(await this.restaurantsService.confirmUpi(id, dto.vpa, req.user), 'UPI ID confirmed. Guests can now be offered UPI at this outlet if it is switched on in Settings.');
+  }
+
+  // ── Go-live checklist ───────────────────────────────────────────────────
+  @Get(':id/readiness')
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
+  async readiness(@Param('id') id: string) {
+    return withMessage(await this.restaurantsService.readiness(id), 'Go-live checklist');
+  }
+
+  @Post(':id/onboarding/confirm')
+  @UseGuards(JwtAuthGuard, RolesGuard, TenantGuard)
+  @Roles(StaffRole.SUPER_OWNER, StaffRole.STORE_MANAGER)
+  async confirmStep(@Param('id') id: string, @Body() dto: ConfirmStepDto, @Req() req: any) {
+    return withMessage(await this.restaurantsService.confirmOnboardingStep(id, dto.step, dto.done !== false, req.user), 'Checklist updated');
   }
 
   // ── Kitchen station PIN ──────────────────────────────────────────────────

@@ -191,7 +191,7 @@ describe('AuthService: admin sign-in code and sign-up verification', async () =>
   })
   it('sign-up: requires a code only when the setting is on and mail can be delivered', async () => {
     const dto = { email: 'new@cafe.in' }
-    await setSettings({ 'security.signupEmailOtp': true })
+    await setSettings({ 'security.signupEmailOtp': true, 'general.selfSignupEnabled': true }) // sign-up is closed by default: this test is about the email code, so open it
     const on = build()
     assert.equal(on.svc.signupOtpRequired(), true)
     await assert.rejects(() => on.svc.onboard({ ...dto }), (e) => e.getResponse().code === 'EMAIL_OTP_REQUIRED')

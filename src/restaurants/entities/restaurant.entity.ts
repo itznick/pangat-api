@@ -61,6 +61,10 @@ export class Restaurant {
   @Column({ name: 'upi_vpa_confirmed_at', type: 'timestamptz', nullable: true })
   upiVpaConfirmedAt: Date | null;
 
+  /** Owner-attested go-live steps (QR placed, GST reviewed ...) with who/when. Automatic checks are derived live, never stored. */
+  @Column({ name: 'onboarding', type: 'jsonb', default: () => "'{}'" })
+  onboarding: Record<string, unknown>;
+
   @Column({ name: 'upi_vpa_confirmed_by', type: 'uuid', nullable: true })
   upiVpaConfirmedBy: string | null;
 

@@ -343,7 +343,10 @@ describe('Guest UPI goes only to the outlet\'s own, owner-confirmed ID', () => {
     const o = await onboard('u4');
     assert.equal((await call('PATCH', `/restaurants/${o.slug}/settings`, { token: o.token, body: { upiVpa: 'nope' } })).status, 400);
     assert.equal((await call('POST', '/auth/onboard', { body: body('u4b', { upiVpa: 'nope' }) })).status, 400);
-    assert.equal((await call('POST', '/auth/onboard', { body: body('u4c', { upiVpa: '' }) })).status, 400);
+    // blank is NOT invalid: it means "no UPI yet" (the owner adds and confirms their own later). Nothing is invented in its place.
+    const blank = await call('POST', '/auth/onboard', { body: body('u4c', { upiVpa: '' }) });
+    assert.equal(blank.status, 201, JSON.stringify(blank.body));
+    assert.equal((await menu(blank.data.outlet.slug)).restaurant.upiVpa, '', 'no destination, no UPI offered');
   });
 
   it('UPI switched off for the outlet: no UPI even with a confirmed ID', async () => {

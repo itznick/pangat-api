@@ -528,7 +528,13 @@ export class OrdersService {
     if (user && user.role === StaffRole.CHEF && !user.isPlatformAdmin) {
       throw new ForbiddenException('Bills are not available to the kitchen role');
     }
-    const order: any = await this.findOrderForCaller(idOrToken, token, user);
+    const authorised: any = await this.findOrderForCaller(idOrToken, token, user);
+    // A guest with a tracking link is authorised against a restricted projection that has no outlet or tax-document fields. The bill needs the
+    // full record, so load it (authorisation has already passed: this is the same order the caller proved they may see).
+    const order: any = authorised.restaurantId
+      ? authorised
+      : await this.orderRepo.findOne({ where: { id: authorised.id }, relations: { items: true, restaurant: true } });
+    if (!order) throw new NotFoundException('Order not found');
     const r = order.restaurant ?? (await this.restaurantRepo.findOne({ where: { id: order.restaurantId } }));
     const money = (n: unknown) => Math.round(Number(n || 0) * 100) / 100;
     const taxable = money(order.subtotal);

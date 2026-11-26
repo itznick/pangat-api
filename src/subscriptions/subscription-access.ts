@@ -8,6 +8,7 @@ import { getSetting } from '../platform/settings.service.js';
 import { getOrgLifecycle } from '../platform/org-status.js';
 import { resolveFeatureAccess } from '../platform/features.js';
 import { notifyEntitlementChange } from './entitlement-events.js';
+import { TRIAL_PLAN_CODE } from './default-plans.js';
 
 const graceDays = () => Number(getSetting<number>('subscription.gracePeriodDays') ?? 7);
 const TTL_MS = 20_000;
@@ -268,7 +269,7 @@ export async function ensureTrial(dataSource: DataSource, organizationId: string
 export async function resolveTrialPlan(dataSource: DataSource): Promise<SubscriptionPlan | null> {
   const plans = dataSource.getRepository(SubscriptionPlan);
   return (
-    (await plans.findOne({ where: { code: String(getSetting('subscription.defaultTrialPlanCode') || 'GROWTH'), isActive: true } })) ??
+    (await plans.findOne({ where: { code: String(getSetting('subscription.defaultTrialPlanCode') || TRIAL_PLAN_CODE), isActive: true } })) ??
     (await plans.findOne({ where: { isActive: true }, order: { basePrice: 'ASC' } }))
   );
 }

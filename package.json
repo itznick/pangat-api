@@ -14,7 +14,7 @@
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
     "lint": "oxlint src/ test/",
-    "test": "node --test --test-concurrency=1 test/qa-remediation.test.mjs test/inventory.test.mjs test/order-lifecycle.test.mjs test/order-types.test.mjs test/recipes-deductions.test.mjs test/security-integration.test.mjs test/hardening.test.mjs test/cache.test.mjs test/subscriptions.test.mjs test/otp-email.test.mjs test/authorization.test.mjs test/audit.test.mjs test/privacy.test.mjs test/billing.test.mjs test/hardening2.test.mjs test/totp.test.mjs test/phase1-logic.test.mjs",
+    "test": "node --test --test-concurrency=1 test/qa-remediation.test.mjs test/inventory.test.mjs test/order-lifecycle.test.mjs test/order-types.test.mjs test/recipes-deductions.test.mjs test/security-integration.test.mjs test/hardening.test.mjs test/cache.test.mjs test/subscriptions.test.mjs test/otp-email.test.mjs test/authorization.test.mjs test/audit.test.mjs test/privacy.test.mjs test/billing.test.mjs test/hardening2.test.mjs test/totp.test.mjs test/phase1-logic.test.mjs test/commercial-plans.test.mjs test/menu-import.test.mjs test/log-redaction.test.mjs",
     "test:integration": "node --test --test-concurrency=1 test/integration.e2e.test.mjs",
     "test:platform": "node --test --test-concurrency=1 test/platform-control.e2e.test.mjs",
     "test:unit": "node --test test/otp-email.test.mjs test/security-integration.test.mjs test/hardening.test.mjs test/cache.test.mjs",
@@ -23,6 +23,13 @@
     "test:phase1_1": "node --test --test-concurrency=1 test/phase1-1-verification.e2e.test.mjs",
     "test:phase1_2": "node --test --test-concurrency=1 test/phase1-2-public-endpoints.e2e.test.mjs test/phase1-2-socket-revocation.e2e.test.mjs test/phase1-2-settings-and-override.e2e.test.mjs",
     "test:phase1_final": "node --test --test-concurrency=1 test/phase1-final-role-isolation.e2e.test.mjs",
+    "test:pilot-payments": "node --test --test-concurrency=1 test/pilot-payment-integrity.e2e.test.mjs",
+    "test:pilot-ops": "node --test --test-concurrency=1 test/pilot-ops.e2e.test.mjs",
+    "test:pilot-menu": "node --test --test-concurrency=1 test/pilot-menu-import.e2e.test.mjs",
+    "test:pilot-security": "node --test --test-concurrency=1 test/pilot-security.e2e.test.mjs",
+    "test:pilot-acceptance": "node --test --test-concurrency=1 test/pilot-acceptance.e2e.test.mjs",
+    "test:pilot-roles": "node --test --test-concurrency=1 test/pilot-roles.e2e.test.mjs",
+    "test:commercial": "node --test --test-concurrency=1 test/commercial-plans.e2e.test.mjs",
     "test:compliance": "node --test --test-concurrency=1 test/compliance.e2e.test.mjs"
   },
   "dependencies": {

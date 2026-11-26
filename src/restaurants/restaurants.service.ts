@@ -5,7 +5,7 @@ import {
   ForbiddenException,
   Optional,
 } from '@nestjs/common';
-import { resolveOperations } from './operations.js';
+import { isValidVpaShape, resolveOperations, upiOffered } from './operations.js';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
@@ -246,6 +246,32 @@ export class RestaurantsService {
     }
   }
 
+  /**
+   * The owner states, in so many words, that this UPI ID belongs to the business and receives its payments. The caller must send the
+   * exact ID on file (so a stale screen cannot confirm an ID that was just changed). Only the owner can do this. Guests are offered UPI
+   * only after this, and changing the ID clears it. A valid FORMAT is not proof of ownership: the real proof is a small test payment,
+   * which the pilot checklist asks for (docs).
+   */
+  async confirmUpi(restaurantId: string, vpa: string, actor?: any) {
+    const restaurant = await this.ownedOutlet(restaurantId);
+    if (actor?.role !== StaffRole.SUPER_OWNER && !actor?.isPlatformAdmin) {
+      throw new ForbiddenException('Only the owner can confirm the UPI ID.');
+    }
+    if (!isValidVpaShape(restaurant.upiVpa)) {
+      throw new BadRequestException('This outlet has no valid UPI ID on file. Enter one in Settings first.');
+    }
+    if (String(vpa || '').trim().toLowerCase() !== restaurant.upiVpa.trim().toLowerCase()) {
+      throw new BadRequestException('The UPI ID you confirmed does not match the one on file. Reload the page and try again.');
+    }
+    restaurant.upiVpaConfirmedAt = new Date();
+    restaurant.upiVpaConfirmedBy = actor?.id ?? null;
+    await this.restaurantRepo.manager.transaction(async (em) => {
+      await em.getRepository(Restaurant).update(restaurant.id, { upiVpaConfirmedAt: restaurant.upiVpaConfirmedAt, upiVpaConfirmedBy: restaurant.upiVpaConfirmedBy });
+      await this.audit(restaurant.id, 'RESTAURANT', restaurant.id, 'UPI_VPA_CONFIRMED', actor, { vpaMasked: RestaurantsService.maskSetting('upiVpa', restaurant.upiVpa) }, em, restaurant.organizationId);
+    });
+    return { confirmed: true, confirmedAt: restaurant.upiVpaConfirmedAt };
+  }
+
   async updateSettings(slug: string, dto: UpdateSettingsDto, actor?: any): Promise<Restaurant> {
     const restaurant = await this.findBySlug(slug);
     // findBySlug loads the outlet's tables, and Restaurant.tables is a cascading relation: saving the outlet with a stale list would
@@ -270,6 +296,12 @@ export class RestaurantsService {
 
     const { operations: operationsDto, ...rest } = dto;
     Object.assign(restaurant, rest);
+    // A different UPI ID is a different destination for guests' money: the owner's confirmation never carries over to it
+    if (rest.upiVpa !== undefined && String(rest.upiVpa).trim().toLowerCase() !== String(before.upi ?? '').trim().toLowerCase()) {
+      restaurant.upiVpa = String(rest.upiVpa).trim();
+      restaurant.upiVpaConfirmedAt = null;
+      restaurant.upiVpaConfirmedBy = null;
+    }
     // The validated DTO is a class instance whose unset optional fields exist as `undefined` properties; spreading them would overwrite the
     // stored values (a change to the prep time silently un-paused the outlet and reset every day's hours). Only fields actually sent are merged.
     const operations = operationsDto ? (definedOnly(operationsDto) as NonNullable<typeof operationsDto>) : undefined;
@@ -309,7 +341,8 @@ export class RestaurantsService {
       branchArea: r.branchArea,
       phone: r.phone,
       isActive: r.isActive,
-      upiVpa: r.upiVpa,
+      // the UPI ID reaches an anonymous caller only while UPI is on for the outlet AND the owner has confirmed it
+      upiVpa: upiOffered(r) ? r.upiVpa : '',
       gstin: r.gstin,
       fssaiLicense: r.fssaiLicense,
       hsnSac: r.hsnSac,
@@ -514,5 +547,77 @@ export class RestaurantsService {
     const restaurant = await this.ownedOutlet(restaurantId);
     const stations = await this.staffRepo.find({ where: { restaurantId: restaurant.id, role: StaffRole.CHEF } });
     return { configured: stations.some((s) => s.isActive !== false && (s.pinHash || s.pinCode)) };
+  }
+
+  // ── Go-live checklist ────────────────────────────────────────────────────
+  /** Steps no software can detect. The owner records them; who and when are kept. Automatic steps can never be marked by hand. */
+  static readonly MANUAL_STEPS = ['gstReviewed', 'hoursReviewed', 'qrPlaced', 'soloStaffConfirmed'] as const;
+
+  /**
+   * The real state of this outlet's readiness to serve guests, derived from the database on every call. Nothing is cached or assumed:
+   * a step is DONE only when the evidence exists (or, for physical steps, the owner recorded it).
+   */
+  async readiness(restaurantId: string) {
+    const r = await this.ownedOutlet(restaurantId);
+    const q = (sql: string) => this.restaurantRepo.manager.query(sql, [r.id]).then((x) => Number(x[0]?.n ?? 0));
+    const [items, tables, staff, orders, completed, stationLogin] = await Promise.all([
+      q('SELECT count(*)::int AS n FROM menu_items WHERE restaurant_id = $1 AND is_available = true'),
+      q('SELECT count(*)::int AS n FROM tables WHERE restaurant_id = $1'),
+      q(`SELECT count(*)::int AS n FROM staff WHERE restaurant_id = $1 AND is_active = true AND role NOT IN ('CHEF','SUPER_OWNER')`),
+      q('SELECT count(*)::int AS n FROM orders WHERE restaurant_id = $1'),
+      q(`SELECT count(*)::int AS n FROM orders WHERE restaurant_id = $1 AND order_status = 'COMPLETED'`),
+      q(`SELECT count(*)::int AS n FROM staff WHERE restaurant_id = $1 AND role = 'CHEF' AND last_login_at IS NOT NULL`),
+    ]);
+    const pin = await this.kitchenPinStatus(r.id);
+    const ob = (r.onboarding || {}) as Record<string, { at?: string; by?: string } | undefined>;
+    const ops = resolveOperations(r.operations);
+    const upiOn = ops.payments?.upi !== false;
+    const manual = (k: string) => Boolean(ob[k]?.at);
+    type Step = { key: string; label: string; required: boolean; status: 'DONE' | 'TODO' | 'ATTENTION'; source: 'AUTO' | 'MANUAL'; hint: string; link: string; confirmedAt?: string };
+    const steps: Step[] = [
+      { key: 'profile', label: 'Restaurant profile', required: true, source: 'AUTO', status: r.name && r.branchArea && r.phone ? 'DONE' : 'TODO', hint: 'Add the outlet name, area and a contact phone number.', link: '/admin/settings' },
+      { key: 'gst', label: 'GST details reviewed', required: true, source: 'MANUAL', status: r.gstin || manual('gstReviewed') ? 'DONE' : 'TODO', hint: r.gstin ? 'GSTIN is on file.' : 'Add your GSTIN, or confirm you are not registered and bills should show no GST number. Check this with your accountant.', link: '/admin/settings' },
+      { key: 'hours', label: 'Opening hours', required: true, source: 'MANUAL', status: manual('hoursReviewed') ? 'DONE' : 'TODO', hint: 'Review the weekly hours so guests are not accepted when you are closed.', link: '/admin/settings' },
+      { key: 'menu', label: 'Menu has items', required: true, source: 'AUTO', status: items >= 1 ? 'DONE' : 'TODO', hint: items >= 1 ? `${items} item${items === 1 ? '' : 's'} available.` : 'Add at least one available menu item.', link: '/admin/menu' },
+      { key: 'tables', label: 'Tables created', required: true, source: 'AUTO', status: tables >= 1 ? 'DONE' : 'TODO', hint: tables >= 1 ? `${tables} table${tables === 1 ? '' : 's'}.` : 'Create your tables so each gets its own QR code.', link: '/admin/tables' },
+      { key: 'qr', label: 'QR codes printed and placed on tables', required: true, source: 'MANUAL', status: manual('qrPlaced') ? 'DONE' : 'TODO', hint: 'Print each table QR, place it, and scan one with a guest phone to check it opens your menu.', link: '/admin/tables' },
+      {
+        key: 'payments', label: 'Payment methods ready', required: true, source: 'AUTO',
+        status: !upiOn ? 'DONE' : r.upiVpaConfirmedAt ? 'DONE' : 'ATTENTION',
+        hint: !upiOn ? 'Guests pay at the counter. UPI is switched off.' : r.upiVpaConfirmedAt ? 'Counter payment and your confirmed UPI ID.' : 'UPI is on but your UPI ID is not confirmed, so guests are not offered UPI. Confirm it in Settings (send yourself ₹1 first), or switch UPI off.',
+        link: '/admin/settings',
+      },
+      { key: 'staff', label: 'Staff added', required: false, source: 'MANUAL', status: staff >= 1 || manual('soloStaffConfirmed') ? 'DONE' : 'TODO', hint: staff >= 1 ? `${staff} staff account${staff === 1 ? '' : 's'}.` : 'Add your cashier/steward accounts, or confirm you will run it alone.', link: '/admin/settings' },
+      { key: 'kitchenPin', label: 'Kitchen PIN set', required: true, source: 'AUTO', status: pin.configured ? 'DONE' : 'TODO', hint: pin.configured ? 'The kitchen station can sign in with its PIN.' : 'Set a 4 to 6 digit PIN under Settings > Kitchen so the kitchen tablet can sign in. Share it in person, not in writing.', link: '/admin/settings' },
+      { key: 'kdsOpened', label: 'Kitchen display opened on the kitchen device', required: true, source: 'AUTO', status: stationLogin >= 1 ? 'DONE' : 'TODO', hint: stationLogin >= 1 ? 'The kitchen station has signed in.' : 'Sign in on the kitchen tablet with the PIN and open the display.', link: '/admin/settings' },
+      { key: 'testOrder', label: 'Test order placed and received', required: true, source: 'AUTO', status: orders >= 1 ? 'DONE' : 'TODO', hint: orders >= 1 ? 'An order has been received.' : 'Scan a table QR and place a test order. It must appear on the kitchen display.', link: '/admin/orders' },
+      { key: 'testCompleted', label: 'Test order taken through to completed', required: true, source: 'AUTO', status: completed >= 1 ? 'DONE' : 'TODO', hint: completed >= 1 ? 'An order has been completed.' : 'Move the test order to Ready and Completed, and mark it paid, to check the whole flow including the bill.', link: '/admin/orders' },
+    ];
+    const CONFIRM_KEY: Record<string, string> = { gst: 'gstReviewed', hours: 'hoursReviewed', qr: 'qrPlaced', staff: 'soloStaffConfirmed' };
+    for (const st of steps) {
+      const ck = CONFIRM_KEY[st.key];
+      if (st.source === 'MANUAL' && ck) {
+        if (ob[ck]?.at) st.confirmedAt = ob[ck]!.at;
+        // tell the client which attestation key this step uses (its own `key` differs for some)
+        (st as Step & { confirmKey?: string }).confirmKey = ck;
+      }
+    }
+    const required = steps.filter((x) => x.required);
+    const done = steps.filter((x) => x.status === 'DONE').length;
+    return { steps, done, total: steps.length, ready: required.every((x) => x.status === 'DONE'), blocking: required.filter((x) => x.status !== 'DONE').map((x) => x.key) };
+  }
+
+  /** Record (or withdraw) a physical, owner-attested step. Audited. Only the listed manual steps; automatic evidence cannot be set by hand. */
+  async confirmOnboardingStep(restaurantId: string, step: string, done: boolean, actor: any) {
+    if (!(RestaurantsService.MANUAL_STEPS as readonly string[]).includes(step)) throw new BadRequestException('This step is checked automatically and cannot be marked by hand.');
+    const r = await this.ownedOutlet(restaurantId);
+    const next = { ...(r.onboarding || {}) } as Record<string, unknown>;
+    if (done) next[step] = { at: new Date().toISOString(), by: actor?.id ?? null, byName: actor?.name ?? null };
+    else delete next[step];
+    await this.restaurantRepo.manager.transaction(async (em) => {
+      await em.getRepository(Restaurant).update(r.id, { onboarding: next as any });
+      await this.audit(r.id, 'RESTAURANT', r.id, done ? 'ONBOARDING_STEP_CONFIRMED' : 'ONBOARDING_STEP_WITHDRAWN', actor, { step }, em, r.organizationId);
+    });
+    return this.readiness(r.id);
   }
 }

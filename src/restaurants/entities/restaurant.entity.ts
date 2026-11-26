@@ -57,6 +57,17 @@ export class Restaurant {
   @Column({ name: 'upi_vpa', length: 80 })
   upiVpa: string;
 
+  /** The owner's explicit confirmation that this UPI ID belongs to the business. Diner UPI is offered only while this is set; changing the ID clears it. */
+  @Column({ name: 'upi_vpa_confirmed_at', type: 'timestamptz', nullable: true })
+  upiVpaConfirmedAt: Date | null;
+
+  /** Owner-attested go-live steps (QR placed, GST reviewed ...) with who/when. Automatic checks are derived live, never stored. */
+  @Column({ name: 'onboarding', type: 'jsonb', default: () => "'{}'" })
+  onboarding: Record<string, unknown>;
+
+  @Column({ name: 'upi_vpa_confirmed_by', type: 'uuid', nullable: true })
+  upiVpaConfirmedBy: string | null;
+
   /** GST registration number */
   @Column({ name: 'gstin', type: 'varchar', length: 20, nullable: true })
   gstin: string | null;

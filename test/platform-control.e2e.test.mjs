@@ -314,7 +314,8 @@ describe('Payments & financial management (only verified gateway events create m
   });
 
   it('a signed charge creates ONE paid invoice (idempotent) and moves the restaurant to ACTIVE', async () => {
-    await db.query(`UPDATE organization_subscriptions SET razorpay_subscription_id = $2 WHERE organization_id = $1`, [A.orgId, `sub_pay_${run}`]);
+    // A customer who pays is on a priced plan (a new restaurant's free trial plan costs nothing): the charge invoices that plan's price, GROWTH 2,999 + 18% GST = 3,538.82
+    await db.query(`UPDATE organization_subscriptions SET razorpay_subscription_id = $2, plan_id = (SELECT id FROM subscription_plans WHERE code = 'GROWTH') WHERE organization_id = $1`, [A.orgId, `sub_pay_${run}`]);
     const p = pay(`pay_ok_${run}`, A.orgId);
     const r1 = await hook('subscription.charged', p, `evt_ch_${run}`);
     assert.ok(r1.status < 300, JSON.stringify(r1.body));
@@ -468,7 +469,7 @@ describe('Platform settings & feature access', () => {
 
   it('self sign-up can be closed', async () => {
     await call('PUT', '/admin/settings', { token: OWNER.token, body: { changes: { 'general.selfSignupEnabled': false } } });
-    const r = await call('POST', '/auth/onboard', { body: { brandName: 'Closed', ownerFullName: 'X', mobileNumber: '1', email: `closed-${run}@example.com`, password: PW, outletName: 'x', slug: `closed-${run}`, upiVpa: 'a@b' } });
+    const r = await call('POST', '/auth/onboard', { body: { brandName: 'Closed', ownerFullName: 'X', mobileNumber: '1', email: `closed-${run}@example.com`, password: PW, outletName: 'x', slug: `closed-${run}`, upiVpa: 'ab@upi' } });
     assert.equal(r.status, 403);
     assert.equal(r.body.code, 'SIGNUP_CLOSED');
     await call('PUT', '/admin/settings', { token: OWNER.token, body: { changes: { 'general.selfSignupEnabled': true } } });
@@ -665,7 +666,7 @@ describe('Monitoring, jobs, dashboard and exports', () => {
     assert.equal((await call('GET', '/admin/organizations', { token: OWNER.token })).status, 200);
     assert.equal((await call('GET', '/admin/outlets', { token: OWNER.token })).status, 200);
     assert.equal((await call('GET', '/admin/system-health', { token: OWNER.token })).status, 200);
-    const p = await call('POST', '/admin/provision', { token: OWNER.token, body: { brandName: `Prov ${run}`, ownerFullName: 'Prov Owner', email: `prov-${run}@example.com`, mobileNumber: '9000000000', outletName: 'Main', slug: `prov-${run}`, upiVpa: 'p@upi' } });
+    const p = await call('POST', '/admin/provision', { token: OWNER.token, body: { brandName: `Prov ${run}`, ownerFullName: 'Prov Owner', email: `prov-${run}@example.com`, mobileNumber: '9000000000', outletName: 'Main', slug: `prov-${run}`, upiVpa: 'pp@upi' } });
     assert.equal(p.status, 201, JSON.stringify(p.body));
     const au = await call('GET', `/admin/audit?action=RESTAURANT_PROVISIONED`, { token: OWNER.token });
     assert.ok(au.data.items.length >= 1);

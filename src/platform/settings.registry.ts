@@ -32,11 +32,11 @@ export const SETTINGS: SettingDef[] = [
   { key: 'branding.supportPhone', group: 'branding', label: 'Support phone', type: 'string', default: null },
   { key: 'branding.logoUrl', group: 'branding', label: 'Logo URL', type: 'string', default: null, help: 'https:// link to a square logo' },
 
-  { key: 'general.selfSignupEnabled', group: 'general', label: 'Allow self-service sign-up', type: 'boolean', default: true, help: 'When off, new restaurants can only be provisioned by a platform admin.' },
+  { key: 'general.selfSignupEnabled', group: 'general', label: 'Allow self-service sign-up', type: 'boolean', default: false, help: 'Off by default: new restaurants are provisioned by a platform admin. Turn on only when the public sign-up page is live and you are ready to support unassisted sign-ups.' },
   { key: 'general.publicOrderingEnabled', group: 'general', label: 'Accept guest QR orders platform-wide', type: 'boolean', default: true, help: 'Emergency switch: when off, no outlet can accept new guest orders.' },
 
   { key: 'subscription.defaultTrialDays', group: 'subscription', label: 'Default trial length (days)', type: 'number', default: 14, min: 0, max: 90 },
-  { key: 'subscription.defaultTrialPlanCode', group: 'subscription', label: 'Trial plan code', type: 'string', default: 'GROWTH' },
+  { key: 'subscription.defaultTrialPlanCode', group: 'subscription', label: 'Trial plan code', type: 'string', default: 'PANGAT_TRIAL', help: 'The non-public plan every new restaurant\'s free trial runs on (14 days, 1 outlet, 20 tables, 8 staff). Existing trials are not changed.' },
   { key: 'subscription.gracePeriodDays', group: 'subscription', label: 'Grace period after expiry (days)', type: 'number', default: 7, min: 0, max: 60, help: 'How long a lapsed restaurant keeps working before access is restricted.' },
   { key: 'subscription.trialReminderDays', group: 'subscription', label: 'Trial reminder (days before end)', type: 'number', default: 3, min: 0, max: 30 },
 
@@ -44,7 +44,7 @@ export const SETTINGS: SettingDef[] = [
   { key: 'billing.supplierStateCode', group: 'billing', label: 'Supplier state code', type: 'string', default: '27', help: 'Decides CGST+SGST vs IGST on invoices.' },
   { key: 'billing.supplierGstin', group: 'billing', label: 'Supplier GSTIN', type: 'string', default: null },
   { key: 'billing.sacCode', group: 'billing', label: 'Default SAC code', type: 'string', default: '998314' },
-  { key: 'billing.invoicePrefix', group: 'billing', label: 'Invoice number prefix', type: 'string', default: 'PANGAT-INV' },
+  { key: 'billing.invoicePrefix', group: 'billing', label: 'Invoice number prefix', type: 'string', default: 'PGT', help: 'Up to 4 letters or digits. Invoice numbers are consecutive per financial year and at most 16 characters, e.g. PGT/2627/000001. Applies to new invoices only.' },
 
   { key: 'email.fromEmail', group: 'email', label: 'From address', type: 'email', default: null },
   { key: 'email.fromName', group: 'email', label: 'From name', type: 'string', default: 'Pangat Hospitality' },
@@ -59,6 +59,8 @@ export const SETTINGS: SettingDef[] = [
 
   { key: 'notifications.alertEmails', group: 'notifications', label: 'Alert recipients', type: 'text', default: null, help: 'Comma-separated emails that receive critical platform alerts.' },
   { key: 'notifications.emailAlerts', group: 'notifications', label: 'Email critical alerts', type: 'boolean', default: false },
+  { key: 'notifications.event.NEW_LEAD', group: 'notifications', label: 'New lead / demo request', type: 'boolean', default: true },
+  { key: 'notifications.event.PLAN_CHANGE_REQUESTED', group: 'notifications', label: 'Plan change requested by a restaurant', type: 'boolean', default: true },
   { key: 'notifications.event.NEW_RESTAURANT', group: 'notifications', label: 'New restaurant registered', type: 'boolean', default: true },
   { key: 'notifications.event.PAYMENT_FAILED', group: 'notifications', label: 'Subscription payment failed', type: 'boolean', default: true },
   { key: 'notifications.event.SUBSCRIPTION_EXPIRED', group: 'notifications', label: 'Subscription expired', type: 'boolean', default: true },

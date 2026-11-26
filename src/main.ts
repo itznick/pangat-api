@@ -9,6 +9,7 @@ import { ResponseInterceptor } from './common/interceptors/response.interceptor.
 import { HttpExceptionFilter } from './common/filters/http-exception.filter.js';
 import { buildCorsPolicy } from './common/security/cors.js';
 import { publicMenuCache } from './common/cache/ttl-cache.js';
+import { NoNullBytesGuard } from './common/guards/no-null-bytes.guard.js';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { rawBody: true });
@@ -61,6 +62,9 @@ async function bootstrap() {
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Idempotency-Key'],
   });
+
+  // A NUL character anywhere in the request is refused as a 400 (PostgreSQL would turn it into a 500)
+  app.useGlobalGuards(new NoNullBytesGuard());
 
   // Global DTO input validation & transformation
   app.useGlobalPipes(

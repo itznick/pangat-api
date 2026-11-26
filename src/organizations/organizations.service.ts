@@ -117,7 +117,7 @@ export class OrganizationsService {
         branchArea: dto.branchArea || null,
         phone: dto.phone || null,
         email: dto.email || null,
-        upiVpa: dto.upiVpa,
+        upiVpa: dto.upiVpa ?? '',
         gstin: dto.gstin || null,
         gstPercentage: dto.gstPercentage ?? 5,
         isActive: true,

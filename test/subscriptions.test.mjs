@@ -158,7 +158,9 @@ function createMockSubscriptionsEnvironment(options = {}) {
     },
   };
 
-  const mockDataSource = {};
+  // Pangat's own invoice numbers come from a consecutive per-financial-year counter in the database; the stub plays that counter
+  let invoiceSerial = 0;
+  const mockDataSource = { query: async () => [{ last_value: ++invoiceSerial }] };
 
   const entitlementService = new EntitlementService(mockSubRepo, mockPlanRepo);
   const subscriptionsService = new SubscriptionsService(
@@ -673,6 +675,9 @@ describe('Subscriptions & Entitlement Engine', () => {
       assert.strictEqual(inv.stateCode, '27');
       assert.strictEqual(inv.buyerGstin, '27AAAAA0000A1Z5');
       assert.strictEqual(inv.totalAmount, 1768.82);
+      // consecutive serial, financial-year scoped, within the 16-character statutory limit (the old timestamp+random form was ~27)
+      assert.match(inv.invoiceNumber, /^PGT\/\d{4}\/\d{6}$/);
+      assert.ok(inv.invoiceNumber.length <= 16);
     });
 
     it('prevents duplicate invoice creation if payment ID has already been recorded', async () => {

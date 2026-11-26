@@ -108,7 +108,7 @@ before(async () => {
   ADMIN_FIN = { email: fe, token: chg.data.accessToken };
 });
 after(async () => {
-  for (const k of settingsTouched) await call('PUT', '/admin/settings', { token: ADMIN.token, body: { changes: { [k]: k === 'subscription.defaultTrialPlanCode' ? 'GROWTH' : null } } });
+  for (const k of settingsTouched) await call('PUT', '/admin/settings', { token: ADMIN.token, body: { changes: { [k]: null } } });
   for (const k of ['QR_ORDERING', 'KDS', 'MULTI_OUTLET']) await call('PATCH', `/admin/feature-flags/${k}`, { token: ADMIN.token, body: { enabled: true } });
   await db.query('UPDATE subscription_plans SET is_active = false WHERE code = ANY($1)', [plansMade]);
   await db.end();
@@ -158,7 +158,7 @@ describe('Table limits at every creation path', () => {
     await setSetting('subscription.defaultTrialPlanCode', plan.code);
     const body = (tag, extra = {}) => ({
       brandName: `Brand ${tag}`, ownerFullName: 'Owner', email: `o-${tag}-${run}@example.com`, mobileNumber: '9876500002', password: PW + 'z',
-      outletName: `Outlet ${tag}`, slug: `p1-${tag}-${run}`, upiVpa: 'a@upi', indoorTableCount: 8, outdoorTableCount: 2, menuPreset: 'blank', ...extra,
+      outletName: `Outlet ${tag}`, slug: `p1-${tag}-${run}`, upiVpa: 'aa@upi', indoorTableCount: 8, outdoorTableCount: 2, menuPreset: 'blank', ...extra,
     });
     const blocked = await call('POST', '/admin/provision', { token: ADMIN.token, body: body('pv1') });
     assert.equal(blocked.status, 403, JSON.stringify(blocked.body));

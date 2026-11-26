@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, HttpCode, NotFoundException, Param, ParseUUIDPipe, Patch, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 import { RolesGuard } from '../common/guards/roles.guard.js';
@@ -66,6 +66,25 @@ export class PlatformController {
     return withMessage(await this.events.list(Number(limit) || 30, unread === 'true'), 'Events');
   }
 
+  // ── Alert delivery: what was emailed, what failed, and a manual retry ──
+  @Get('alerts/health') @RequirePermission('dashboard.view')
+  async alertHealth() {
+    return withMessage(await this.events.health(), 'Alert delivery health');
+  }
+
+  @Get('alerts/deliveries') @RequirePermission('dashboard.view')
+  async alertDeliveries(@Query('status') status?: string, @Query('limit') limit?: string) {
+    const s = status && ['PENDING', 'SENDING', 'SENT', 'FAILED'].includes(status.toUpperCase()) ? status.toUpperCase() : undefined;
+    return withMessage(await this.events.deliveries(s, Number(limit) || 50), 'Alert deliveries');
+  }
+
+  @Post('alerts/deliveries/:id/retry') @HttpCode(200) @RequirePermission('support.manage')
+  async retryAlertDelivery(@Param('id') id: string) {
+    const r = await this.events.retryDelivery(id);
+    if (!r) throw new NotFoundException('Only a failed or waiting delivery can be retried');
+    return withMessage(r, 'Retry attempted');
+  }
+
   @Post('events/ack') @HttpCode(200) @RequirePermission('support.manage')
   async ackEvents(@Body() dto: AckDto, @Req() req: any) {
     await this.events.acknowledge(dto.id ?? null, req.user.name);
@@ -125,7 +144,15 @@ export class PlatformController {
   }
   @Get('subscription-plans') @RequirePermission('subscriptions.view')
   async plans() {
-    return withMessage({ plans: await this.subs.plansWithUsage(), features: await this.featureCatalog() }, 'Plans');
+    return withMessage({ plans: await this.subs.plansWithUsage(), features: await this.featureCatalog(), trial: await this.subs.trialConfiguration() }, 'Plans');
+  }
+  @Get('subscriptions/capacity') @RequirePermission('subscriptions.view')
+  async capacity() {
+    return withMessage(await this.subs.capacityWatch(), 'Restaurants close to or over their plan limits');
+  }
+  @Get('subscriptions/founding') @RequirePermission('subscriptions.view')
+  async founding() {
+    return withMessage(await this.subs.foundingGrants(), 'Founding 10 grants');
   }
   @Get('restaurants/:id/subscription-history') @RequirePermission('subscriptions.view')
   async subHistory(@Param('id', uuid) id: string) {

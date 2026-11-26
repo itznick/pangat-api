@@ -29,6 +29,86 @@ jobs:
       - name: Lint (warnings are reported, errors fail)
         run: npm run lint
 
+  live-suites:
+    name: Live suites on PostgreSQL (fresh database)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: build-and-test
+    # A brand-new Postgres service container for every run: nothing carries over, and no real database is ever reachable from here.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pangat_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/pangat_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Boot the API and run entitlement, platform, compliance, commercial, payment-integrity and operations suites
+        run: scripts/ci/run-live-suites.sh
+      - name: Schema drift (informational for now)
+        # Compares the schema this run just built with the committed reference. It will become blocking once production has been compared
+        # (see docs/SCHEMA_BASELINE_STRATEGY.md). A difference here means an entity changed without the reference being regenerated.
+        continue-on-error: true
+        run: |
+          scripts/schema/dump-schema.sh /tmp/ci_schema.sql
+          scripts/schema/compare-schema.sh /tmp/ci_schema.sql docs/schema/reference_schema_after_021.sql
+      - name: API log (on failure)
+        if: failure()
+        run: tail -200 api-ci.log || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: api-ci-log
+          path: api-ci.log
+          retention-days: 7
+
+  baseline-rebuild:
+    name: A database can be rebuilt from the baseline (production mode)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build-and-test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: scripts/ci/check-baseline.sh
+        env:
+          ADMIN_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+
   dependency-audit:
     name: Dependency vulnerabilities (production)
     runs-on: ubuntu-latest

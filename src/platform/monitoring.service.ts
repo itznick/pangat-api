@@ -1,4 +1,5 @@
 import { Injectable, Logger, NestMiddleware, OnModuleInit } from '@nestjs/common';
+import { redactText } from '../common/log-redaction.js';
 import { DataSource } from 'typeorm';
 import * as os from 'os';
 import { EventsGateway } from '../events/events.gateway.js';
@@ -71,7 +72,7 @@ let sink: Sink | null = null;
 export const reportServerError: Sink = (e) => sink?.({ requestId: currentRequest()?.requestId ?? null, ...e });
 
 export function redact(text: string, max: number): string {
-  return String(text || '')
+  return redactText(text)
     .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[email]')
     .replace(/Bearer\s+[\w.-]+/gi, 'Bearer [token]')
     .replace(/\b\d{10,}\b/g, '[number]')

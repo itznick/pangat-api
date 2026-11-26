@@ -366,6 +366,8 @@ describe('Order lifecycle, money and ERP links', () => {
   it('full dine-in journey: order -> table busy -> KDS advance -> pay -> complete -> table freed; events reach the right rooms', async () => {
     const [it0] = await firstItems(A.slug);
     const table = (await call('GET', `/tables?restaurantSlug=${A.slug}`, { token: A.token })).data.find((t) => t.status === 'VACANT');
+    // UPI is offered to guests only after the OWNER confirms the outlet's own UPI ID (pilot safety rule)
+    assert.equal((await call('POST', `/restaurants/${A.outlet.id}/upi/confirm`, { token: A.token, body: { vpa: 'shop@upi' } })).status, 201);
     const r = await placeOrder(A.slug, [it0], { orderType: 'DINE_IN', tableNumber: table.tableNumber, customerName: undefined, paymentMethod: 'UPI_INSTANT' });
     assert.equal(r.status, 201, JSON.stringify(r.body));
     const id = r.data.id;

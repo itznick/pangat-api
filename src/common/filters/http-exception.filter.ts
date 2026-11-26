@@ -14,6 +14,7 @@ import {
 import { Request, Response } from 'express';
 import { reportServerError } from '../../platform/monitoring.service.js';
 import { currentRequest } from '../request-context.js';
+import { redactText, redactUrl } from '../log-redaction.js';
 
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
@@ -38,14 +39,15 @@ export class HttpExceptionFilter implements ExceptionFilter {
 
     // Unexpected errors (database, runtime) are logged here and never echoed to the client
     if (!(exception instanceof HttpException) && !clientParserError) {
+      // the URL and the message can carry credentials (tracking tokens, reset codes): mask them before they reach the process log
       this.logger.error(
-        `${req.method} ${req.url} -> ${(exception as Error)?.message}`,
-        (exception as Error)?.stack,
+        `${req.method} ${redactUrl(req.url)} -> ${redactText((exception as Error)?.message)}`,
+        redactText((exception as Error)?.stack),
       );
     }
 
     if (status >= 500) {
-      reportServerError({ method: req.method, url: req.originalUrl || req.url, status, error: exception as Error, userId: (req as any).user?.id, orgId: (req as any).user?.organizationId });
+      reportServerError({ method: req.method, url: redactUrl(req.originalUrl || req.url), status, error: exception as Error, userId: (req as any).user?.id, orgId: (req as any).user?.organizationId });
     }
 
     const messages: string[] =
@@ -83,7 +85,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
       ...(exRes && typeof exRes === 'object' && (exRes as any).details && typeof (exRes as any).details === 'object' ? { details: (exRes as any).details } : {}),
       // Quote this to support: it finds the exact request in the error log and audit log
       requestId:  currentRequest()?.requestId,
-      path:       req.url,
+      path:       redactUrl(req.url),
       timestamp:  new Date().toISOString(),
     });
   }

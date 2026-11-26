@@ -3,6 +3,7 @@ import { issueBillNumber, issueCreditNote } from '../billing/document-numbers.js
 import { PRIVACY_POLICY_VERSION } from '../platform/compliance.js';
 import { assertPlatformMerchantAccess } from '../common/guards/platform-merchant-access.js';
 import {
+  ConflictException,
   Injectable,
   NotFoundException,
   BadRequestException,
@@ -11,9 +12,9 @@ import {
   HttpStatus,
   Optional,
 } from '@nestjs/common';
-import { getOrderingStatus, resolveOperations } from '../restaurants/operations.js';
+import { getOrderingStatus, resolveOperations, upiOffered } from '../restaurants/operations.js';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, EntityManager } from 'typeorm';
 import * as crypto from 'crypto';
 import { getSetting } from '../platform/settings.service.js';
 import { decideFeature, getOrgAccess } from '../subscriptions/subscription-access.js';
@@ -67,14 +68,47 @@ export class OrdersService {
     private readonly inventoryService?: InventoryService,
   ) {}
 
+  /**
+   * What the guest asked for, reduced to what matters and hashed: the same idempotency key with the same request is a retry
+   * (the original order is returned); the same key with a DIFFERENT request is a conflict. Prices and names sent by the client
+   * are ignored (the server recomputes them), so they never affect the hash.
+   */
+  static requestHashOf(dto: CreateOrderDto): string {
+    const norm = {
+      r: String(dto.restaurantSlug || '').trim().toLowerCase(),
+      t: dto.orderType || OrderType.DINE_IN,
+      tb: String(dto.tableNumber || '').trim().toUpperCase(),
+      n: String(dto.customerName || '').trim(),
+      p: String(dto.customerPhone || '').trim(),
+      a: String(dto.deliveryAddress || '').trim(),
+      i: String(dto.deliveryInstructions || '').trim(),
+      pm: dto.paymentMethod || null,
+      items: (dto.items || []).map((i) => ({
+        m: i.menuItemId,
+        q: i.quantity,
+        mods: (i.selectedModifiers || []).map((x) => String(x.name || '').trim().toLowerCase()).sort(),
+        n: String(i.notes || '').trim(),
+      })),
+    };
+    return crypto.createHash('sha256').update(JSON.stringify(norm)).digest('hex');
+  }
+
+  private async replayOrConflict(already: Order, dto: CreateOrderDto, hash: string): Promise<Order> {
+    const outlet = await this.restaurantRepo.findOne({ where: { id: already.restaurantId } });
+    const sameOutlet = Boolean(outlet && outlet.slug === dto.restaurantSlug.trim().toLowerCase());
+    const sameRequest = !already.requestHash || already.requestHash === hash; // orders from before request hashing have none
+    if (sameOutlet && sameRequest) return already;
+    throw new ConflictException({
+      message: 'This idempotency key was already used for a different request. Start a new order to send different items.',
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    });
+  }
+
   async create(dto: CreateOrderDto, idempotencyKey: string): Promise<Order> {
+    const requestHash = OrdersService.requestHashOf(dto);
     // Retried request (flaky network, double tap): hand back the order that was already created
     const already = await this.orderRepo.findOne({ where: { idempotencyKey }, relations: { items: true } });
-    if (already) {
-      const sameOutlet = await this.restaurantRepo.findOne({ where: { id: already.restaurantId } });
-      if (sameOutlet && sameOutlet.slug === dto.restaurantSlug.trim().toLowerCase()) return already;
-      throw new BadRequestException('This idempotency key was already used for a different request');
-    }
+    if (already) return this.replayOrConflict(already, dto, requestHash);
     const cleanSlug = dto.restaurantSlug.trim().toLowerCase();
     const restaurant = await this.restaurantRepo.findOne({
       where: [{ slug: cleanSlug }, { slug: dto.restaurantSlug.trim() }],
@@ -125,6 +159,10 @@ export class OrdersService {
       (orderType === OrderType.DELIVERY && !ops.orderTypes.delivery)
     ) {
       throw new BadRequestException('This order type is not available at this outlet right now');
+    }
+    // UPI needs the outlet's setting ON *and* an owner-confirmed UPI ID: without either, there is nowhere safe to send the guest's money
+    if (dto.paymentMethod === PaymentMethod.UPI_INSTANT && !upiOffered(restaurant)) {
+      throw new BadRequestException('UPI payment is not available at this outlet right now. Please choose another payment method.');
     }
     if (
       (dto.paymentMethod === PaymentMethod.UPI_INSTANT && !ops.payments.upi) ||
@@ -349,6 +387,7 @@ export class OrdersService {
       totalAmount,
       refundAmount: 0.00,
       idempotencyKey,
+      requestHash,
       items: orderItems,
     });
 
@@ -368,7 +407,7 @@ export class OrdersService {
       // A concurrent duplicate of the same request lost the race on the UNIQUE key: return the winner
       if ((err as any)?.code === '23505' && String((err as any)?.detail || '').includes('idempotency_key')) {
         const winner = await this.orderRepo.findOne({ where: { idempotencyKey }, relations: { items: true } });
-        if (winner) return winner;
+        if (winner) return this.replayOrConflict(winner, dto, requestHash);
       }
       // Clean up order so it is not left in a misleading RECEIVED state upon inventory failure
       if (savedOrder && this.orderRepo.delete) {
@@ -489,7 +528,13 @@ export class OrdersService {
     if (user && user.role === StaffRole.CHEF && !user.isPlatformAdmin) {
       throw new ForbiddenException('Bills are not available to the kitchen role');
     }
-    const order: any = await this.findOrderForCaller(idOrToken, token, user);
+    const authorised: any = await this.findOrderForCaller(idOrToken, token, user);
+    // A guest with a tracking link is authorised against a restricted projection that has no outlet or tax-document fields. The bill needs the
+    // full record, so load it (authorisation has already passed: this is the same order the caller proved they may see).
+    const order: any = authorised.restaurantId
+      ? authorised
+      : await this.orderRepo.findOne({ where: { id: authorised.id }, relations: { items: true, restaurant: true } });
+    if (!order) throw new NotFoundException('Order not found');
     const r = order.restaurant ?? (await this.restaurantRepo.findOne({ where: { id: order.restaurantId } }));
     const money = (n: unknown) => Math.round(Number(n || 0) * 100) / 100;
     const taxable = money(order.subtotal);
@@ -577,11 +622,18 @@ export class OrdersService {
     }
 
     // Restricted diner-facing projection
-    return this.getPublicTrackingProjection(order);
+    return this.getPublicTrackingProjection(order, order.restaurant);
   }
 
-  getPublicTrackingProjection(order: Order) {
+  getPublicTrackingProjection(order: Order, outlet?: Restaurant | null) {
     return {
+      /**
+       * Where a guest may pay by UPI: THIS outlet's own owner-confirmed ID, or null. There is no default and no fallback, so a screen
+       * that gets null must show no UPI payment option at all. The guest paying does NOT make the order paid: staff confirm receipt.
+       */
+      payee: outlet && upiOffered(outlet) && order.paymentStatus === PaymentStatus.PENDING && order.orderStatus !== OrderStatus.CANCELLED
+        ? { vpa: outlet.upiVpa, name: outlet.name }
+        : null,
       id: order.id,
       trackingToken: order.trackingToken,
       orderType: order.orderType,
@@ -848,29 +900,44 @@ export class OrdersService {
       }
     }
 
-    const previousStatus = order.orderStatus;
-    const previousPaymentStatus = order.paymentStatus;
     const fullReason = dto.notes ? `${dto.reason.trim()} - ${dto.notes.trim()}` : dto.reason.trim();
+    let previousStatus = order.orderStatus;
 
-    order.orderStatus = OrderStatus.CANCELLED;
-    order.cancellationReason = fullReason;
-    order.cancelledAt = new Date();
-    order.cancelledByStaffId = staffUser?.id || null;
-
-    // Rule 2: Paid order cancellation creates a refund request (REFUND_PENDING)
-    if (order.paymentStatus === PaymentStatus.PAID) {
-      order.paymentStatus = PaymentStatus.REFUND_PENDING;
-    } else if (order.paymentStatus === PaymentStatus.PENDING) {
-      order.paymentStatus = PaymentStatus.FAILED;
-    }
-
-    // The order change and its audit records are ONE transaction: a cancellation can never exist without its record.
+    // The order change and its audit records are ONE transaction decided on the LOCKED row: a cancellation racing a payment
+    // (or a second cancel) sees the other's result, and can never exist without its record.
     const saved = await this.orderRepo.manager.transaction(async (em) => {
-      const persisted = await em.getRepository(Order).save(order);
+      const locked = await this.lockOrder(em, order.id);
+      if (locked.orderStatus === OrderStatus.COMPLETED) {
+        throw new BadRequestException('COMPLETED orders cannot be cancelled. Use the refund workflow for post-service corrections.');
+      }
+      if (locked.orderStatus === OrderStatus.CANCELLED) {
+        throw new BadRequestException('Order is already cancelled.');
+      }
+      // Rule 4: Cancelling in PREPARING or READY requires manager/owner authorization
+      if (locked.orderStatus === OrderStatus.PREPARING || locked.orderStatus === OrderStatus.READY) {
+        if (staffUser?.role && ![StaffRole.STORE_MANAGER, StaffRole.SUPER_OWNER, StaffRole.PLATFORM_SUPER_ADMIN].includes(staffUser.role)) {
+          throw new ForbiddenException('Cancelling an order in PREPARING or READY stage requires manager or owner authorization.');
+        }
+      }
+      previousStatus = locked.orderStatus;
+      const previousPaymentStatus = locked.paymentStatus;
+
+      locked.orderStatus = OrderStatus.CANCELLED;
+      locked.cancellationReason = fullReason;
+      locked.cancelledAt = new Date();
+      locked.cancelledByStaffId = staffUser?.id || null;
+      // Rule 2: Paid order cancellation creates a refund request (REFUND_PENDING)
+      if (locked.paymentStatus === PaymentStatus.PAID) {
+        locked.paymentStatus = PaymentStatus.REFUND_PENDING;
+      } else if (locked.paymentStatus === PaymentStatus.PENDING) {
+        locked.paymentStatus = PaymentStatus.FAILED;
+      }
+
+      const persisted = await em.getRepository(Order).save(locked);
       await this.auditService.record({
-        restaurantId: order.restaurantId,
+        restaurantId: locked.restaurantId,
         entityType: 'ORDER',
-        entityId: order.id,
+        entityId: locked.id,
         action: AuditAction.ORDER_CANCELLED,
         staffId: staffUser?.id || null,
         staffName: staffUser?.name || null,
@@ -887,9 +954,9 @@ export class OrdersService {
       }, em);
       if (previousPaymentStatus === PaymentStatus.PAID) {
         await this.auditService.record({
-          restaurantId: order.restaurantId,
+          restaurantId: locked.restaurantId,
           entityType: 'ORDER',
-          entityId: order.id,
+          entityId: locked.id,
           action: AuditAction.ORDER_REFUND_REQUESTED,
           staffId: staffUser?.id || null,
           staffName: staffUser?.name || null,
@@ -1105,80 +1172,106 @@ export class OrdersService {
     if (authorizedRestaurantId && order.restaurantId !== authorizedRestaurantId) {
       throw new ForbiddenException('Access denied: Order does not belong to authorized restaurant');
     }
+    const requestHash = crypto
+      .createHash('sha256')
+      .update(JSON.stringify({ m: dto.refundMethod, a: dto.amount ?? null, r: String(dto.reason || '').trim(), p: String(dto.providerReference || '').trim() }))
+      .digest('hex');
 
-    // Idempotency check: verify if this idempotency key was already processed
-    const existingAudit = await this.auditService.findByEntity('ORDER', order.id, order.restaurantId);
-    const duplicateRefund = existingAudit.find(
-      (a) => a.action === AuditAction.ORDER_REFUND_SETTLED && a.metadata?.idempotencyKey === dto.idempotencyKey,
-    );
-    if (duplicateRefund) {
-      return order; // Idempotent success without duplicate deductions
-    }
+    // ONE transaction: lock the order, claim the idempotency key in the database, re-check the refundable amount on the locked row,
+    // issue the credit note, update the order and write the audit record. Two simultaneous requests are serialised by the lock, and the
+    // UNIQUE (order_id, idempotency_key) constraint makes "one refund per key" a database fact. A rolled-back request leaves no credit note
+    // number, no refund row and no audit record behind.
+    return this.orderRepo.manager.transaction(async (em) => {
+      const locked = await this.lockOrder(em, order.id);
 
-    if (order.paymentStatus === PaymentStatus.REFUNDED) {
-      throw new BadRequestException('Order is already fully refunded.');
-    }
-    if (order.paymentStatus !== PaymentStatus.REFUND_PENDING && order.paymentStatus !== PaymentStatus.PARTIALLY_REFUNDED) {
-      throw new BadRequestException(
-        `Cannot process refund for order with payment status ${order.paymentStatus}. Order must be in REFUND_PENDING or PARTIALLY_REFUNDED.`,
+      // Idempotent replay: the key was already used on this order
+      const prior = (await em.query('SELECT request_hash FROM order_refunds WHERE order_id = $1 AND idempotency_key = $2', [locked.id, dto.idempotencyKey]))[0];
+      if (prior) {
+        if (prior.request_hash !== requestHash) {
+          throw new ConflictException({
+            message: 'This refund key was already used for a different refund (amount, method or reason). Use a new request to refund again.',
+            code: 'IDEMPOTENCY_KEY_REUSED',
+          });
+        }
+        return locked; // same key, same refund: the original result, nothing new happens
+      }
+
+      if (locked.paymentStatus === PaymentStatus.REFUNDED) {
+        throw new BadRequestException('Order is already fully refunded.');
+      }
+      if (locked.paymentStatus !== PaymentStatus.REFUND_PENDING && locked.paymentStatus !== PaymentStatus.PARTIALLY_REFUNDED) {
+        throw new BadRequestException(
+          `Cannot process refund for order with payment status ${locked.paymentStatus}. Order must be in REFUND_PENDING or PARTIALLY_REFUNDED.`,
+        );
+      }
+
+      const currentRefunded = Number(locked.refundAmount || 0);
+      const maxRefundable = Math.max(0, Math.round((Number(locked.totalAmount) - currentRefunded) * 100) / 100);
+      const refundAmount = dto.amount !== undefined ? Math.round(Number(dto.amount) * 100) / 100 : maxRefundable;
+      if (refundAmount <= 0) {
+        throw new BadRequestException('Refund amount must be greater than zero.');
+      }
+      if (refundAmount > maxRefundable) {
+        throw new BadRequestException(
+          `Requested refund amount ₹${refundAmount.toFixed(2)} exceeds maximum refundable amount of ₹${maxRefundable.toFixed(2)}.`,
+        );
+      }
+
+      // Claim the key (a concurrent duplicate cannot get past the lock above, and the constraint is the second line of defence)
+      const claimed = await em.query(
+        `INSERT INTO order_refunds (order_id, restaurant_id, idempotency_key, request_hash, method, amount, reason, provider_reference, requested_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (order_id, idempotency_key) DO NOTHING RETURNING id`,
+        [locked.id, locked.restaurantId, dto.idempotencyKey, requestHash, dto.refundMethod, refundAmount, dto.reason, dto.providerReference || null, staffUser?.id || null],
       );
-    }
+      if (!claimed.length) return locked; // lost a race that the lock should have prevented: the winner's result stands
 
-    const currentRefunded = Number(order.refundAmount || 0);
-    const maxRefundable = Math.max(0, Number(order.totalAmount) - currentRefunded);
-    const refundAmount = dto.amount !== undefined ? Number(dto.amount) : maxRefundable;
+      const nextTotalRefunded = Math.round((currentRefunded + refundAmount) * 100) / 100;
+      locked.refundAmount = nextTotalRefunded;
+      locked.refundReason = dto.reason;
+      locked.refundedAt = new Date();
+      locked.refundedByStaffId = staffUser?.id || null;
+      locked.paymentStatus = nextTotalRefunded >= Number(locked.totalAmount) ? PaymentStatus.REFUNDED : PaymentStatus.PARTIALLY_REFUNDED;
 
-    if (refundAmount <= 0) {
-      throw new BadRequestException('Refund amount must be greater than zero.');
-    }
-    if (refundAmount > maxRefundable) {
-      throw new BadRequestException(
-        `Requested refund amount ₹${refundAmount.toFixed(2)} exceeds maximum refundable amount of ₹${maxRefundable.toFixed(2)}.`,
-      );
-    }
-
-    const nextTotalRefunded = currentRefunded + refundAmount;
-    order.refundAmount = nextTotalRefunded;
-    order.refundReason = dto.reason;
-    order.refundedAt = new Date();
-    order.refundedByStaffId = staffUser?.id || null;
-
-    if (nextTotalRefunded >= Number(order.totalAmount)) {
-      order.paymentStatus = PaymentStatus.REFUNDED;
-    } else {
-      order.paymentStatus = PaymentStatus.PARTIALLY_REFUNDED;
-    }
-
-    // Refund state and its audit record are ONE transaction (money must never move without a record)
-    const saved = await this.orderRepo.manager.transaction(async (em) => {
       // Money going back needs a credit note that refers to the original bill (CGST Rule 53), numbered in its own series
-      const creditNoteNumber = await issueCreditNote(em, order, refundAmount, dto.reason, staffUser);
-      const persisted = await em.getRepository(Order).save(order);
+      const creditNoteNumber = await issueCreditNote(em, locked, refundAmount, dto.reason, staffUser);
+      await em.query('UPDATE order_refunds SET credit_note_number = $1 WHERE id = $2', [creditNoteNumber, claimed[0].id]);
+      const persisted = await em.getRepository(Order).save(locked);
       await this.auditService.record({
-        restaurantId: order.restaurantId,
+        restaurantId: locked.restaurantId,
         entityType: 'ORDER',
-        entityId: order.id,
+        entityId: locked.id,
         action: AuditAction.ORDER_REFUND_SETTLED,
         staffId: staffUser?.id || null,
         staffName: staffUser?.name || null,
         staffRole: staffUser?.role || null,
         staffEmail: staffUser?.email || null,
-      reason: dto.reason,
-      metadata: {
-        idempotencyKey: dto.idempotencyKey,
-        creditNoteNumber,
-        billNumber: order.billNumber,
-        refundMethod: dto.refundMethod,
-        refundAmount,
-        totalRefunded: nextTotalRefunded,
-        providerReference: dto.providerReference || null,
-        finalPaymentStatus: persisted.paymentStatus,
-      },
+        reason: dto.reason,
+        metadata: {
+          idempotencyKey: dto.idempotencyKey,
+          creditNoteNumber,
+          billNumber: locked.billNumber,
+          refundMethod: dto.refundMethod,
+          refundAmount,
+          totalRefunded: nextTotalRefunded,
+          providerReference: dto.providerReference || null,
+          finalPaymentStatus: persisted.paymentStatus,
+        },
       }, em);
       return persisted;
     });
+  }
 
-    return saved;
+  /**
+   * Take a row lock on the order for the rest of the transaction and return its CURRENT committed state (with items and outlet).
+   * Every money or lifecycle decision is made on this row, after the lock, so two simultaneous requests (two cashiers, a double tap,
+   * a retry) are serialised and the second one sees what the first did. FOR NO KEY UPDATE is the same mode Phase 1 uses elsewhere:
+   * it does not block foreign-key checks from related inserts. (TypeORM's version column does not reject a stale save by itself.)
+   */
+  private async lockOrder(em: EntityManager, id: string): Promise<Order> {
+    await em.query('SELECT 1 FROM orders WHERE id = $1 FOR NO KEY UPDATE', [id]);
+    const locked = await em.getRepository(Order).findOne({ where: { id }, relations: { items: true, restaurant: true } });
+    if (!locked) throw new NotFoundException(`Order '${id}' not found`);
+    return locked;
   }
 
   async markPaid(id: string, authorizedRestaurantId?: string, actor?: any): Promise<Order> {
@@ -1198,47 +1291,53 @@ export class OrdersService {
         throw new ForbiddenException('Settling a bill is limited to the cashier, manager or owner at this outlet.');
       }
     }
-    // Idempotent: a second tap (or a retry) must not move the settlement time or re-emit events
-    if (order.paymentStatus === PaymentStatus.PAID) {
-      return order;
-    }
-    if (
-      order.paymentStatus === PaymentStatus.REFUNDED ||
-      order.paymentStatus === PaymentStatus.PARTIALLY_REFUNDED ||
-      order.paymentStatus === PaymentStatus.REFUND_PENDING
-    ) {
-      throw new BadRequestException('This order has already been refunded and cannot be marked as paid.');
-    }
-
+    // Everything below is decided on the order row AFTER taking its lock (see lockOrder): payment state, bill number and audit are one atomic unit
+    let replay = false;
     let restaurantSlug: string | undefined = order.restaurant?.slug;
-    if (!restaurantSlug && order.restaurantId) {
-      const rest = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });
-      restaurantSlug = rest?.slug;
-    }
-
-    const previous = order.paymentStatus;
-    order.paymentStatus = PaymentStatus.PAID;
-    order.settledAt = new Date();
-    // Payment and its audit record are ONE transaction; a failed audit write now fails the request instead of being swallowed
     const saved = await this.orderRepo.manager.transaction(async (em) => {
+      const locked = await this.lockOrder(em, order.id);
+      restaurantSlug = locked.restaurant?.slug ?? restaurantSlug;
+      if (locked.orderStatus === OrderStatus.CANCELLED) {
+        throw new BadRequestException('Cannot mark a CANCELLED order as paid.');
+      }
+      // Idempotent: a second tap, a retry or another cashier arriving second gets the first result: no new bill, no new event
+      if (locked.paymentStatus === PaymentStatus.PAID) {
+        replay = true;
+        return locked;
+      }
+      if (
+        locked.paymentStatus === PaymentStatus.REFUNDED ||
+        locked.paymentStatus === PaymentStatus.PARTIALLY_REFUNDED ||
+        locked.paymentStatus === PaymentStatus.REFUND_PENDING
+      ) {
+        throw new BadRequestException('This order has already been refunded and cannot be marked as paid.');
+      }
+      const previous = locked.paymentStatus;
+      locked.paymentStatus = PaymentStatus.PAID;
+      locked.settledAt = new Date();
       // The legal bill number is issued with the payment, in the same transaction (see billing/document-numbers.ts)
-      await issueBillNumber(em, order, actor, order.settledAt ?? new Date());
-      const persisted = await em.getRepository(Order).save(order);
+      await issueBillNumber(em, locked, actor, locked.settledAt);
+      const persisted = await em.getRepository(Order).save(locked);
       await this.auditService.record({
-        restaurantId: order.restaurantId,
+        restaurantId: locked.restaurantId,
         entityType: 'ORDER',
-        entityId: order.id,
+        entityId: locked.id,
         action: 'PAYMENT_MARKED_PAID',
         staffId: actor?.id,
         staffName: actor?.name,
         staffRole: actor?.role,
         staffEmail: actor?.email,
-        metadata: { from: previous, method: order.paymentMethod, amount: order.totalAmount, billNumber: order.billNumber },
+        metadata: { from: previous, method: locked.paymentMethod, amount: locked.totalAmount, billNumber: locked.billNumber },
       }, em);
       return persisted;
     });
+    if (replay) return saved;
 
-    await this.syncTableStatus(order, restaurantSlug);
+    if (!restaurantSlug && order.restaurantId) {
+      const rest = await this.restaurantRepo.findOne({ where: { id: order.restaurantId } });
+      restaurantSlug = rest?.slug;
+    }
+    await this.syncTableStatus(saved, restaurantSlug);
 
     this.eventsGateway.emitOrderPaid(id, { ...saved, restaurant: { slug: restaurantSlug } }, restaurantSlug);
 

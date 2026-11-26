@@ -11,6 +11,7 @@ function createMockOrdersService(initialOrder, options = {}) {
   let currentOrder = initialOrder ? { ...initialOrder } : null;
   const auditLogs = [];
   const emittedEvents = [];
+  const refundRows = [];
 
   const mockOrderRepo = {
     findOne: async ({ where }) => {
@@ -98,8 +99,24 @@ function createMockOrdersService(initialOrder, options = {}) {
         },
         delete: async () => {},
         // statutory numbering: outlet code + next serial
-        query: async (sql) => (/invoice_prefix FROM restaurants/.test(sql) ? [{ invoice_prefix: 'T001' }] : /RETURNING last_value/.test(sql) ? [{ last_value: 1 }] : []),
+        // Behaves like the database for the statements the money paths issue: row lock (no-op), numbering, and the refund-key table
+        query: async (sql, params = []) => {
+          if (/invoice_prefix FROM restaurants/.test(sql)) return [{ invoice_prefix: 'T001' }];
+          if (/RETURNING last_value/.test(sql)) return [{ last_value: 1 }];
+          if (/SELECT request_hash FROM order_refunds/.test(sql)) {
+            const hit = refundRows.find((r) => r.order_id === params[0] && r.key === params[1]);
+            return hit ? [{ request_hash: hit.hash }] : [];
+          }
+          if (/INSERT INTO order_refunds/.test(sql)) {
+            if (refundRows.some((r) => r.order_id === params[0] && r.key === params[2])) return [];
+            refundRows.push({ id: 'refund-' + refundRows.length, order_id: params[0], key: params[2], hash: params[3] });
+            return [{ id: refundRows[refundRows.length - 1].id }];
+          }
+          return [];
+        },
         getRepository: () => ({
+          // the locked re-read: the current committed order
+          findOne: async ({ where }) => (currentOrder && currentOrder.id === where.id ? currentOrder : null),
           save: async (val) => {
             currentOrder = { ...val };
             return currentOrder;

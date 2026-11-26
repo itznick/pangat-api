@@ -183,7 +183,7 @@ export class AdminService {
         phone: dto.mobileNumber.trim(),
         email: dto.email.trim().toLowerCase(),
         organizationId: savedOrg.id,
-        upiVpa: dto.upiVpa.trim(),
+        upiVpa: (dto.upiVpa ?? '').trim(),
         gstin: dto.gstin?.trim() || null,
         gstPercentage: dto.gstPercentage ?? 5,
         isVegOnly: false,

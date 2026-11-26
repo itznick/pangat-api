@@ -665,7 +665,7 @@ export class AuthService {
         phone: dto.mobileNumber || null,
         email: dto.email || null,
         organizationId: savedOrg.id,
-        upiVpa: dto.upiVpa,
+        upiVpa: dto.upiVpa ?? '',
         gstin: dto.gstin || null,
         gstPercentage: dto.gstPercentage ?? 5,
         isVegOnly: false,

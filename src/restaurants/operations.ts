@@ -122,3 +122,17 @@ export function getOrderingStatus(raw: Partial<OutletOperations> | null | undefi
   }
   return { accepting: true, reason: null, message: null, today };
 }
+
+
+/** Shape of a UPI ID (name@handle). This proves FORMAT only, never that the ID exists, belongs to the restaurant or can receive money. */
+export const UPI_VPA_REGEX = /^[a-zA-Z0-9._-]{2,64}@[a-zA-Z0-9]{2,32}$/;
+export const isValidVpaShape = (v: unknown): boolean => typeof v === 'string' && UPI_VPA_REGEX.test(v.trim());
+
+/**
+ * Is guest UPI payment offered at this outlet RIGHT NOW? All of: the outlet's own payment setting allows UPI, the stored ID has a
+ * valid shape, and the OWNER has explicitly confirmed that ID belongs to the business (confirmation is cleared whenever the ID changes).
+ * There is no fallback destination: when this is false no UPI payment screen, QR or link is shown and UPI orders are refused.
+ */
+export function upiOffered(r: { operations?: unknown; upiVpa?: string | null; upiVpaConfirmedAt?: Date | string | null }): boolean {
+  return Boolean(resolveOperations(r.operations as never).payments.upi && isValidVpaShape(r.upiVpa) && r.upiVpaConfirmedAt);
+}

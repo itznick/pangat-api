@@ -745,6 +745,11 @@ export class OrdersService {
       );
     }
 
+    // An order is archived (COMPLETED) only once its bill is settled: guest paid and staff confirmed, or staff settled it themselves
+    if (status === OrderStatus.COMPLETED && order.paymentStatus === PaymentStatus.PENDING) {
+      throw new BadRequestException('The bill is still unpaid. Settle the payment before archiving this order.');
+    }
+
     // Role-based transition enforcement
     if (staffUser?.role) {
       if (status === OrderStatus.PREPARING || status === OrderStatus.READY) {
